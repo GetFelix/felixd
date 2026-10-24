@@ -107,10 +107,46 @@ The hard parts, besides determinism at the effect boundary:
   every secret that passed through it, so records need encryption, and
   history needs redaction.
 
-Plan 9 is the closest ancestor: one protocol for everything, per-process
-namespaces, and a file system you could browse as it was on any past day. How
-much of it to borrow is discussed in
+### Lessons from Plan 9
+
+Plan 9 is the closest ancestor, and it's a guide both to what to do and to
+what to avoid. It's discussed in
 [discussion #38](https://github.com/GetFelix/felixd/discussions/38).
+
+What to do, as Plan 9 did:
+
+- **One small protocol for everything.** Every resource is reached the same
+  way. For us that's Felix's wire protocol, and possibly 9P at the edge so
+  Linux tools can browse the namespace.
+- **Names, not addresses.** A program names its inputs and outputs and doesn't
+  know which machine serves them. That's what lets a workload move.
+- **Per-program views of the namespace.** Isolation comes from what a program
+  can see, backed by grants on its token.
+- **History you can browse.** Plan 9's dump file system showed each past day.
+  The log shows any past offset.
+
+What not to do, where Plan 9 went wrong:
+
+- **Don't ask people to leave everything behind.** Plan 9 ran little existing
+  software and lost to Unix being good enough. felixd runs beside Linux, and
+  native programs have a place on the path.
+- **Don't be distributed without being fault tolerant.** A dead Plan 9 file
+  server hung every mount of it. Here, a workload's state lives in the log,
+  not on its server.
+- **Don't let interfaces become untyped strings.** Plan 9's `ctl` files each
+  invented their own text commands. Records here have schemas and negotiated
+  versions.
+- **Don't hide latency behind a familiar interface.** 9P's request-reply
+  style suffered over slow links. Every recorded effect costs a round trip
+  through the log, and that cost gets measured from the start.
+- **Don't make a program's view of the world hard to see.** Per-process
+  namespaces made "which `/net` is this?" a debugging question. A workload's
+  bindings are on the record and shown by `ps` and replay.
+- **Don't keep everything forever by accident.** Venti never forgot anything.
+  Retention, compaction and redaction are designed in.
+- **Don't make the system all-or-nothing.** Plan 9's ideas that survived (UTF-8,
+  `/proc`, 9P in Linux, QEMU and WSL) could be adopted one at a time. Each part
+  of felixd should be useful on its own.
 
 ## What felixd has to demonstrate
 
