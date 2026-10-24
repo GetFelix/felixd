@@ -49,6 +49,69 @@ Kubernetes.
 
 Each step is a separate design. The rest of this document covers step 1.
 
+### The long-term picture
+
+This is where the path leads. It isn't a commitment, but it's the test
+each step should pass: does it move toward this?
+
+Every machine runs an ordinary host kernel and felixd. A few machines also run
+Felix, which is the one layer the system doesn't schedule. Everything else is
+a program on the log, including the scheduler, the name service and the shell's
+history.
+
+| OS concept | In an OS built on Felix |
+|---|---|
+| Process | A workload: a module plus its input streams. Its state is a fold over its inputs, so the record is the process. |
+| PID | A workload id, independent of the machine running it |
+| Address space | A local cache of the fold, rebuilt anywhere from a snapshot and the input |
+| Pipes and IPC | Streams. `a \| b` makes b's input a's output, durable and across machines. |
+| Signals | Records on a control stream, ordered with the workload's other input |
+| Files | Streams are append-only files. A mutable file is a workload folding edits into contents, so old versions come for free. |
+| Namespace | A tree of stream and cache names, with per-user views as in Plan 9 |
+| Scheduler | A workload that reads heartbeats and demand and writes assignments, so scheduling decisions are recorded and replayable |
+| System calls | Requests on a stream, carried out by a host service whose response comes back as input. Replay reuses the recorded response. |
+| Time and randomness | Inputs like any other |
+| Users and permissions | Felix tenants and grants. A program's token is its capability. |
+| Boot | Reading the desired state and claiming leases. A cold start of the cluster is a replay. |
+| Logs, `ps`, debugging | The log already is the history. Debugging is replay. |
+| Upgrades | Run the new module over recorded inputs, compare, then switch at an offset |
+
+Programs come in three kinds, matching steps 1, 4 and 5 of the path:
+
+1. **Deterministic** (pure Wasm): full replay, migration and time travel.
+2. **Effectful:** replayable, because every effect is recorded, at the cost of
+   a round trip through the log per effect.
+3. **Native** (existing binaries, databases, GPUs): not replayable.
+   Checkpoint-and-restart, with their I/O recorded.
+
+A session might look like this. The shell is a later step and the names are
+placeholders:
+
+```
+$ fx run stats.wasm --in /sensors/temp --as /proc/temp-stats
+$ fx at "2026-10-24 14:02" /proc/temp-stats inspect
+$ fx why /proc/temp-alerts@9412      # which inputs produced this record
+```
+
+The hard parts, besides determinism at the effect boundary:
+
+- **Latency.** Every effect and IPC hop goes through a replicated log, so the
+  cost is milliseconds, not microseconds. This is an OS for services, data
+  processing, fleets and simulations, not desktops or tight loops.
+- **History grows.** Snapshots, compaction and a policy for how far back time
+  travel reaches are part of the design, not an afterthought.
+- **The log as a bottleneck.** Shard along the namespace so unrelated subtrees
+  never coordinate. Programs that span shards need a recorded merge order
+  (#25).
+- **Secrets on the record.** A replicated history of everything includes
+  every secret that passed through it, so records need encryption, and
+  history needs redaction.
+
+Plan 9 is the closest ancestor: one protocol for everything, per-process
+namespaces, and a file system you could browse as it was on any past day. How
+much of it to borrow is discussed in
+[discussion #38](https://github.com/GetFelix/felixd/discussions/38).
+
 ## What felixd has to demonstrate
 
 - **Failover:** kill a node mid-run, and each of its workloads continues on
