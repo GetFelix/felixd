@@ -30,6 +30,36 @@ log, replication, conditional writes and per-client resume that the idea
 needs. felixd is the first, deliberately small step: a node agent that proves
 the idea on real machines.
 
+## Prior work
+
+None of the pieces are new. felixd puts known ideas together in one place.
+
+| Project | What it does | How felixd differs |
+|---|---|---|
+| [Plan 9](https://9p.io/plan9/), [Sprite](https://www2.eecs.berkeley.edu/Research/Projects/CS/sprite/sprite.html), [Amoeba](https://en.wikipedia.org/wiki/Amoeba_(operating_system)) | Research distributed operating systems: one namespace across machines, and process migration in Sprite | They share live state between machines. felixd rebuilds state from a log, so migration and recovery are the same operation. |
+| [Borg](https://research.google/pubs/large-scale-cluster-management-at-google-with-borg/), [Kubernetes](https://kubernetes.io/), [Nomad](https://www.nomadproject.io/) | Cluster managers that keep desired and observed state in a consistent store (etcd, Raft) | They restart a program after a failure and its in-memory state is lost. felixd resumes it from its last input, and keeps history to replay. |
+| [Temporal](https://temporal.io/), [Azure Durable Functions](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-overview) | Durable execution: deterministic workflow code replayed from an event history | This is the closest idea. Determinism there is a coding rule enforced by the SDK, and the history lives in a database behind a service. In felixd the Wasm sandbox enforces determinism, and workloads read any Felix stream. |
+| [Golem](https://www.golem.cloud/) | Durable Wasm workers that replay an operation log after a failure | Also close: Wasm plus replay. Golem is a full platform with its own storage. felixd uses only Felix, and a workload's inputs and outputs are ordinary streams that other programs can read. |
+| [wasmCloud](https://wasmcloud.com/) | Wasm components spread across hosts over a NATS lattice | Hosts talk over NATS, and a component's state is not rebuilt from a log after a failure. felixd records every input, so it can be. |
+| [Flink](https://flink.apache.org/), [Kafka Streams](https://kafka.apache.org/documentation/streams/) | Stream processing with checkpoints and exactly-once output | These are dataflow frameworks with a coordinator and checkpoint storage beside Kafka. felixd runs general programs, and the log is the only coordinator. |
+| [Corfu and Tango](https://www.microsoft.com/en-us/research/publication/tango-distributed-data-structures-over-a-shared-log/), [Delos](https://www.usenix.org/conference/osdi20/presentation/balakrishnan) | Distributed systems built on a shared log as the source of truth | The same foundation, applied to data structures and metadata stores. felixd applies it to running programs. |
+
+## Why build it
+
+- **One substrate.** Each project above needs its own coordinator or database
+  next to the log. We want to find out whether a single replicated log, with
+  conditional writes and leases, is enough to run programs on: no etcd, no
+  workflow database, no job manager.
+- **Determinism enforced by the platform.** A Wasm component with no clock,
+  randomness or I/O can't break replay by accident. That moves determinism
+  from a coding rule you must remember to something the runtime guarantees.
+- **History you can query.** Every input, output and ownership change is a
+  stream that ordinary Felix clients can read. Debugging a past incident
+  means replaying it, not reconstructing it from logs.
+- **A demanding user for Felix.** felixd depends on Felix's ordering, fencing
+  and resume guarantees under node failure. Anything that falls short shows
+  up as a `felix-gap` issue against Felix.
+
 ## The first step
 
 felixd runs on every node. It runs WebAssembly programs ("workloads") whose
