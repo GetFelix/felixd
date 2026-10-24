@@ -1,6 +1,6 @@
 # Contributing
 
-[docs/design.md](docs/design.md) describes what is being built and why.
+[docs/design.md](docs/design.md) describes what is being built and why. Questions, ideas and design debate go in [Discussions](https://github.com/GetFelix/felixd/discussions). Issues are for work with a clear "done when".
 
 ## Code
 

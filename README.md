@@ -179,7 +179,11 @@ owner knows which outputs already exist and does not write them again.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+The plan is open for discussion. Start with
+[what to build first](https://github.com/GetFelix/felixd/discussions/31) and the
+[open design questions](https://github.com/GetFelix/felixd/discussions/33), or
+browse [all discussions](https://github.com/GetFelix/felixd/discussions).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how changes are made.
 
 ## License
 
