@@ -76,6 +76,50 @@ Scheduling policy, resource limits, networking and native processes come
 after that works. [docs/design.md](docs/design.md) explains the path from
 here to an operating system.
 
+## Scenarios and use cases
+
+felixd fits work that keeps state, reacts to a stream of events, and must not
+lose or repeat results when a machine fails. These are the cases we are
+designing for. Each one is planned, not yet working.
+
+- **Stateful stream processing without a separate cluster.** Running totals,
+  sessions, fraud scores over a window, deduplication. Today that usually
+  means Flink or Kafka Streams with checkpoint storage beside the broker. With
+  felixd it is a small Wasm workload on Felix, and a node loss doesn't
+  double-count or drop anything.
+- **State machines where history matters.** An order book, inventory,
+  billing or a ledger, where you must be able to answer "what did the system
+  believe at 14:02, and why?" `felixd replay --to 14:02` rebuilds that state
+  from the same inputs.
+- **Fleets of unreliable machines.** Edge gateways, factory floors, home labs:
+  machines that reboot, lose power or drop off the network. A workload moves
+  to a machine that's up and continues from its last input, with no operator
+  involved.
+- **Authoritative game and simulation servers.** A match or a simulation tick
+  loop is a deterministic state machine fed by player inputs. If its server
+  dies, the match continues on another one, and any match can be replayed
+  afterwards. [felix-arena](https://github.com/GetFelix/felix-arena) and
+  [felix-metro](https://github.com/GetFelix/felix-metro) already use logs this
+  way inside one process.
+- **Reproducing production bugs.** Instead of guessing from logs, replay the
+  workload on your laptop to the offset just before the bad output and step
+  through it.
+- **Checking an upgrade before it goes live.** Run a new version of a module
+  against recorded inputs and compare its outputs with what the current
+  version produced, before switching it on.
+
+A worked example: a payments team runs a fraud-scoring workload per merchant.
+A node dies during a traffic spike. Within one lease TTL, its workloads are
+running on the other nodes, every transaction is scored exactly once, and
+the late-arriving copy on the recovered node is refused. A week later, a
+merchant disputes a decision, and the team replays that merchant's workload
+to the moment of the transaction to see exactly what the score was based on.
+
+felixd is not a fit, at least for now, for low-latency request and reply
+services, programs that need the network or files directly (that comes with
+effects, step 4 in the design), or heavy compute where replaying from a
+snapshot would take too long.
+
 ## What you will be able to do
 
 - Start felixd on a few machines pointed at one Felix cluster
@@ -99,6 +143,8 @@ here to an operating system.
 | What each node may write | RBAC grants on each node's token |
 
 ## How it works
+
+![Node A freezes while holding workload W. Node B claims the expired lease, restores the latest snapshot, resumes the input at offset 7, skips the output already written for 7 and writes from 8. When A wakes up, its write is refused. felixd replay rebuilds W at any offset from a snapshot and the input.](docs/how-it-works.svg)
 
 A workload is a Wasm component with no access to clocks, randomness, files or
 the network. It sees only the records on its input stream, so given the same

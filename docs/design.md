@@ -212,6 +212,10 @@ to the one the new owner would have written for that offset.
    With `--diff`, it compares the outputs it produced with the ones on the
    stream, which checks determinism.
 
+The same comparison with a different module (`--module <hash>`) checks an
+upgrade before it goes live: run the new version over recorded inputs and
+see where its outputs differ (#29).
+
 Replay needs no lease and writes nothing, so it can run anywhere with read
 grants.
 
