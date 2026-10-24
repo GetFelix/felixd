@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" width="960" height="560" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12">
+  <title>How felixd moves a workload from a failed node to another</title>
+  <style>
+    .bg { fill: #ffffff; }
+    .fg { fill: #1b1f24; }
+    .muted { fill: #57606a; }
+    .box { fill: #f6f8fa; stroke: #d0d7de; }
+    .felix { fill: none; stroke: #1491b8; stroke-width: 1.5; }
+    .accent { fill: #1491b8; }
+    .accent-s { stroke: #1491b8; }
+    .accent-box { fill: #e3f4fa; stroke: #1491b8; }
+    .new { fill: none; stroke: #1491b8; stroke-dasharray: 4 3; }
+    .old { fill: #eaeef2; stroke: #d0d7de; }
+    .dead { fill: #f6f8fa; stroke: #8c959f; stroke-dasharray: 5 4; }
+    .bad { fill: #cf222e; }
+    .bad-s { stroke: #cf222e; }
+    .line { fill: none; stroke: #57606a; stroke-width: 1.5; }
+    .out text { font-size: 10px; }
+    .badge text { fill: #ffffff; font-weight: 700; font-size: 11px; }
+    .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .fg { fill: #e6edf3; }
+      .muted { fill: #8b949e; }
+      .box { fill: #161b22; stroke: #30363d; }
+      .felix { stroke: #39c5e6; }
+      .accent { fill: #39c5e6; }
+      .accent-s { stroke: #39c5e6; }
+      .accent-box { fill: #0c2d38; stroke: #39c5e6; }
+      .new { stroke: #39c5e6; }
+      .old { fill: #21262d; stroke: #30363d; }
+      .dead { fill: #161b22; stroke: #6e7681; }
+      .bad { fill: #ff7b72; }
+      .bad-s { stroke: #ff7b72; }
+      .line { stroke: #8b949e; }
+      .out text { font-size: 10px; }
+    .badge text { fill: #0d1117; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="muted"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="accent"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="960" height="560" rx="12"/>
+
+  <!-- Producer -->
+  <rect class="box" x="20" y="40" width="200" height="70" rx="8"/>
+  <text class="fg" x="36" y="68" font-weight="600">Producer</text>
+  <text class="muted" x="36" y="88">any Felix client</text>
+  <path class="line" d="M220,75 H250 V210 H258" marker-end="url(#arrow)"/>
+
+  <!-- Felix -->
+  <rect class="felix" x="240" y="24" width="480" height="406" rx="10"/>
+  <text class="accent" x="256" y="46" font-weight="700" font-size="14">Felix</text>
+  <text class="muted" x="300" y="46">replicated, the only backend</text>
+
+  <!-- Caches -->
+  <rect class="box" x="300" y="62" width="124" height="80" rx="6"/>
+  <text class="fg" x="312" y="82" font-weight="600">workloads</text>
+  <text class="muted mono" x="312" y="102">W: module,</text>
+  <text class="muted mono" x="312" y="118">input, out,</text>
+  <text class="muted mono" x="312" y="134">snap</text>
+
+  <rect class="box" x="432" y="62" width="124" height="80" rx="6"/>
+  <text class="fg" x="444" y="82" font-weight="600">nodes</text>
+  <text class="muted mono" x="444" y="102">A expired</text>
+  <text class="muted mono" x="444" y="118">B live</text>
+  <text class="muted" x="444" y="134">TTL entries</text>
+
+  <rect class="accent-box" x="564" y="62" width="140" height="80" rx="6"/>
+  <text class="fg" x="576" y="82" font-weight="600">leases</text>
+  <text class="fg mono" x="576" y="102">W → node B</text>
+  <text class="muted mono" x="576" y="118">epoch 2</text>
+  <text class="muted" x="576" y="134">TTL, renewed by B</text>
+
+  <!-- Input stream -->
+  <text class="fg" x="262" y="186" font-weight="600">input stream</text>
+  <text class="muted" x="350" y="186">offsets 0 to 9</text>
+  <g class="mono">
+    <rect class="old" x="262" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="280" y="214">0</text>
+    <rect class="old" x="302" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="320" y="214">1</text>
+    <rect class="old" x="342" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="360" y="214">2</text>
+    <rect class="old" x="382" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="400" y="214">3</text>
+    <rect class="old" x="422" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="440" y="214">4</text>
+    <rect class="old" x="462" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="480" y="214">5</text>
+    <rect class="old" x="502" y="195" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="520" y="214">6</text>
+    <rect class="accent-box" x="542" y="195" width="36" height="30" rx="4"/><text class="fg" text-anchor="middle" x="560" y="214">7</text>
+    <rect class="accent-box" x="582" y="195" width="36" height="30" rx="4"/><text class="fg" text-anchor="middle" x="600" y="214">8</text>
+    <rect class="accent-box" x="622" y="195" width="36" height="30" rx="4"/><text class="fg" text-anchor="middle" x="640" y="214">9</text>
+  </g>
+  <text class="muted" x="542" y="242">B resumes at 7</text>
+
+  <!-- Snapshot stream -->
+  <text class="fg" x="262" y="270" font-weight="600">wl.W.snap</text>
+  <text class="muted" x="334" y="270">state as of an input offset</text>
+  <g class="mono">
+    <rect class="old" x="382" y="280" width="36" height="26" rx="4"/><text class="muted" text-anchor="middle" x="400" y="297">@3</text>
+    <rect class="accent-box" x="502" y="280" width="36" height="26" rx="4"/><text class="fg" text-anchor="middle" x="520" y="297">@6</text>
+  </g>
+
+  <!-- Output stream -->
+  <text class="fg" x="262" y="346" font-weight="600">wl.W.out</text>
+  <text class="muted" x="326" y="346">each output names the input that produced it</text>
+  <g class="mono out">
+    <rect class="old" x="262" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="280" y="375">in 0</text>
+    <rect class="old" x="302" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="320" y="375">in 1</text>
+    <rect class="old" x="342" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="360" y="375">in 2</text>
+    <rect class="old" x="422" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="440" y="375">in 4</text>
+    <rect class="old" x="462" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="480" y="375">in 5</text>
+    <rect class="old" x="502" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="520" y="375">in 6</text>
+    <rect class="old" x="542" y="356" width="36" height="30" rx="4"/><text class="muted" text-anchor="middle" x="560" y="375">in 7</text>
+    <rect class="new" x="582" y="356" width="36" height="30" rx="4"/><text class="accent" text-anchor="middle" x="600" y="375">in 8</text>
+    <rect class="new" x="622" y="356" width="36" height="30" rx="4"/><text class="accent" text-anchor="middle" x="640" y="375">in 9</text>
+  </g>
+  <text class="muted" x="382" y="404">3 had no output</text>
+  <text class="muted" x="262" y="420">gray: written by A</text>
+  <text class="accent" x="560" y="404">dashed: written by B</text>
+
+  <!-- Node A -->
+  <rect class="dead" x="20" y="170" width="200" height="250" rx="8"/>
+  <text class="fg" x="36" y="196" font-weight="600">felixd · node A</text>
+  <text class="muted" x="36" y="216">froze, stopped renewing</text>
+  <text class="muted" x="36" y="232">its lease on W</text>
+  <rect class="old" x="36" y="246" width="168" height="34" rx="6"/>
+  <text class="muted mono" x="48" y="268">stale copy of W</text>
+  <g class="badge"><circle class="bad" cx="44" cy="304" r="9"/><text x="40.5" y="308">5</text></g>
+  <text class="fg" x="60" y="308">wakes up and writes</text>
+  <text class="muted" x="60" y="324">at the tail it last saw</text>
+  <text class="bad" x="60" y="346" font-weight="600">publish_if refused:</text>
+  <text class="muted" x="60" y="362">B already moved the tail,</text>
+  <text class="muted" x="60" y="378">so A learns it lost W</text>
+  <text class="muted" x="60" y="394">and stops</text>
+  <path class="line bad-s" d="M204,371 H244" stroke-dasharray="4 3"/>
+  <g class="bad-s" stroke-width="2.5"><path d="M246,364 l12,14 M258,364 l-12,14"/></g>
+
+  <!-- Node B -->
+  <rect class="box" x="740" y="170" width="200" height="250" rx="8"/>
+  <rect class="accent-box" x="740" y="170" width="200" height="250" rx="8" fill-opacity="0.35"/>
+  <text class="fg" x="756" y="196" font-weight="600">felixd · node B</text>
+  <rect class="accent-box" x="756" y="208" width="168" height="34" rx="6"/>
+  <text class="fg mono" x="768" y="230">Wasm workload W</text>
+
+  <g class="badge"><circle class="accent" cx="764" cy="264" r="9"/><text x="760.5" y="268">1</text></g>
+  <text class="fg" x="780" y="268">claims the expired lease</text>
+  <text class="muted mono" x="780" y="283">cache_put_if(absent)</text>
+  <g class="badge"><circle class="accent" cx="764" cy="304" r="9"/><text x="760.5" y="308">2</text></g>
+  <text class="fg" x="780" y="308">restores snapshot @6</text>
+  <g class="badge"><circle class="accent" cx="764" cy="330" r="9"/><text x="760.5" y="334">3</text></g>
+  <text class="fg" x="780" y="334">subscribes from input 7</text>
+  <g class="badge"><circle class="accent" cx="764" cy="356" r="9"/><text x="760.5" y="360">4</text></g>
+  <text class="fg" x="780" y="360">reruns 7, skips its output</text>
+  <text class="muted" x="780" y="376">(already on wl.W.out),</text>
+  <text class="muted" x="780" y="392">writes from 8 with</text>
+  <text class="muted mono" x="780" y="408">publish_if(tail)</text>
+
+  <!-- B's arrows -->
+  <path class="line accent-s" d="M840,170 V102 H708" marker-end="url(#arrow-accent)"/>
+  <path class="line accent-s" d="M540,293 H736" marker-end="url(#arrow-accent)"/>
+  <path class="line accent-s" d="M662,210 H736" marker-end="url(#arrow-accent)"/>
+  <path class="line accent-s" d="M740,371 H664" marker-end="url(#arrow-accent)"/>
+
+  <!-- Replay -->
+  <path class="line" d="M480,430 V462" marker-end="url(#arrow)"/>
+  <text class="muted" x="490" y="452">reads only, needs no lease</text>
+  <rect class="box" x="290" y="466" width="380" height="74" rx="8"/>
+  <text class="fg mono" x="306" y="490">felixd replay W --to 5</text>
+  <text class="muted" x="306" y="510">restores snapshot @3, reruns inputs 4 and 5,</text>
+  <text class="muted" x="306" y="527">prints W's state as it was at offset 5</text>
+
+  <!-- Footnote -->
+  <text class="muted" x="740" y="460">W is deterministic: the same</text>
+  <text class="muted" x="740" y="476">inputs always give the same</text>
+  <text class="muted" x="740" y="492">outputs and state, so any node</text>
+  <text class="muted" x="740" y="508">can take over or replay it.</text>
+</svg>
