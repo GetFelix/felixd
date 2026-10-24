@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/brand/felixd-mark.png" alt="felixd" width="200"></p>
+
 # felixd
 
 A node agent that runs programs across a cluster with
