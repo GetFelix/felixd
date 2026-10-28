@@ -450,6 +450,11 @@ version = "0.0.0"
 [[package]]
 name = "felixd-core"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "felixd-runtime"
