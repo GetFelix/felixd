@@ -23,7 +23,9 @@ cargo test --workspace --test '*'          # integration
 CI runs the same three as the jobs `lint`, `unit` and `integration`. The restart test in
 `integration` needs a Felix broker; the README says how to start one. Without `FELIX_BROKERS` set
 those tests skip, and CI sets `FELIXD_REQUIRE_FELIX` so a missing broker fails instead. The restart tests
-crash the agent at chosen points with `FELIXD_FAULTS`, described in `crates/agent/src/faults.rs`.
+crash the agent at chosen points with `FELIXD_FAULTS`, described in `crates/agent/src/faults.rs`. Only the
+tests' build of the binary reads it: the `faults` feature is turned on by a dev-dependency, and
+`scripts/check-no-faults.sh` (run in `unit`) fails if a normal build still carries it.
 
 ## Comments and docs
 
