@@ -17,6 +17,8 @@ felixd-agent = { workspace = true }
 felixd-runtime = { workspace = true }
 
 [dev-dependencies]
+# The tests' copy of the binary honours FELIXD_FAULTS; a normal build does not.
+felixd-agent = { workspace = true, features = ["faults"] }
 bytes = { workspace = true }
 felixd-testkit = { workspace = true }
 felix-client = { workspace = true }

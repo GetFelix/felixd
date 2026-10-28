@@ -6,15 +6,24 @@
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
 //!
-//! With the variable unset, nothing here does anything.
+//! Only a build with the `faults` feature reads the variable. The felixd
+//! crate turns it on for its own tests through a dev-dependency, so a binary
+//! built with `cargo build` or `cargo install` ignores `FELIXD_FAULTS`.
 
+#[cfg(feature = "faults")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static FAULTS: OnceLock<Vec<(String, u64)>> = OnceLock::new();
 static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(not(feature = "faults"))]
+fn fault(_name: &str) -> Option<u64> {
+    None
+}
+
+#[cfg(feature = "faults")]
 fn fault(name: &str) -> Option<u64> {
+    static FAULTS: OnceLock<Vec<(String, u64)>> = OnceLock::new();
     FAULTS
         .get_or_init(|| {
             std::env::var("FELIXD_FAULTS")
