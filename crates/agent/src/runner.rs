@@ -24,9 +24,11 @@ pub(crate) enum Outcome {
     /// is on its streams cannot be resumed from. It would fail the same way
     /// anywhere, so it is not retried.
     Failed(String),
-    /// This node no longer holds the lease, by its own clock or because a
-    /// later owner has written to the output stream.
+    /// This node no longer holds the lease by its own clock.
     Lost,
+    /// A record at this epoch was found on the output stream, above the
+    /// owner's own: a later owner has written.
+    Superseded(u64),
 }
 
 /// The runner found it no longer holds the lease.
@@ -40,6 +42,18 @@ impl fmt::Display for LostLease {
 }
 
 impl std::error::Error for LostLease {}
+
+/// The output stream holds a record from a later epoch than the runner's.
+#[derive(Debug)]
+pub(crate) struct Superseded(pub(crate) u64);
+
+impl fmt::Display for Superseded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "a later owner wrote at epoch {}", self.0)
+    }
+}
+
+impl std::error::Error for Superseded {}
 
 /// A state no node can get past. Retrying would replay the same history into
 /// the same failure, so the workload is marked failed instead.
@@ -77,11 +91,19 @@ pub(crate) async fn run_workload(
     spec: &WorkloadSpec,
     fence: &Fence,
 ) -> Result<Outcome> {
-    match run(felix, runtime, id, spec, fence).await {
+    let error = match run(felix, runtime, id, spec, fence).await {
         Ok(never) => match never {},
-        Err(error) if error.is::<Poison>() => Ok(Outcome::Failed(format!("{error:#}"))),
-        Err(error) if error.is::<LostLease>() => Ok(Outcome::Lost),
-        Err(error) => Err(error),
+        Err(error) => error,
+    };
+    if let Some(Superseded(epoch)) = error.downcast_ref::<Superseded>() {
+        return Ok(Outcome::Superseded(*epoch));
+    }
+    if error.is::<Poison>() {
+        Ok(Outcome::Failed(format!("{error:#}")))
+    } else if error.is::<LostLease>() {
+        Ok(Outcome::Lost)
+    } else {
+        Err(error)
     }
 }
 
@@ -129,7 +151,7 @@ async fn run(
             epoch = last.epoch,
             "a later owner has written"
         );
-        return Err(LostLease.into());
+        return Err(Superseded(last.epoch).into());
     }
     let last_output = last_output.map(|last| last.header);
     let resume = resume::fold(Found {

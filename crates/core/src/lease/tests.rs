@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn a_lease_round_trips() {
-    let lease = Lease::renewal("node-a", 3);
+    let lease = Lease::held("node-a", 3);
     assert_eq!(Lease::decode(&lease.encode()), Ok(lease));
 }
 
@@ -12,10 +12,18 @@ fn the_json_form_is_fixed() {
 }
 
 #[test]
-fn a_claims_epoch_is_its_version_and_renewals_keep_it() {
-    assert_eq!(Lease::claim("a").epoch_at(41), 42);
-    assert_eq!(Lease::claim("a").epoch_at(0), 1);
-    assert_eq!(Lease::renewal("a", 42).epoch_at(97), 42);
+fn a_new_epoch_is_above_the_counter_and_the_output_tail() {
+    assert_eq!(Lease::next_epoch(0, 0), 1);
+    assert_eq!(Lease::next_epoch(41, 7), 42);
+    // The counter was lost but the output stream remembers epoch 500.
+    assert_eq!(Lease::next_epoch(3, 500), 501);
+}
+
+#[test]
+fn the_epoch_counter_round_trips() {
+    assert_eq!(encode_epoch(501), b"501");
+    assert_eq!(decode_epoch(&encode_epoch(501)), Ok(501));
+    assert!(decode_epoch(b"x").is_err());
 }
 
 #[test]

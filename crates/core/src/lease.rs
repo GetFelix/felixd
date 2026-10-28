@@ -1,11 +1,13 @@
 //! The value in the `leases` cache, and the timing rules a holder follows.
 //!
-//! A lease's epoch is one more than the cache version of the put that claimed
-//! it. Felix versions only grow within a shard and are never reused, so a
-//! later claim always has a higher epoch than every earlier one, including
-//! claims whose entries have since expired. The first write to a new cache has
-//! version 0, and epoch 0 is kept for "not yet known". Owners stamp their epoch on every output
-//! record, which is how a stale owner learns it has been replaced.
+//! The value in the `leases` cache, and the timing rules a holder follows.
+//!
+//! A claim takes its epoch from the `epochs` cache, one more than the larger
+//! of the last epoch handed out and the epoch on the output stream's tail. The
+//! counter makes epochs unique and growing; the output tail keeps them above
+//! everything already written if the counter is ever lost. Owners stamp their
+//! epoch on every output record, which is how a stale owner learns it has been
+//! replaced.
 
 use std::time::Duration;
 
@@ -16,11 +18,17 @@ use crate::DecodeError;
 /// How long a lease lives without renewal unless the agent is told otherwise.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(10);
 
+/// The shortest TTL an agent accepts. A holder stops a third of a TTL before
+/// anyone else may claim, and that margin has to cover a renewal's round trip
+/// to a busy broker and the scheduler's delay in waking the holder.
+pub const MIN_TTL: Duration = Duration::from_secs(2);
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lease {
     pub owner: String,
-    /// The claim's epoch. A claim does not know its version until the put is
-    /// applied, so it writes 0 and its renewals write the version it got.
+    /// The holder's epoch. The claim itself writes 0, since the epoch is
+    /// taken only once the claim has won; the holder then rewrites the lease
+    /// with its epoch before it runs anything.
     pub epoch: u64,
 }
 
@@ -33,26 +41,19 @@ impl Lease {
         }
     }
 
-    /// The value the holder of the claim at `epoch` writes to renew it.
-    pub fn renewal(owner: &str, epoch: u64) -> Lease {
+    /// The value the holder at `epoch` writes once it has its epoch, and on
+    /// every renewal.
+    pub fn held(owner: &str, epoch: u64) -> Lease {
         Lease {
             owner: owner.to_owned(),
             epoch,
         }
     }
 
-    /// The epoch of a claim the cache applied at `version`.
-    pub fn claim_epoch(version: u64) -> u64 {
-        version + 1
-    }
-
-    /// The epoch of this lease, given the version the cache reports for it.
-    pub fn epoch_at(&self, version: u64) -> u64 {
-        if self.epoch == 0 {
-            Lease::claim_epoch(version)
-        } else {
-            self.epoch
-        }
+    /// The epoch for a new claim, given the last one handed out and the epoch
+    /// of the last record on the output stream.
+    pub fn next_epoch(last_handed_out: u64, output_tail: u64) -> u64 {
+        last_handed_out.max(output_tail) + 1
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -65,6 +66,15 @@ impl Lease {
 }
 
 /// When a holder renews and when it gives up.
+/// The value in the `epochs` cache: the last epoch handed out.
+pub fn encode_epoch(epoch: u64) -> Vec<u8> {
+    epoch.to_string().into_bytes()
+}
+
+pub fn decode_epoch(bytes: &[u8]) -> Result<u64, DecodeError> {
+    serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaseTiming {
     pub ttl: Duration,

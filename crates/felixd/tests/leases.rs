@@ -9,12 +9,23 @@ mod common;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use bytes::Bytes;
 use common::{ID, INPUT, LEASE_TTL, OUTPUT, assert_uninterrupted, eventually, test_felix};
+use felixd_core::names;
 use felixd_core::output::{self, OutputHeader};
 use felixd_core::spec::WorkloadState;
 
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
+}
+
+/// What the counter writes for input `i`, stamped with `epoch`.
+fn counted(i: u64, epoch: u64) -> Vec<u8> {
+    let header = OutputHeader {
+        input_offset: i,
+        index: 0,
+    };
+    output::encode(header, epoch, &count(i + 1))
 }
 
 async fn epochs(t: &common::TestFelix) -> Vec<u64> {
@@ -125,14 +136,16 @@ async fn a_holder_stops_at_the_first_record_of_a_later_epoch() {
         holder.stopped().then_some(())
     })
     .await;
-    assert!(t.lease(ID).await.is_some(), "the holder's lease is live");
+    let (_, version) = t.lease(ID).await.expect("the holder's lease is live");
+    t.felix
+        .cache_delete_if(names::LEASES, ID, version)
+        .await
+        .unwrap();
     // What a later owner would write for input 19.
-    let header = OutputHeader {
-        input_offset: 19,
-        index: 0,
-    };
-    let later = output::encode(header, 1 << 40, &20u64.to_be_bytes());
-    t.felix.publish_if(OUTPUT, vec![later], 19).await.unwrap();
+    t.felix
+        .publish_if(OUTPUT, vec![counted(19, 1 << 40)], 19)
+        .await
+        .unwrap();
 
     holder.resume();
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -144,4 +157,145 @@ async fn a_holder_stops_at_the_first_record_of_a_later_epoch() {
     );
     assert!(holder.alive());
     assert_eq!(t.spec().await.state, WorkloadState::Running);
+}
+
+/// A later epoch on the output stream while the holder's lease is still its
+/// own can only mean epochs went backwards. The holder says so in the spec
+/// instead of stopping and claiming again forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_epoch_under_a_live_lease_fails_the_workload() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..40).map(count)).await;
+    let holder =
+        t.start_node_with_ttl("holder", "freeze-before-append=20", Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        holder.stopped().then_some(())
+    })
+    .await;
+    t.felix
+        .publish_if(OUTPUT, vec![counted(19, 1 << 40)], 19)
+        .await
+        .unwrap();
+    holder.resume();
+    let failure = t.failure().await;
+    assert!(failure.contains("epochs went backwards"), "{failure}");
+    assert_eq!(t.felix.tail(OUTPUT).await.unwrap(), 20);
+}
+
+/// The output stream holds epoch 500 but the leases cache is new, as after
+/// it was recreated, so its versions start again. A claim must still take an
+/// epoch above 500, or its first append would find a "later" owner and the
+/// workload would stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_takes_an_epoch_above_the_output_streams() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    t.felix
+        .publish_if(OUTPUT, (0..5).map(|i| counted(i, 500)).collect(), 0)
+        .await
+        .unwrap();
+    let _agent = t.start_agent();
+    assert_uninterrupted(&t, &module, 10).await;
+    assert_eq!(epochs(&t).await, [[500; 5], [501; 5]].concat());
+}
+
+/// The new owner is stopped just before its first append. A stale owner's
+/// write of the same input then lands first, at a lower epoch, and the new
+/// owner skips it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_write_that_lands_first_is_skipped() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    let owner = t.start_node_with_ttl("owner", "freeze-before-append=1", Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        owner.stopped().then_some(())
+    })
+    .await;
+    let (lease, _) = t.lease(ID).await.expect("the owner's lease");
+    t.felix
+        .publish_if(OUTPUT, vec![counted(0, lease.epoch - 1)], 0)
+        .await
+        .unwrap();
+    owner.resume();
+    assert_uninterrupted(&t, &module, 10).await;
+    let mut want = vec![lease.epoch; 10];
+    want[0] = lease.epoch - 1;
+    assert_eq!(epochs(&t).await, want);
+}
+
+/// As above, but the stale owner got further than the new owner's batch. The
+/// new owner resumes from the streams, checks what the stale one wrote and
+/// carries on after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_writer_that_got_further_makes_the_new_owner_resume() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    let owner = t.start_node_with_ttl("owner", "freeze-before-append=1", Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        owner.stopped().then_some(())
+    })
+    .await;
+    let (lease, _) = t.lease(ID).await.expect("the owner's lease");
+    let stale = lease.epoch - 1;
+    t.felix
+        .publish_if(OUTPUT, (0..5).map(|i| counted(i, stale)).collect(), 0)
+        .await
+        .unwrap();
+    owner.resume();
+    assert_uninterrupted(&t, &module, 10).await;
+    assert_eq!(epochs(&t).await, [[stale; 5], [lease.epoch; 5]].concat());
+    assert_eq!(t.spec().await.state, WorkloadState::Running);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_workload_is_stopped_and_its_lease_released() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let _agent = t.start_agent();
+    eventually("a lease", Duration::from_secs(30), || t.lease(ID)).await;
+    t.felix.cache_delete(names::WORKLOADS, ID).await.unwrap();
+    eventually("the lease to go", Duration::from_secs(10), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+}
+
+/// The agent's workloads watch ends and it opens a new one. A workload still
+/// there keeps running; one deleted while no watch was open is stopped once
+/// the new watch has redelivered everything else.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_watch_stops_only_workloads_deleted_while_it_was_closed() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let _agent = t.start_agent_with_faults("drop-watch=2000");
+    let (held, _) = eventually("a stamped lease", Duration::from_secs(30), || async {
+        t.lease(ID).await.filter(|(l, _)| l.epoch > 0)
+    })
+    .await;
+    let drop_watch = || async {
+        t.felix
+            .cache_put(names::WORKLOADS, "drop-watch", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        t.felix
+            .cache_delete(names::WORKLOADS, "drop-watch")
+            .await
+            .unwrap();
+    };
+
+    drop_watch().await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let (after, _) = t.lease(ID).await.expect("the workload kept its lease");
+    assert_eq!(after, held, "the workload was stopped by the new watch");
+
+    drop_watch().await;
+    t.felix.cache_delete(names::WORKLOADS, ID).await.unwrap();
+    eventually("the lease to go", Duration::from_secs(10), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
 }

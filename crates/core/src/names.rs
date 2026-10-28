@@ -4,6 +4,9 @@
 pub const WORKLOADS: &str = "workloads";
 /// Cache of leases, keyed by workload id, with a TTL.
 pub const LEASES: &str = "leases";
+/// Cache of the last lease epoch handed out for each workload, keyed by
+/// workload id. No TTL, so an epoch outlives the lease that used it.
+pub const EPOCHS: &str = "epochs";
 /// Cache of live nodes, keyed by node id, with a TTL.
 pub const NODES: &str = "nodes";
 /// Cache of module bytes, keyed by the module's sha256 in hex.

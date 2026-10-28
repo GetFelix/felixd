@@ -8,6 +8,11 @@
 //! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
 //!   its Nth output append, after the lease was checked. It carries on when
 //!   the test sends `SIGCONT`, as a node out of a long GC pause would.
+//! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
+//!   workload's spec and writing the failure into it, as a slow broker would.
+//! - `drop-watch=MS`: when the key `drop-watch` is written to the workloads
+//!   cache, end the workloads watch and wait MS milliseconds before opening a
+//!   new one.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -75,4 +80,18 @@ pub(crate) fn before_append() {
             .args(["-STOP", &std::process::id().to_string()])
             .status();
     }
+}
+
+pub(crate) async fn before_failure_record() {
+    if let Some(ms) = fault("delay-failure-record") {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
+
+/// How long to stay without a watch, if the change to `key` should end it.
+pub(crate) fn drop_watch(key: &str, written: bool) -> Option<std::time::Duration> {
+    if key != "drop-watch" || !written {
+        return None;
+    }
+    fault("drop-watch").map(std::time::Duration::from_millis)
 }
