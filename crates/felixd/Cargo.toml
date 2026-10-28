@@ -1,0 +1,17 @@
+[package]
+name = "felixd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+felixd-agent = { workspace = true }
+felixd-core = { workspace = true }
+felixd-runtime = { workspace = true }
+
+[lints]
+workspace = true
