@@ -1,0 +1,15 @@
+package felixd:workload@0.1.0;
+
+/// A deterministic program. The host gives it no imports: no clock, randomness,
+/// files or network. Anything else it needs arrives in an input record.
+world workload {
+  /// Handle one input record. Returns the output records it produced, which
+  /// may be none.
+  export step: func(input: list<u8>) -> list<list<u8>>;
+  /// The whole state, in a form `restore` accepts.
+  export snapshot: func() -> list<u8>;
+  /// Replace the state with one `snapshot` returned.
+  export restore: func(state: list<u8>);
+  /// The state as JSON, for replay and inspection.
+  export inspect: func() -> string;
+}
