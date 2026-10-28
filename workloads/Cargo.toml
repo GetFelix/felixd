@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["counter", "window"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
