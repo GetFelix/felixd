@@ -1,6 +1,8 @@
 //! The Felix calls felixd makes, on one client.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
@@ -13,6 +15,10 @@ use crate::settings::Settings;
 
 /// Reads of a stream page by page stay this small so one reply stays small.
 const PAGE_RECORDS: u32 = 256;
+
+/// How long a stream or cache the control plane just created may take to be
+/// served by the broker.
+const READY_WITHIN: Duration = Duration::from_secs(20);
 
 /// A connection to Felix, scoped to one tenant and namespace. All streams here
 /// have a single shard.
@@ -47,28 +53,39 @@ impl Felix {
     }
 
     pub async fn cache_get(&self, cache: &str, key: &str) -> Result<Option<Bytes>> {
-        self.client
-            .cache_get(&self.tenant, &self.namespace, cache, key)
-            .await
+        until_ready(|| {
+            self.client
+                .cache_get(&self.tenant, &self.namespace, cache, key)
+        })
+        .await
     }
 
     pub async fn cache_put(&self, cache: &str, key: &str, value: Bytes) -> Result<()> {
-        self.client
-            .cache_put(&self.tenant, &self.namespace, cache, key, value, None)
-            .await
+        until_ready(|| {
+            self.client.cache_put(
+                &self.tenant,
+                &self.namespace,
+                cache,
+                key,
+                value.clone(),
+                None,
+            )
+        })
+        .await
     }
 
     /// Publishes one record and waits until it is acknowledged.
     pub async fn publish(&self, stream: &str, payload: Vec<u8>) -> Result<()> {
-        self.client
-            .publish(
+        until_ready(|| {
+            self.client.publish(
                 &self.tenant,
                 &self.namespace,
                 stream,
-                payload,
+                payload.clone(),
                 AckMode::PerMessage,
             )
-            .await?;
+        })
+        .await?;
         Ok(())
     }
 
@@ -97,7 +114,8 @@ impl Felix {
     /// for a conditional write at an offset no stream reaches. The refusal
     /// carries the tail and nothing is written.
     pub async fn tail(&self, stream: &str) -> Result<u64> {
-        match self.publish_if(stream, vec![vec![0]], u64::MAX).await? {
+        let probe = until_ready(|| self.publish_if(stream, vec![vec![0]], u64::MAX)).await?;
+        match probe {
             ConditionalWrite::Refused { tail } => Ok(tail),
             ConditionalWrite::Written { offset } => {
                 bail!("probe write to {stream} landed at offset {offset}")
@@ -170,4 +188,28 @@ impl Felix {
             )
             .await
     }
+}
+
+/// Retries `call` while the broker says it does not serve the stream or cache
+/// yet, which is how a resource the control plane has just created looks for a
+/// moment.
+async fn until_ready<T, F, Fut>(mut call: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let deadline = Instant::now() + READY_WITHIN;
+    loop {
+        match call().await {
+            Err(error) if Instant::now() < deadline && not_ready(&error) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn not_ready(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("not served") || text.contains("not found")
 }

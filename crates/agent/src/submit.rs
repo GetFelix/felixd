@@ -1,7 +1,5 @@
 //! `felixd run`: store a module and start a workload.
 
-use std::time::{Duration, Instant};
-
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, WorkloadSpec, WorkloadState};
@@ -10,8 +8,6 @@ use felixd_core::{module, names};
 use crate::admin::{self, StreamKind};
 use crate::felix::Felix;
 use crate::settings::Settings;
-
-const VISIBLE_WITHIN: Duration = Duration::from_secs(15);
 
 pub struct Submission {
     pub id: String,
@@ -54,7 +50,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let felix = Felix::connect(settings).await?;
     let hash = module::hash(&submission.module);
     let module = Bytes::from(submission.module);
-    put_when_visible(&felix, names::MODULES, &hash, module).await?;
+    felix.cache_put(names::MODULES, &hash, module).await?;
     let spec = WorkloadSpec {
         module: hash.clone(),
         input: submission.input,
@@ -64,22 +60,8 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         failure: None,
     };
     let spec = Bytes::from(spec.encode());
-    put_when_visible(&felix, names::WORKLOADS, &submission.id, spec).await?;
+    felix
+        .cache_put(names::WORKLOADS, &submission.id, spec)
+        .await?;
     Ok(hash)
-}
-
-/// A cache the control plane has just created is not known to the broker for a
-/// moment, and writes to it are refused as not found until it is.
-async fn put_when_visible(felix: &Felix, cache: &str, key: &str, value: Bytes) -> Result<()> {
-    let deadline = Instant::now() + VISIBLE_WITHIN;
-    loop {
-        match felix.cache_put(cache, key, value.clone()).await {
-            Err(error)
-                if format!("{error:#}").contains("not found") && Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            result => return result,
-        }
-    }
 }
