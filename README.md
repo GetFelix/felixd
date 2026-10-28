@@ -177,6 +177,7 @@ owner knows which outputs already exist and does not write them again.
 ## Documentation
 
 - [docs/design.md](docs/design.md): goals, design, data model and build order
+- [docs/records.md](docs/records.md): record formats and the resume fold
 - [Felix docs](https://docs.getfelix.dev/)
 
 ## Contributing

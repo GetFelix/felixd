@@ -1,0 +1,44 @@
+# Record formats
+
+The formats live in `felixd-core`, which does no I/O. Binary records start with a version byte, now
+`1`. A reader refuses a version it does not know. Integers are big endian.
+
+## Output records
+
+On `wl.<id>.out`.
+
+| Bytes | Field |
+|---|---|
+| 1 | version |
+| 8 | input offset of the step that produced the output |
+| 4 | index among that step's outputs, from 0 |
+| rest | the payload the workload returned |
+
+## Snapshot records
+
+On `wl.<id>.snap`.
+
+| Bytes | Field |
+|---|---|
+| 1 | version |
+| 8 | offset of the last input the state includes |
+| 8 | the output stream's next offset when the snapshot was taken |
+| rest | what the workload's `snapshot` returned |
+
+## Caches
+
+Values in `workloads` and `leases` are JSON.
+
+- A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000) and
+  `state` (`running`, `stopped` or `failed`). A failed spec also has `failure`.
+- A lease has `owner` and `epoch`. The epoch goes up by one each time the workload changes owner.
+
+## The resume fold
+
+`resume::fold` takes the latest snapshot header, the header of the last record on the output stream
+and that stream's next offset. It returns whether to restore the snapshot, the input offset to
+subscribe from, and which outputs the stream already holds: those at or before the last record's
+`(input offset, index)`. The owner runs `step` for those inputs and drops the outputs.
+
+It refuses a stream that is shorter than the snapshot expects, or whose newest output belongs to an
+input the snapshot already covers, because a correct owner never produces either.
