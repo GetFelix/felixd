@@ -6,14 +6,19 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::felix::Felix;
 use felixd_agent::settings::Settings;
+use felixd_core::lease::Lease;
 use felixd_core::names;
+use felixd_core::output;
+use felixd_core::spec::Limits;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_runtime::Runtime;
 
 /// The id every test gives its one workload, and its streams.
 pub(crate) const ID: &str = "wl";
@@ -82,12 +87,37 @@ impl TestFelix {
 
     /// Starts an agent with `FELIXD_FAULTS` set, see `felixd_agent::faults`.
     pub(crate) fn start_agent_with_faults(&self, faults: &str) -> Agent {
-        Agent(
-            self.felixd(&["agent"])
-                .env("FELIXD_FAULTS", faults)
-                .spawn()
-                .expect("start felixd agent"),
-        )
+        let id = format!("node-{}", NEXT_NODE.fetch_add(1, Ordering::Relaxed));
+        self.start_node(&id, faults)
+    }
+
+    /// Starts an agent named `node_id` with a short lease TTL, so that a node
+    /// a test kills is replaced quickly.
+    pub(crate) fn start_node(&self, node_id: &str, faults: &str) -> Agent {
+        self.start_node_with_ttl(node_id, faults, LEASE_TTL)
+    }
+
+    pub(crate) fn start_node_with_ttl(&self, node_id: &str, faults: &str, ttl: Duration) -> Agent {
+        let ttl = ttl.as_millis().to_string();
+        let child = self
+            .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
+            .env("FELIXD_FAULTS", faults)
+            .spawn()
+            .expect("start felixd agent");
+        Agent {
+            child,
+            node_id: node_id.to_owned(),
+        }
+    }
+
+    /// The workload's lease, if one is live: its owner and its version.
+    pub(crate) async fn lease(&self, id: &str) -> Option<(Lease, u64)> {
+        let found = self
+            .felix
+            .cache_get_versioned(names::LEASES, id)
+            .await
+            .unwrap()?;
+        Some((Lease::decode(&found.value).unwrap(), found.version))
     }
 
     /// Creates the input stream and submits example workload `workload` as
@@ -156,21 +186,57 @@ impl TestFelix {
     }
 }
 
+/// The lease TTL test agents run with.
+pub(crate) const LEASE_TTL: Duration = Duration::from_secs(2);
+
+static NEXT_NODE: AtomicU32 = AtomicU32::new(0);
+
 /// A running `felixd agent`, killed when dropped so a failing test does not
 /// leave it behind.
-pub(crate) struct Agent(Child);
+pub(crate) struct Agent {
+    child: Child,
+    pub(crate) node_id: String,
+}
 
 impl Agent {
     pub(crate) fn kill(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.signal("CONT");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Whether the process is still running.
+    pub(crate) fn alive(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+
+    /// Sends `SIGCONT` to an agent a fault stopped.
+    pub(crate) fn resume(&self) {
+        self.signal("CONT");
+    }
+
+    /// Whether the process is stopped by a signal.
+    pub(crate) fn stopped(&self) -> bool {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &self.child.id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .trim_start()
+            .starts_with('T')
+    }
+
+    fn signal(&self, name: &str) {
+        let _ = Command::new("kill")
+            .args([&format!("-{name}"), &self.child.id().to_string()])
+            .status();
     }
 
     /// Waits for the agent to exit by itself.
     pub(crate) async fn exited(&mut self, timeout: Duration) -> ExitStatus {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
+            if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
             assert!(
@@ -202,4 +268,52 @@ where
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// What the output stream should hold: every output of every input, run
+/// through the same module without interruption.
+pub(crate) fn expected(module: &[u8], inputs: &[(u64, Vec<u8>)]) -> Vec<Vec<u8>> {
+    let mut workload = Runtime::new()
+        .unwrap()
+        .load(module, Limits::default())
+        .unwrap();
+    let mut records = Vec::new();
+    for (offset, payload) in inputs {
+        for (index, out) in workload.step(payload).unwrap().iter().enumerate() {
+            let header = output::OutputHeader {
+                input_offset: *offset,
+                index: index as u32,
+            };
+            records.push(output::encode(header, 0, out));
+        }
+    }
+    records
+}
+
+/// Waits for the output of every input on the input stream, then checks the
+/// output stream holds exactly that.
+pub(crate) async fn assert_uninterrupted(t: &TestFelix, module: &[u8], inputs: u64) {
+    let inputs_found = t.read_all(INPUT).await;
+    assert_eq!(inputs_found.len() as u64, inputs);
+    let want = expected(module, &inputs_found);
+    eventually("all output", Duration::from_secs(60), || async {
+        let got = t.read_all(OUTPUT).await;
+        (got.len() >= want.len()).then_some(())
+    })
+    .await;
+    // Give a duplicate time to show up before comparing.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let got: Vec<Vec<u8>> = t.read_all(OUTPUT).await.into_iter().map(|r| r.1).collect();
+    assert_eq!(got.len(), want.len(), "output length");
+    assert!(
+        got.iter()
+            .zip(&want)
+            .all(|(g, w)| output::same_output(g, w)),
+        "output differs from an uninterrupted run"
+    );
+    let epochs: Vec<u64> = got
+        .iter()
+        .map(|r| output::decode(r).unwrap().0.epoch)
+        .collect();
+    assert!(epochs.is_sorted(), "two owners took turns: {epochs:?}");
 }

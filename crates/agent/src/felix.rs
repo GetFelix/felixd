@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
-    AckMode, BrokerError, ClientConfig, ClusterClient, ConditionalWrite, ErrorCode, StartPosition,
-    StreamRecord, root_store_from_pem_file,
+    AckMode, BrokerError, CacheCondition, CacheConditionResult, ClientConfig, ClusterClient,
+    ConditionalWrite, ErrorCode, StartPosition, StreamRecord, VersionedValue,
+    root_store_from_pem_file,
 };
 
 use crate::settings::Settings;
@@ -72,6 +73,58 @@ impl Felix {
             )
         })
         .await
+    }
+
+    /// The value under `key` and its version.
+    pub async fn cache_get_versioned(
+        &self,
+        cache: &str,
+        key: &str,
+    ) -> Result<Option<VersionedValue>> {
+        until_ready(|| {
+            self.client
+                .cache_get_versioned(&self.tenant, &self.namespace, cache, key)
+        })
+        .await
+    }
+
+    /// Stores `value` only if the key's entry meets `condition`. An expired
+    /// entry counts as absent.
+    ///
+    /// Not retried: a resend of a put that was applied would be refused by
+    /// its own version and look like someone else's write.
+    pub async fn cache_put_if(
+        &self,
+        cache: &str,
+        key: &str,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+        condition: CacheCondition,
+    ) -> Result<CacheConditionResult> {
+        self.client
+            .cache_put_if(
+                &self.tenant,
+                &self.namespace,
+                cache,
+                key,
+                value,
+                ttl_ms,
+                condition,
+            )
+            .await
+    }
+
+    /// Removes `key` only if its version is `version`. Not retried, like
+    /// [`Self::cache_put_if`].
+    pub async fn cache_delete_if(
+        &self,
+        cache: &str,
+        key: &str,
+        version: u64,
+    ) -> Result<CacheConditionResult> {
+        self.client
+            .cache_delete_if(&self.tenant, &self.namespace, cache, key, version)
+            .await
     }
 
     /// Publishes one record and waits until it is acknowledged.

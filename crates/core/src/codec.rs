@@ -16,19 +16,20 @@ pub enum DecodeError {
 /// this leaves room for the framing.
 pub const MAX_WRITE_BYTES: usize = 8 << 20;
 
-/// Version byte at the start of every binary record. A format change takes a
-/// new number, so a reader refuses what it does not understand instead of
-/// misreading it.
-pub(crate) const VERSION: u8 = 1;
-
-/// Splits `bytes` into a `N`-byte header and the rest, after checking the version.
-pub(crate) fn split_header<const N: usize>(bytes: &[u8]) -> Result<(&[u8; N], &[u8]), DecodeError> {
+/// Splits `bytes` into a `N`-byte header and the rest, after checking that the
+/// version byte in front is `version`. Each binary record starts with one, and
+/// a format change takes a new number, so a reader refuses what it does not
+/// understand instead of misreading it.
+pub(crate) fn split_header<const N: usize>(
+    bytes: &[u8],
+    version: u8,
+) -> Result<(&[u8; N], &[u8]), DecodeError> {
     let need = N + 1;
-    let Some((&version, rest)) = bytes.split_first() else {
+    let Some((&found, rest)) = bytes.split_first() else {
         return Err(DecodeError::Truncated { need, got: 0 });
     };
-    if version != VERSION {
-        return Err(DecodeError::UnknownVersion(version));
+    if found != version {
+        return Err(DecodeError::UnknownVersion(found));
     }
     let Some((header, body)) = rest.split_first_chunk::<N>() else {
         return Err(DecodeError::Truncated {

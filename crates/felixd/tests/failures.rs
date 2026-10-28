@@ -20,6 +20,7 @@ fn output_record(input_offset: u64, payload: &[u8]) -> Vec<u8> {
             input_offset,
             index: 0,
         },
+        0,
         payload,
     )
 }

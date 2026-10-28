@@ -5,6 +5,7 @@
 //! - [`admin`]: the control plane's REST API, used to create streams and caches.
 //! - [`submit`]: what `felixd run` does.
 //! - [`agent`]: watches the workloads cache and runs each one.
+//! - [`lease`]: claims, renews and releases a workload's lease.
 //! - [`runner`]: runs one workload: resume, then step, append and snapshot.
 //! - [`output`]: appends a step's outputs exactly once.
 //! - [`faults`]: crashes and dropped inputs the integration tests inject.
@@ -16,7 +17,6 @@ pub mod settings;
 pub mod submit;
 
 mod faults;
+mod lease;
 mod output;
 mod runner;
-
-pub use runner::{Outcome, run_workload};

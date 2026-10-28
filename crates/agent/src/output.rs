@@ -1,8 +1,11 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use felix_client::ConditionalWrite;
+use felixd_core::output::{self, Reconciled};
 
+use crate::faults;
 use crate::felix::Felix;
-use crate::runner::poison;
+use crate::lease::Fence;
+use crate::runner::{LostLease, poison};
 
 /// Consecutive failed attempts to write one batch before giving up.
 const MAX_ATTEMPTS: u32 = 5;
@@ -11,14 +14,16 @@ const MAX_ATTEMPTS: u32 = 5;
 pub(crate) struct OutputLog<'a> {
     felix: &'a Felix,
     stream: &'a str,
+    fence: &'a Fence,
     tail: u64,
 }
 
 impl<'a> OutputLog<'a> {
-    pub(crate) fn new(felix: &'a Felix, stream: &'a str, tail: u64) -> Self {
+    pub(crate) fn new(felix: &'a Felix, stream: &'a str, fence: &'a Fence, tail: u64) -> Self {
         OutputLog {
             felix,
             stream,
+            fence,
             tail,
         }
     }
@@ -31,14 +36,17 @@ impl<'a> OutputLog<'a> {
     /// Appends `batch` at the tail.
     ///
     /// A refused write, or one whose answer was lost, means someone else may
-    /// have appended first. The stream is read at the tail we expected: records
-    /// there that are exactly the start of our batch were written by an earlier
-    /// owner of the same deterministic workload, so they are skipped, and
-    /// anything else is a divergence we must not write over, and fails the
-    /// workload.
+    /// have appended first. The stream is read at the tail we expected and
+    /// [`output::reconcile`] decides: skip records an earlier owner (or this
+    /// one) already wrote, stop if a later owner wrote, resume if an earlier
+    /// owner got further than this batch, and fail on anything else.
     pub(crate) async fn append(&mut self, mut batch: Vec<Vec<u8>>) -> Result<()> {
         let mut failures = 0;
         while !batch.is_empty() {
+            if !self.fence.holds() {
+                return Err(LostLease.into());
+            }
+            faults::before_append();
             let seen_tail = match self
                 .felix
                 .publish_if(self.stream, batch.clone(), self.tail)
@@ -83,19 +91,30 @@ impl<'a> OutputLog<'a> {
             .felix
             .read_range(self.stream, self.tail, seen_tail)
             .await?;
-        let same = existing.len() <= batch.len()
-            && existing
-                .iter()
-                .zip(batch.iter())
-                .all(|(found, ours)| found.payload.as_ref() == ours.as_slice());
-        if !same {
-            return Err(poison(format!(
+        let found: Vec<&[u8]> = existing.iter().map(|r| r.payload.as_ref()).collect();
+        match output::reconcile(self.fence.epoch(), batch, &found) {
+            Reconciled::Skip(n) => {
+                batch.drain(..n);
+                self.tail = seen_tail;
+                Ok(())
+            }
+            Reconciled::Superseded { epoch } => {
+                tracing::info!(
+                    stream = self.stream,
+                    epoch,
+                    "a later owner wrote to the output stream"
+                );
+                Err(LostLease.into())
+            }
+            Reconciled::Behind => Err(anyhow!(
+                "an earlier owner wrote past {} on {}, resuming",
+                self.tail,
+                self.stream
+            )),
+            Reconciled::Diverged => Err(poison(format!(
                 "{} holds records at {}..{} that differ from this workload's output",
                 self.stream, self.tail, seen_tail
-            )));
+            ))),
         }
-        batch.drain(..existing.len());
-        self.tail = seen_tail;
-        Ok(())
     }
 }
