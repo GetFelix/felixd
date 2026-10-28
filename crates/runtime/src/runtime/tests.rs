@@ -5,9 +5,9 @@ fn component(wat: &str) -> Vec<u8> {
 }
 
 fn load_err(wat: &str) -> LoadError {
-    match Runtime::new(Limits::default())
+    match Runtime::new()
         .unwrap()
-        .load(&component(wat))
+        .load(&component(wat), Limits::default())
     {
         Ok(_) => panic!("expected the load to fail"),
         Err(e) => e,
@@ -39,9 +39,9 @@ fn a_randomness_import_is_rejected() {
 
 #[test]
 fn bytes_that_are_not_a_component_are_rejected() {
-    let runtime = Runtime::new(Limits::default()).unwrap();
+    let runtime = Runtime::new().unwrap();
     assert!(matches!(
-        runtime.load(b"not wasm"),
+        runtime.load(b"not wasm", Limits::default()),
         Err(LoadError::Invalid(_))
     ));
 }
@@ -54,7 +54,7 @@ fn a_component_without_the_workload_exports_is_rejected() {
 
 #[test]
 fn nan_results_are_canonical() {
-    let runtime = Runtime::new(Limits::default()).unwrap();
+    let runtime = Runtime::new().unwrap();
     let module = wasmtime::Module::new(
         &runtime.engine,
         component(
@@ -75,4 +75,38 @@ fn nan_results_are_canonical() {
         .call(&mut store, ())
         .unwrap();
     assert_eq!(nan as u32, 0x7fc0_0000);
+}
+
+fn core_module(runtime: &Runtime, wat: &str) -> wasmtime::Module {
+    wasmtime::Module::new(&runtime.engine, component(wat)).unwrap()
+}
+
+#[test]
+fn a_table_past_the_element_bound_is_refused() {
+    let runtime = Runtime::new().unwrap();
+    let big = core_module(
+        &runtime,
+        &format!("(module (table {} funcref))", MAX_TABLE_ELEMENTS + 1),
+    );
+    let mut store = runtime.store(Limits::default());
+    assert!(wasmtime::Instance::new(&mut store, &big, &[]).is_err());
+    let fits = core_module(
+        &runtime,
+        &format!("(module (table {} funcref))", MAX_TABLE_ELEMENTS),
+    );
+    let mut store = runtime.store(Limits::default());
+    assert!(wasmtime::Instance::new(&mut store, &fits, &[]).is_ok());
+}
+
+#[test]
+fn instances_tables_and_memories_are_bounded() {
+    let runtime = Runtime::new().unwrap();
+    let module = core_module(&runtime, "(module (table 1 funcref) (memory 1))");
+    let mut store = runtime.store(Limits::default());
+    let mut made = 0;
+    while wasmtime::Instance::new(&mut store, &module, &[]).is_ok() {
+        made += 1;
+        assert!(made <= MAX_INSTANCES, "no bound on instances");
+    }
+    assert_eq!(made, MAX_INSTANCES.min(MAX_TABLES).min(MAX_MEMORIES));
 }

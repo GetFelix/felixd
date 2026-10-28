@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, WorkloadSpec, WorkloadState};
+use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, Limits, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
 
 use crate::admin::{self, StreamKind};
@@ -14,6 +14,7 @@ pub struct Submission {
     pub module: Vec<u8>,
     pub input: String,
     pub snapshot_every: u64,
+    pub limits: Limits,
     pub replication_factor: u32,
 }
 
@@ -24,6 +25,7 @@ impl Submission {
             module,
             input: input.to_owned(),
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
+            limits: Limits::default(),
             replication_factor: 1,
         }
     }
@@ -57,6 +59,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         output,
         snapshot_every: submission.snapshot_every,
         state: WorkloadState::Running,
+        limits: submission.limits,
         failure: None,
     };
     let spec = Bytes::from(spec.encode());

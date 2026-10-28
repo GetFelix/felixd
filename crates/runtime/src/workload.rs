@@ -1,8 +1,8 @@
 use thiserror::Error;
 use wasmtime::{Store, StoreLimits, Trap};
 
+use crate::Limits;
 use crate::bindings::Workload as Bindings;
-use crate::limits::Limits;
 
 /// A loaded workload. Calls take `&mut self`, so they never overlap.
 pub struct Workload {
@@ -79,14 +79,17 @@ impl Workload {
             .set_fuel(self.limits.fuel_per_call)
             .expect("fuel is enabled");
         f(&self.bindings, &mut self.store).map_err(|error| {
-            let kind = match error.downcast_ref::<Trap>() {
+            let trap = error.downcast_ref::<Trap>();
+            let kind = match trap {
                 Some(Trap::OutOfFuel) => FailureKind::OutOfFuel,
                 _ => FailureKind::Trap,
             };
-            let failure = Failure {
-                kind,
-                message: format!("{error:#}"),
+            // A trap's own text is one line; the full error adds a backtrace.
+            let message = match trap {
+                Some(trap) => trap.to_string(),
+                None => format!("{error:#}"),
             };
+            let failure = Failure { kind, message };
             self.failure = Some(failure.clone());
             WorkloadError::Failed(failure)
         })

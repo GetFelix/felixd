@@ -1,15 +1,24 @@
 use thiserror::Error;
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
+use crate::Limits;
 use crate::bindings::Workload as Bindings;
-use crate::limits::Limits;
 use crate::workload::Workload;
 
-/// Compiles and instantiates workloads under one set of [`Limits`].
+/// The Wasm stack a call may use. It is fixed here, not left to wasmtime's
+/// default, because where a deep recursion overflows decides which step traps.
+pub(crate) const MAX_WASM_STACK: usize = 512 << 10;
+/// Bounds on what a workload may create besides memory. Like the stack, they
+/// decide where a workload fails, so they are fixed per felixd build.
+pub(crate) const MAX_TABLE_ELEMENTS: usize = 100_000;
+pub(crate) const MAX_INSTANCES: usize = 16;
+pub(crate) const MAX_TABLES: usize = 16;
+pub(crate) const MAX_MEMORIES: usize = 4;
+
+/// Compiles and instantiates workloads.
 pub struct Runtime {
-    engine: Engine,
-    limits: Limits,
+    pub(crate) engine: Engine,
 }
 
 /// Why a component could not be loaded.
@@ -25,21 +34,22 @@ pub enum LoadError {
 }
 
 impl Runtime {
-    pub fn new(limits: Limits) -> wasmtime::Result<Runtime> {
+    pub fn new() -> wasmtime::Result<Runtime> {
         let mut config = Config::new();
         // NaN bit patterns are the one source of float nondeterminism in Wasm.
         config.cranelift_nan_canonicalization(true);
         config.consume_fuel(true);
         config.wasm_relaxed_simd(false);
+        config.max_wasm_stack(MAX_WASM_STACK);
         Ok(Runtime {
             engine: Engine::new(&config)?,
-            limits,
         })
     }
 
-    /// Loads `bytes` as a component and instantiates it. The state is the
-    /// workload's initial state; call [`Workload::restore`] to resume.
-    pub fn load(&self, bytes: &[u8]) -> Result<Workload, LoadError> {
+    /// Loads `bytes` as a component and instantiates it under `limits`. The
+    /// state is the workload's initial state; call [`Workload::restore`] to
+    /// resume.
+    pub fn load(&self, bytes: &[u8], limits: Limits) -> Result<Workload, LoadError> {
         let component =
             Component::new(&self.engine, bytes).map_err(|e| LoadError::Invalid(e.to_string()))?;
         let imports: Vec<String> = component
@@ -50,17 +60,26 @@ impl Runtime {
         if !imports.is_empty() {
             return Err(LoadError::Imports(imports));
         }
+        let mut store = self.store(limits);
+        store
+            .set_fuel(limits.fuel_per_call)
+            .map_err(|e| LoadError::Instantiate(e.to_string()))?;
+        let bindings = Bindings::instantiate(&mut store, &component, &Linker::new(&self.engine))
+            .map_err(|e| LoadError::Instantiate(e.to_string()))?;
+        Ok(Workload::new(store, bindings, limits))
+    }
+
+    pub(crate) fn store(&self, limits: Limits) -> Store<StoreLimits> {
         let store_limits = StoreLimitsBuilder::new()
-            .memory_size(self.limits.max_memory_bytes)
+            .memory_size(usize::try_from(limits.max_memory_bytes).unwrap_or(usize::MAX))
+            .table_elements(MAX_TABLE_ELEMENTS)
+            .instances(MAX_INSTANCES)
+            .tables(MAX_TABLES)
+            .memories(MAX_MEMORIES)
             .build();
         let mut store = Store::new(&self.engine, store_limits);
         store.limiter(|limits| limits);
         store
-            .set_fuel(self.limits.fuel_per_call)
-            .map_err(|e| LoadError::Instantiate(e.to_string()))?;
-        let bindings = Bindings::instantiate(&mut store, &component, &Linker::new(&self.engine))
-            .map_err(|e| LoadError::Instantiate(e.to_string()))?;
-        Ok(Workload::new(store, bindings, self.limits))
     }
 }
 

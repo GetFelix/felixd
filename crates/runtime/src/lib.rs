@@ -5,10 +5,9 @@
 //! that traps or runs out of fuel is marked failed and never called again.
 
 mod bindings;
-mod limits;
 mod runtime;
 mod workload;
 
-pub use limits::Limits;
+pub use felixd_core::spec::Limits;
 pub use runtime::{LoadError, Runtime};
 pub use workload::{Failure, FailureKind, Workload, WorkloadError};

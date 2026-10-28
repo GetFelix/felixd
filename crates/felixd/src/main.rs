@@ -24,12 +24,6 @@ enum Command {
     Agent {
         #[command(flatten)]
         connection: Connection,
-        /// Fuel given to each call into a workload.
-        #[arg(long, default_value_t = Limits::default().fuel_per_call)]
-        fuel: u64,
-        /// The most memory a workload may use, in bytes.
-        #[arg(long, default_value_t = Limits::default().max_memory_bytes)]
-        max_memory: usize,
     },
     /// Submit a workload: store its module, create its streams and start it.
     Run {
@@ -44,6 +38,13 @@ enum Command {
         /// Write a snapshot after this many inputs.
         #[arg(long, default_value_t = felixd_core::spec::DEFAULT_SNAPSHOT_EVERY)]
         snapshot_every: u64,
+        /// Fuel given to each call into the workload. It is stored in the
+        /// spec, so every node runs the workload under the same limit.
+        #[arg(long, default_value_t = Limits::default().fuel_per_call)]
+        fuel: u64,
+        /// The most memory the workload may use, in bytes. Stored in the spec.
+        #[arg(long, default_value_t = Limits::default().max_memory_bytes)]
+        max_memory: u64,
         /// Replicas of the workload's output and snapshot streams. More than
         /// one makes them quorum streams.
         #[arg(long, default_value_t = 1)]
@@ -62,25 +63,19 @@ async fn main() -> Result<()> {
         )
         .init();
     match Cli::parse().command {
-        Command::Agent {
-            connection,
-            fuel,
-            max_memory,
-        } => {
-            let limits = Limits {
-                fuel_per_call: fuel,
-                max_memory_bytes: max_memory,
-            };
+        Command::Agent { connection } => {
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            felixd_agent::agent::run(&connection.settings()?, limits, shutdown).await
+            felixd_agent::agent::run(&connection.settings()?, shutdown).await
         }
         Command::Run {
             connection,
             id,
             input,
             snapshot_every,
+            fuel,
+            max_memory,
             replication_factor,
             module,
         } => {
@@ -88,6 +83,10 @@ async fn main() -> Result<()> {
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
             let mut submission = Submission::new(&id, bytes, &input);
             submission.snapshot_every = snapshot_every;
+            submission.limits = Limits {
+                fuel_per_call: fuel,
+                max_memory_bytes: max_memory,
+            };
             submission.replication_factor = replication_factor;
             let hash = submit(&connection.settings()?, submission).await?;
             println!("workload {id} running module {hash}");

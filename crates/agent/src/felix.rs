@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
-    AckMode, ClientConfig, ClusterClient, ConditionalWrite, StartPosition, StreamRecord,
-    root_store_from_pem_file,
+    AckMode, BrokerError, ClientConfig, ClusterClient, ConditionalWrite, ErrorCode, StartPosition,
+    StreamRecord, root_store_from_pem_file,
 };
 
 use crate::settings::Settings;
@@ -129,25 +129,37 @@ impl Felix {
         let mut records = Vec::new();
         let mut next = from;
         while next < end {
-            let page = self
-                .client
-                .read(
-                    &self.tenant,
-                    &self.namespace,
-                    stream,
-                    0,
-                    next,
-                    Some(end),
-                    PAGE_RECORDS,
-                )
-                .await?;
-            records.extend(page.records);
-            if page.next_offset <= next {
+            let (page, after) = self.read_page(stream, next, end).await?;
+            records.extend(page);
+            if after <= next {
                 break;
             }
-            next = page.next_offset;
+            next = after;
         }
         Ok(records)
+    }
+
+    /// One page of the records at offsets `from..end`, and the offset the
+    /// next page starts at.
+    pub async fn read_page(
+        &self,
+        stream: &str,
+        from: u64,
+        end: u64,
+    ) -> Result<(Vec<StreamRecord>, u64)> {
+        let page = self
+            .client
+            .read(
+                &self.tenant,
+                &self.namespace,
+                stream,
+                0,
+                from,
+                Some(end),
+                PAGE_RECORDS,
+            )
+            .await?;
+        Ok((page.records, page.next_offset))
     }
 
     /// The last record of the stream, given its `tail`.
@@ -210,6 +222,13 @@ where
 }
 
 fn not_ready(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}");
-    text.contains("not served") || text.contains("not found")
+    error.downcast_ref::<BrokerError>().is_some_and(|broker| {
+        matches!(
+            broker.code,
+            ErrorCode::NotFound | ErrorCode::ShardUnavailable
+        )
+    })
 }
+
+#[cfg(test)]
+mod tests;
