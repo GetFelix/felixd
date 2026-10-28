@@ -18,6 +18,8 @@ felixd-agent = { path = "crates/agent" }
 felixd-testkit = { path = "crates/testkit" }
 wasmtime = { version = "=50.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wit-component = "=0.262.0"
+thiserror = "=2.0.21"
+wat = "=1.262.0"
 clap = { version = "=4.5.48", features = ["derive"] }
 
 [workspace.lints.rust]
