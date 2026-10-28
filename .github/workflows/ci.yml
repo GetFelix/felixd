@@ -32,17 +32,17 @@ jobs:
       FELIXD_REQUIRE_FELIX: "1"
       FELIX_BROKERS: 127.0.0.1:5000
       FELIX_AUTH_TENANT: dev
-      FELIX_AUTH_TOKEN_FILE: ${{ runner.temp }}/felix/client.jwt
-      FELIX_CA_FILE: ${{ runner.temp }}/felix/broker-cert.pem
+      FELIX_AUTH_TOKEN_FILE: /tmp/felix/client.jwt
+      FELIX_CA_FILE: /tmp/felix/broker-cert.pem
       FELIX_CONTROLPLANE_URL: http://127.0.0.1:8443
-      FELIX_CONTROLPLANE_TOKEN_FILE: ${{ runner.temp }}/felix/controlplane.jwt
+      FELIX_CONTROLPLANE_TOKEN_FILE: /tmp/felix/controlplane.jwt
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Start Felix
         run: |
           docker compose -f tests/felix/compose.yaml up -d --wait
-          tests/felix/credentials.sh "$RUNNER_TEMP/felix"
+          tests/felix/credentials.sh /tmp/felix
       - run: cargo test --workspace --test '*' --locked -- --test-threads=1
       - name: Felix logs
         if: failure()
