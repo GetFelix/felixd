@@ -8,10 +8,18 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 clap = { workspace = true }
-felixd-agent = { workspace = true }
 felixd-core = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+felixd-agent = { workspace = true }
 felixd-runtime = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+felixd-testkit = { workspace = true }
+felix-client = { workspace = true }
 
 [lints]
 workspace = true

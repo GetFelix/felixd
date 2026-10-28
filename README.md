@@ -5,9 +5,45 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** design stage. Nothing runs yet. The plan is in
+> **Status:** milestone 0. One node runs a workload against Felix and resumes
+> after a restart. There are no leases or failover yet. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
+
+## Try it
+
+You need Rust and a container runtime. The test stack starts one Felix broker
+and control plane with development credentials:
+
+```
+docker compose -f tests/felix/compose.yaml up -d --wait
+tests/felix/credentials.sh /tmp/felix
+export FELIX_BROKERS=127.0.0.1:5000 FELIX_AUTH_TENANT=dev \
+  FELIX_AUTH_TOKEN_FILE=/tmp/felix/client.jwt FELIX_CA_FILE=/tmp/felix/broker-cert.pem \
+  FELIX_CONTROLPLANE_URL=http://127.0.0.1:8443 \
+  FELIX_CONTROLPLANE_TOKEN_FILE=/tmp/felix/controlplane.jwt
+```
+
+Run the restart test, which submits the example workloads, kills the agent
+mid-stream, restarts it and checks the output stream:
+
+```
+FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test restart -- --test-threads=1
+```
+
+By hand, with a workload component and a durable input stream that already exists:
+
+```
+felixd run --id counter --input in counter.wasm
+felixd agent
+```
+
+`felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
+`wl.<id>.snap` streams and writes the spec. The agent reads every spec in the
+`workloads` cache and runs it. Kill the agent and start it again: the output
+stream carries on from the right input with nothing missing and nothing repeated.
+The connection settings are the environment variables `felixctl` reads, plus
+`FELIX_NAMESPACE` (default `default`).
 
 ## What we are trying to achieve
 
@@ -167,7 +203,7 @@ owner knows which outputs already exist and does not write them again.
 
 | M | Milestone | What it proves | State |
 |---|---|---|---|
-| 0 | One node, one workload | The workload contract works; a restart resumes where it stopped | Planned |
+| 0 | One node, one workload | The workload contract works; a restart resumes where it stopped | Done |
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Planned |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Planned |
 | 3 | Replay | Rebuild any workload at any offset or time | Planned |

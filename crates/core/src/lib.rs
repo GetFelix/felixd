@@ -5,9 +5,11 @@
 //!   to its streams.
 //! - [`output`] and [`snapshot`]: the headers on output and snapshot records.
 //! - [`spec`] and [`lease`]: the values in the `workloads` and `leases` caches.
+//! - [`module`]: how a module is identified.
 //! - [`resume`]: where a new owner picks a workload up.
 
 pub mod lease;
+pub mod module;
 pub mod names;
 pub mod output;
 pub mod resume;
