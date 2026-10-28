@@ -5,6 +5,9 @@
 //! - `crash-after-snapshot=N`: abort it just after its Nth snapshot is written.
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
+//! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
+//!   its Nth output append, after the lease was checked. It carries on when
+//!   the test sends `SIGCONT`, as a node out of a long GC pause would.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -15,6 +18,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+static APPENDS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(not(feature = "faults"))]
 fn fault(_name: &str) -> Option<u64> {
@@ -60,4 +64,15 @@ pub(crate) fn after_snapshot() {
 
 pub(crate) fn drop_input(offset: u64) -> bool {
     fault("drop-input") == Some(offset)
+}
+
+pub(crate) fn before_append() {
+    let n = APPENDS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-append") == Some(n) {
+        tracing::warn!("injected freeze");
+        // Stopping ourselves stops every thread at once, renewals included.
+        let _ = std::process::Command::new("kill")
+            .args(["-STOP", &std::process::id().to_string()])
+            .status();
+    }
 }

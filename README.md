@@ -5,8 +5,9 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 0. One node runs a workload against Felix and resumes
-> after a restart. There are no leases or failover yet. The plan is in
+> **Status:** milestone 1 in progress. Agents hold a lease per workload and
+> another agent takes a workload over when its holder dies. Spreading
+> workloads across nodes and the three-node failover test are next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -40,8 +41,11 @@ felixd agent
 
 `felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
 `wl.<id>.snap` streams and writes the spec. The agent reads every spec in the
-`workloads` cache and runs it. Kill the agent and start it again: the output
-stream carries on from the right input with nothing missing and nothing repeated.
+`workloads` cache, claims the lease of each one nobody holds and runs it while
+the lease holds. Start a second agent and kill the first: within one lease TTL
+(10 s by default, `--lease-ttl-ms`) the second carries on from the right input,
+with nothing missing and nothing repeated. Each agent needs its own
+`--node-id`; the default is the host name and process id.
 The connection settings are the environment variables `felixctl` reads, plus
 `FELIX_NAMESPACE` (default `default`).
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in

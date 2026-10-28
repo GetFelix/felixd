@@ -228,7 +228,7 @@ Everything lives in one Felix tenant, in a namespace per cluster.
 | Resource | Kind | Key or name | Value | Written by |
 |---|---|---|---|---|
 | `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | `felixd run`, the owner on failure |
-| `leases` | cache, TTL | workload id | owner node id, lease epoch | agents, with `cache_put_if` |
+| `leases` | cache, TTL | workload id | owner node id, lease epoch (0 in the claim itself) | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | address, capacity, version | each agent |
 | `modules` | cache | sha256 of the module | the module bytes | `felixd run` |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
@@ -237,9 +237,10 @@ Everything lives in one Felix tenant, in a namespace per cluster.
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
 
-Each output record carries a small header: the input offset that produced it
-and its index among that step's outputs. Each snapshot carries the input
-offset it covers and the output tail at that point.
+Each output record carries a small header: the input offset that produced it,
+its index among that step's outputs, and the lease epoch of the owner that
+wrote it. Each snapshot carries the input offset it covers and the output tail
+at that point.
 
 `felixd run` creates the workload's streams through the control plane's REST
 API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
@@ -247,16 +248,35 @@ create streams.
 
 ## Leases and failure detection
 
-A lease is an entry in `leases` with a TTL (default 10 s). An agent claims a
-workload with `cache_put_if` on "absent". It renews every TTL/3 with
-`cache_put_if` at the version it last wrote. A refused renewal means the
-lease is gone: the agent stops the workload at once.
+A lease is an entry in `leases` with a TTL (default 10 s, `felixd agent
+--lease-ttl-ms`). An agent claims a workload with `cache_put_if` on "absent",
+which the broker grants only once it counts the previous lease as expired or
+deleted. The holder renews every TTL/3 with `cache_put_if` at the version it
+last wrote. A refused renewal means the lease is gone: the agent stops the
+workload at once. A renewal whose answer is lost is read back: the lease value
+names the holder's epoch, so finding it at a newer version means the renewal
+landed. A claim whose answer is lost is not adopted; it expires unused.
+
+The lease's epoch is one more than the cache version of the claim. Felix
+versions only grow within a shard and are never reused, so every claim has a
+higher epoch than all claims before it, including ones that have expired.
+The claim itself writes epoch 0, since its version isn't known until it is
+applied, and each renewal writes the real epoch.
 
 An agent that cannot reach Felix stops its workloads once its own clock says
-two thirds of the TTL have passed since the last successful renewal, which is
-before any other node can claim. If the agent's clock is wrong or it is
-frozen, fencing (below) still keeps the output correct. The lease only decides
-who should run; it is not what keeps the output correct.
+two thirds of the TTL have passed since it sent the last successful renewal,
+which is before any other node can claim. The clock is a monotonic one, so a
+change to the wall clock doesn't move it. If the agent is frozen, its clock is
+wrong, or the broker expires the lease early, fencing (below) still keeps the
+output correct. The lease only decides who should run; it is not what keeps
+the output correct.
+
+An agent never adopts a lease it finds under its own name. A restarted agent
+waits for its old leases to expire, so two processes configured with the same
+node id can't both believe they hold a workload. On a clean shutdown an agent
+deletes its leases with `cache_delete_if`, so another node can claim at once.
+Only a holder marks a workload failed in its spec, so a stale node can't fail
+a workload another node is running.
 
 Agents watch `leases` with retained values. When an entry expires or is
 deleted, any agent may claim it, after a random delay so that one node does
@@ -275,13 +295,20 @@ compare-and-set on the whole shard (`crates/sdk/felix-client/src/client/commit.r
 in Felix), and every `.out` stream has one shard and one writer at a time, so:
 
 - If a stale owner wakes up and writes, the write is refused as soon as the
-  new owner has appended anything, and the stale owner learns it has lost the
-  workload.
+  new owner has appended anything. The records it finds at its expected tail
+  carry a later epoch, so it stops without writing anything more.
 - If the stale owner writes first, the new owner's write is refused, and it
   rereads the tail. Because the workload is deterministic, the stale owner
   wrote exactly what the new owner would have, so the new owner skips past it.
+  If the stale owner got further than the new owner's batch, the new owner
+  resumes from the streams again.
 
-Either way each input offset's outputs appear once, in order. A lost answer to
+Either way each input offset's outputs appear once, in order, and the epochs
+on the stream never decrease: once a later owner has written, no earlier one
+writes again. Without the epoch, a stale owner that finds the new owner's
+identical records would skip them and write after them, and the two would take
+turns on the stream. A new owner that finds a later epoch already on the
+output stream when it resumes stops too. A lost answer to
 `publish_if` is resolved by reading the stream at the expected offset, as the
 Felix docs say to do.
 

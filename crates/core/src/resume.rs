@@ -78,14 +78,14 @@ impl Resume {
 }
 
 /// Checks an output the owner produced and skipped against `found`, the
-/// record at `offset` of the output stream that should hold the same bytes.
-/// `None` means the stream ran out first.
+/// record at `offset` of the output stream that should hold the same output.
+/// The writer's epoch may differ. `None` means the stream ran out first.
 pub fn check_skipped(
     offset: u64,
     replayed: &[u8],
     found: Option<&[u8]>,
 ) -> Result<(), ResumeError> {
-    if found == Some(replayed) {
+    if found.is_some_and(|found| crate::output::same_output(found, replayed)) {
         Ok(())
     } else {
         Err(ResumeError::Diverged { offset })

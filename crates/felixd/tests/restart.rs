@@ -8,50 +8,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{INPUT, OUTPUT, SNAPSHOTS, TestFelix, eventually, test_felix};
-use felixd_core::output;
-use felixd_core::spec::Limits;
-use felixd_runtime::Runtime;
+use common::{INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
 
 const INPUTS: u64 = 240;
-
-/// What the output stream should hold: every output of every input, run
-/// through the same module without interruption.
-fn expected(module: &[u8], inputs: &[(u64, Vec<u8>)]) -> Vec<Vec<u8>> {
-    let mut workload = Runtime::new()
-        .unwrap()
-        .load(module, Limits::default())
-        .unwrap();
-    let mut records = Vec::new();
-    for (offset, payload) in inputs {
-        for (index, out) in workload.step(payload).unwrap().iter().enumerate() {
-            let header = output::OutputHeader {
-                input_offset: *offset,
-                index: index as u32,
-            };
-            records.push(output::encode(header, out));
-        }
-    }
-    records
-}
-
-/// Waits for the output of every input on the input stream, then checks the
-/// output stream holds exactly that.
-async fn assert_uninterrupted(t: &TestFelix, module: &[u8], inputs: u64) {
-    let inputs_found = t.read_all(INPUT).await;
-    assert_eq!(inputs_found.len() as u64, inputs);
-    let want = expected(module, &inputs_found);
-    eventually("all output", Duration::from_secs(60), || async {
-        let got = t.read_all(OUTPUT).await;
-        (got.len() >= want.len()).then_some(())
-    })
-    .await;
-    // Give a duplicate time to show up before comparing.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let got: Vec<Vec<u8>> = t.read_all(OUTPUT).await.into_iter().map(|r| r.1).collect();
-    assert_eq!(got.len(), want.len(), "output length");
-    assert!(got == want, "output differs from an uninterrupted run");
-}
 
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()

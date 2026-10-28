@@ -204,13 +204,17 @@ fn nothing_to_skip_is_not_replaying() {
 
 #[test]
 fn a_skipped_output_must_match_the_record_in_its_place() {
-    assert_eq!(check_skipped(3, b"abc", Some(b"abc")), Ok(()));
+    let record = |epoch, payload: &[u8]| crate::output::encode(out(5, 0), epoch, payload);
     assert_eq!(
-        check_skipped(3, b"abc", Some(b"abd")),
+        check_skipped(3, &record(2, b"abc"), Some(&record(1, b"abc"))),
+        Ok(())
+    );
+    assert_eq!(
+        check_skipped(3, &record(1, b"abc"), Some(&record(1, b"abd"))),
         Err(ResumeError::Diverged { offset: 3 })
     );
     assert_eq!(
-        check_skipped(9, b"abc", None),
+        check_skipped(9, &record(1, b"abc"), None),
         Err(ResumeError::Diverged { offset: 9 })
     );
 }

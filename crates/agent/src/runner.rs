@@ -13,16 +13,33 @@ use felixd_runtime::{Runtime, Workload, WorkloadError};
 
 use crate::faults;
 use crate::felix::Felix;
+use crate::lease::Fence;
 use crate::output::OutputLog;
 
-/// How [`run_workload`] ended. It only returns when the workload cannot go on.
+/// How [`run_workload`] ended. It only returns when the workload cannot go on
+/// here.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// The workload trapped, ran out of fuel or could not be loaded, or what
     /// is on its streams cannot be resumed from. It would fail the same way
     /// anywhere, so it is not retried.
     Failed(String),
+    /// This node no longer holds the lease, by its own clock or because a
+    /// later owner has written to the output stream.
+    Lost,
 }
+
+/// The runner found it no longer holds the lease.
+#[derive(Debug)]
+pub(crate) struct LostLease;
+
+impl fmt::Display for LostLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the lease is lost")
+    }
+}
+
+impl std::error::Error for LostLease {}
 
 /// A state no node can get past. Retrying would replay the same history into
 /// the same failure, so the workload is marked failed instead.
@@ -49,17 +66,21 @@ fn failed(error: WorkloadError) -> anyhow::Error {
 /// Resumes the workload from Felix and runs it: for each input, `step`, append
 /// the outputs, and write a snapshot every `snapshot_every` inputs.
 ///
+/// Nothing is written once `fence` stops holding.
+///
 /// An `Err` is a problem with Felix. Calling this again resumes from what is on
 /// the streams.
-pub async fn run_workload(
+pub(crate) async fn run_workload(
     felix: &Felix,
     runtime: &Runtime,
     id: &str,
     spec: &WorkloadSpec,
+    fence: &Fence,
 ) -> Result<Outcome> {
-    match run(felix, runtime, id, spec).await {
+    match run(felix, runtime, id, spec, fence).await {
         Ok(never) => match never {},
         Err(error) if error.is::<Poison>() => Ok(Outcome::Failed(format!("{error:#}"))),
+        Err(error) if error.is::<LostLease>() => Ok(Outcome::Lost),
         Err(error) => Err(error),
     }
 }
@@ -69,6 +90,7 @@ async fn run(
     runtime: &Runtime,
     id: &str,
     spec: &WorkloadSpec,
+    fence: &Fence,
 ) -> Result<Infallible> {
     let bytes = felix
         .cache_get(names::MODULES, &spec.module)
@@ -101,6 +123,15 @@ async fn run(
         ),
         None => None,
     };
+    if let Some(last) = last_output.filter(|last| last.epoch > fence.epoch()) {
+        tracing::info!(
+            workload = id,
+            epoch = last.epoch,
+            "a later owner has written"
+        );
+        return Err(LostLease.into());
+    }
+    let last_output = last_output.map(|last| last.header);
     let resume = resume::fold(Found {
         snapshot: snapshot.as_ref().map(|(header, _)| *header),
         last_output,
@@ -116,9 +147,10 @@ async fn run(
         felix,
         spec,
         snap_stream: &snap_stream,
+        fence,
         workload,
         resume,
-        log: OutputLog::new(felix, &spec.output, output_tail),
+        log: OutputLog::new(felix, &spec.output, fence, output_tail),
         written: Written {
             felix,
             stream: &spec.output,
@@ -162,6 +194,7 @@ struct Steps<'a> {
     felix: &'a Felix,
     spec: &'a WorkloadSpec,
     snap_stream: &'a str,
+    fence: &'a Fence,
     workload: Workload,
     resume: Resume,
     log: OutputLog<'a>,
@@ -179,7 +212,7 @@ impl Steps<'_> {
                 input_offset: offset,
                 index,
             };
-            let record = output::encode(header, payload);
+            let record = output::encode(header, self.fence.epoch(), payload);
             if self.resume.already_written(offset, index) {
                 self.written.check(&record).await?;
             } else {
@@ -204,6 +237,9 @@ impl Steps<'_> {
 
     async fn snapshot(&mut self, input_offset: u64) -> Result<()> {
         faults::before_snapshot();
+        if !self.fence.holds() {
+            return Err(LostLease.into());
+        }
         let state = self.workload.snapshot().map_err(failed)?;
         let header = SnapshotHeader {
             input_offset,

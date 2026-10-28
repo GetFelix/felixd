@@ -4,7 +4,9 @@
 //! big endian) | state`, where `state` is what the workload's `snapshot`
 //! returned.
 
-use crate::codec::{DecodeError, VERSION, split_header};
+use crate::codec::{DecodeError, split_header};
+
+const VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotHeader {
@@ -27,7 +29,7 @@ pub fn encode(header: SnapshotHeader, state: &[u8]) -> Vec<u8> {
 
 /// Splits a snapshot record into its header and the workload's state.
 pub fn decode(record: &[u8]) -> Result<(SnapshotHeader, &[u8]), DecodeError> {
-    let (header, state) = split_header::<16>(record)?;
+    let (header, state) = split_header::<16>(record, VERSION)?;
     let (input_offset, output_tail) = header.split_at(8);
     Ok((
         SnapshotHeader {
