@@ -11,6 +11,17 @@
 - Workloads stay deterministic. The host gives a workload nothing outside its input records. Every example workload is checked with `felixd replay --diff` in CI.
 - Rust only. Format with `cargo fmt`, lint with `cargo clippy -D warnings`, and pin dependency versions.
 
+## Build and test
+
+```
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --lib --bins        # unit
+cargo test --workspace --test '*'          # integration
+```
+
+CI runs the same three as the jobs `lint`, `unit` and `integration`.
+
 ## Comments and docs
 
 - Only comment where the code is unclear, such as a constraint the code can't show.
