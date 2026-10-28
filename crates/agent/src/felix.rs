@@ -90,6 +90,9 @@ impl Felix {
 
     /// Stores `value` only if the key's entry meets `condition`. An expired
     /// entry counts as absent.
+    ///
+    /// Not retried: a resend of a put that was applied would be refused by
+    /// its own version and look like someone else's write.
     pub async fn cache_put_if(
         &self,
         cache: &str,
@@ -98,32 +101,30 @@ impl Felix {
         ttl_ms: Option<u64>,
         condition: CacheCondition,
     ) -> Result<CacheConditionResult> {
-        until_ready(|| {
-            self.client.cache_put_if(
+        self.client
+            .cache_put_if(
                 &self.tenant,
                 &self.namespace,
                 cache,
                 key,
-                value.clone(),
+                value,
                 ttl_ms,
                 condition,
             )
-        })
-        .await
+            .await
     }
 
-    /// Removes `key` only if its version is `version`.
+    /// Removes `key` only if its version is `version`. Not retried, like
+    /// [`Self::cache_put_if`].
     pub async fn cache_delete_if(
         &self,
         cache: &str,
         key: &str,
         version: u64,
     ) -> Result<CacheConditionResult> {
-        until_ready(|| {
-            self.client
-                .cache_delete_if(&self.tenant, &self.namespace, cache, key, version)
-        })
-        .await
+        self.client
+            .cache_delete_if(&self.tenant, &self.namespace, cache, key, version)
+            .await
     }
 
     /// Publishes one record and waits until it is acknowledged.

@@ -2,14 +2,14 @@
 //! whose state is `running`, tries to claim its lease. It runs a workload only
 //! while it holds the lease.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use felix_client::CacheWatchItem;
+use felix_client::{CacheCondition, CacheWatchItem};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::names;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
@@ -23,6 +23,10 @@ use crate::runner::{Outcome, run_workload};
 use crate::settings::Settings;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// How long a new watch gets to deliver the current workloads before tasks
+/// for workloads it did not deliver are stopped.
+const REDELIVERY: Duration = Duration::from_secs(5);
 
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
@@ -61,27 +65,59 @@ pub async fn run(
     });
     tracing::info!(node = %node.config.node_id, "agent started");
     let mut tasks: HashMap<String, Task> = HashMap::new();
+    let mut watch = node.felix.watch_retained(names::WORKLOADS).await?;
+    // After a new watch, the workloads it has delivered so far, and when to
+    // stop the tasks of the ones it did not: they were deleted or stopped
+    // while no watch was open.
+    let mut redelivered: Option<(HashSet<String>, tokio::time::Instant)> = None;
     tokio::pin!(shutdown);
     loop {
-        let mut watch = node.felix.watch_retained(names::WORKLOADS).await?;
-        loop {
-            let item = tokio::select! {
-                () = &mut shutdown => {
-                    stop_all(tasks).await;
-                    return Ok(());
+        let prune_at = redelivered.as_ref().map(|(_, at)| *at);
+        let item = tokio::select! {
+            () = &mut shutdown => {
+                stop_all(tasks).await;
+                return Ok(());
+            }
+            () = sleep_until_some(prune_at) => {
+                let ids = redelivered.take().map(|(ids, _)| ids).unwrap_or_default();
+                tasks.retain(|id, task| {
+                    let keep = ids.contains(id);
+                    if !keep {
+                        let _ = task.stop.send(true);
+                    }
+                    keep
+                });
+                continue;
+            }
+            item = watch.recv() => item,
+        };
+        match item {
+            Some(CacheWatchItem::Change(change)) => {
+                if let Some((ids, _)) = redelivered.as_mut() {
+                    ids.insert(change.key.clone());
                 }
-                item = watch.recv() => item,
-            };
-            match item {
-                Some(CacheWatchItem::Change(change)) => {
-                    apply(&node, &mut tasks, change.key, change.value);
-                }
-                // The watch ended; open a new one, which delivers every
-                // workload again.
-                Some(CacheWatchItem::Lagged { .. } | CacheWatchItem::ShardMoved(_)) | None => break,
+                apply(&node, &mut tasks, change.key, change.value);
+            }
+            // The watch ended; open a new one, which delivers every current
+            // workload again.
+            Some(CacheWatchItem::Lagged { .. } | CacheWatchItem::ShardMoved(_)) | None => {
+                watch = loop {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    match node.felix.watch_retained(names::WORKLOADS).await {
+                        Ok(watch) => break watch,
+                        Err(error) => tracing::warn!(%error, "could not watch workloads, retrying"),
+                    }
+                };
+                redelivered = Some((HashSet::new(), tokio::time::Instant::now() + REDELIVERY));
             }
         }
-        tokio::time::sleep(RETRY_DELAY).await;
+    }
+}
+
+async fn sleep_until_some(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -186,8 +222,12 @@ async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -
         failed = work => match failed {
             Some(message) => {
                 tracing::error!(workload = %id, %message, "workload failed");
-                mark_failed(&node.felix, id, spec.clone(), &message, &fence).await;
-                Ended::Failed
+                if mark_failed(&node.felix, id, &message, &fence).await {
+                    Ended::Failed
+                } else {
+                    // Not recorded: claim again, fail again and retry.
+                    Ended::Lost
+                }
             }
             None => {
                 tracing::warn!(workload = %id, "a later owner has taken over");
@@ -197,25 +237,42 @@ async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -
     }
 }
 
-/// Records why the workload failed in its spec. Only a holder does this, so a
-/// stale node cannot fail a workload another node is running.
-async fn mark_failed(
-    felix: &Felix,
-    id: &str,
-    mut spec: WorkloadSpec,
-    message: &str,
-    fence: &Fence,
-) {
-    spec.state = WorkloadState::Failed;
-    spec.failure = Some(message.lines().next().unwrap_or_default().to_owned());
-    let value = Bytes::from(spec.encode());
+/// Records why the workload failed in its spec, with `cache_put_if` on the
+/// version read so a concurrent edit is not overwritten. Only a holder does
+/// this, so a stale node cannot fail a workload another node is running.
+/// Returns whether it was recorded before the fence lapsed.
+async fn mark_failed(felix: &Felix, id: &str, message: &str, fence: &Fence) -> bool {
+    let failure = message.lines().next().unwrap_or_default().to_owned();
     while fence.holds() {
-        match felix.cache_put(names::WORKLOADS, id, value.clone()).await {
-            Ok(()) => return,
+        let attempt = async {
+            let Some(found) = felix.cache_get_versioned(names::WORKLOADS, id).await? else {
+                return Ok(true);
+            };
+            let mut spec = WorkloadSpec::decode(&found.value)?;
+            if spec.state != WorkloadState::Running {
+                return Ok(true);
+            }
+            spec.state = WorkloadState::Failed;
+            spec.failure = Some(failure.clone());
+            let put = felix
+                .cache_put_if(
+                    names::WORKLOADS,
+                    id,
+                    Bytes::from(spec.encode()),
+                    None,
+                    CacheCondition::Version(found.version),
+                )
+                .await?;
+            anyhow::Ok(put.applied)
+        };
+        match attempt.await {
+            Ok(true) => return true,
+            Ok(false) => {}
             Err(error) => {
                 tracing::warn!(workload = %id, %error, "could not record the failure, retrying");
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
     }
+    false
 }
