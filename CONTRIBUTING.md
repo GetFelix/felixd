@@ -20,7 +20,9 @@ cargo test --workspace --lib --bins        # unit
 cargo test --workspace --test '*'          # integration
 ```
 
-CI runs the same three as the jobs `lint`, `unit` and `integration`.
+CI runs the same three as the jobs `lint`, `unit` and `integration`. The restart test in
+`integration` needs a Felix broker; the README says how to start one. Without `FELIX_BROKERS` set
+those tests skip, and CI sets `FELIXD_REQUIRE_FELIX` so a missing broker fails instead.
 
 ## Comments and docs
 

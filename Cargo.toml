@@ -18,11 +18,19 @@ felixd-agent = { path = "crates/agent" }
 felixd-testkit = { path = "crates/testkit" }
 wasmtime = { version = "=50.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wit-component = "=0.262.0"
+anyhow = "=1.0.104"
+bytes = "=1.12.1"
+felix-client = "=0.6.2"
+sha2 = "=0.10.9"
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+ureq = { version = "=3.5.0", features = ["json"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 thiserror = "=2.0.21"
 wat = "=1.262.0"
-clap = { version = "=4.5.48", features = ["derive"] }
+clap = { version = "=4.5.48", features = ["derive", "env"] }
 
 [workspace.lints.rust]
 unreachable_pub = "warn"
