@@ -89,6 +89,24 @@ impl LeaseTiming {
     }
 }
 
+impl LeaseTiming {
+    /// How long a node waits before trying to claim a workload whose lease it
+    /// last saw. `None` is no lease, and `Some(0)` one that never expires.
+    ///
+    /// This only decides when to try. The claim itself succeeds only if the
+    /// broker counts the lease as gone, so a wrong clock here costs a refused
+    /// claim, never a second owner. It is never longer than a TTL, so a node
+    /// whose clock runs behind still tries, and a deleted lease whose delete
+    /// it missed is still noticed.
+    pub fn claim_wait(&self, expires_at_millis: Option<u64>, now_millis: u64) -> Duration {
+        match expires_at_millis {
+            None => Duration::ZERO,
+            Some(0) => self.ttl,
+            Some(at) => Duration::from_millis(at.saturating_sub(now_millis)).min(self.ttl),
+        }
+    }
+}
+
 impl Default for LeaseTiming {
     fn default() -> Self {
         LeaseTiming { ttl: DEFAULT_TTL }
