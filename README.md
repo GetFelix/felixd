@@ -43,7 +43,7 @@ felixd agent
 `wl.<id>.snap` streams and writes the spec. The agent reads every spec in the
 `workloads` cache, claims the lease of each one nobody holds and runs it while
 the lease holds. Start a second agent and kill the first: within one lease TTL
-(10 s by default, `--lease-ttl-ms`) the second carries on from the right input,
+(10 s by default and at least 2 s, `--lease-ttl-ms`) the second carries on from the right input,
 with nothing missing and nothing repeated. Each agent needs its own
 `--node-id`; the default is the host name and process id.
 The connection settings are the environment variables `felixctl` reads, plus
