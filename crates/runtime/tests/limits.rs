@@ -3,9 +3,9 @@
 use felixd_runtime::{FailureKind, Limits, Runtime, Workload, WorkloadError};
 
 fn load(limits: Limits) -> Workload {
-    Runtime::new(limits)
+    Runtime::new()
         .unwrap()
-        .load(&felixd_testkit::workload("faulty"))
+        .load(&felixd_testkit::workload("faulty"), limits)
         .unwrap()
 }
 

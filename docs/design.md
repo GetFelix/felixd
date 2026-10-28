@@ -208,9 +208,18 @@ over and a replay land on the state the original had. Wasm floating point is
 deterministic apart from NaN bit patterns, and wasmtime's NaN
 canonicalization covers that.
 
-Each `step` runs with a fuel limit. A workload that runs out of fuel or traps
-is stopped and marked failed. It isn't retried, because a deterministic
-failure would fail again on any node.
+Each call into the workload runs with a fuel limit and a memory cap. Both are
+in the workload's spec, set by `felixd run --fuel --max-memory`, so every node
+runs it under the same limits and fails it at the same step. The Wasm stack
+size and the bounds on tables, table elements, instances and memories are
+fixed in felixd itself. A workload that runs out of fuel or traps, in `step`,
+`snapshot` or `restore`, is stopped and marked failed. It isn't retried,
+because a deterministic failure would fail again on any node.
+
+Where fuel runs out and where the stack overflows depend on the code wasmtime
+generates, so they can move between wasmtime versions. Every node must run the
+same felixd build. Recording the build in the spec, so that a node running a
+different one refuses the workload, is an open question.
 
 ## Data model
 
@@ -218,7 +227,7 @@ Everything lives in one Felix tenant, in a namespace per cluster.
 
 | Resource | Kind | Key or name | Value | Written by |
 |---|---|---|---|---|
-| `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, state (`running`, `stopped`, `failed`) | `felixd run`, the owner on failure |
+| `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | `felixd run`, the owner on failure |
 | `leases` | cache, TTL | workload id | owner node id, lease epoch | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | address, capacity, version | each agent |
 | `modules` | cache | sha256 of the module | the module bytes | `felixd run` |
@@ -292,9 +301,28 @@ A new owner:
    produced it.
 3. Subscribes to the input with `subscribe_from(snapshot offset + 1)`. For
    inputs up to `k` it runs `step` and drops the outputs, which are already on
-   the stream. From `k + 1` on it writes them.
+   the stream, after checking each against the record in its place. From
+   `k + 1` on it writes them.
 
 This is the fold in `core`, and the same fold drives replay.
+
+While it is replaying inputs before `k`, the owner takes no snapshot. The
+output stream's tail is ahead of the workload's state then, so a snapshot
+would claim outputs it doesn't cover, and an owner that crashed after writing
+it would resume past them and write them again.
+
+Felix drops records for a slow subscriber by default, and a jump in offsets is
+how that shows. Offsets that hold no event also jump, so when the next input
+offset is past the expected one the owner reads the range in between and runs
+whatever records it finds first. It never steps past a missing record.
+
+Some states can't be resumed from on any node, and the design is to refuse
+them rather than guess: a snapshot or output record that doesn't decode, a
+fold that finds outputs missing or out of place, a replayed output that
+differs from the stream, a record at the tail that differs from the owner's,
+or a step whose output (or a snapshot) is larger than one write to Felix may
+hold (8 MiB, against Felix's 16 MiB frame limit). The owner logs an error and
+marks the workload failed with the reason. Only Felix errors are retried.
 
 Snapshots are written every N inputs (default 1000) or every T seconds of
 activity. A stale owner's snapshot is harmless: determinism makes it identical

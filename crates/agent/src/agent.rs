@@ -14,7 +14,7 @@ use bytes::Bytes;
 use felix_client::CacheWatchItem;
 use felixd_core::names;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
-use felixd_runtime::{Limits, Runtime};
+use felixd_runtime::Runtime;
 use tokio::task::JoinHandle;
 
 use crate::felix::Felix;
@@ -24,13 +24,9 @@ use crate::settings::Settings;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Runs until `shutdown` completes.
-pub async fn run(
-    settings: &Settings,
-    limits: Limits,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
+pub async fn run(settings: &Settings, shutdown: impl Future<Output = ()>) -> Result<()> {
     let felix = Arc::new(Felix::connect(settings).await?);
-    let runtime = Arc::new(Runtime::new(limits).map_err(|e| anyhow::anyhow!("{e}"))?);
+    let runtime = Arc::new(Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?);
     let mut running: HashMap<String, JoinHandle<()>> = HashMap::new();
     tokio::pin!(shutdown);
     loop {
@@ -88,7 +84,7 @@ fn apply(
 }
 
 /// Keeps one workload running: a Felix error is retried from the streams, and a
-/// workload failure is recorded in its spec.
+/// failure no retry can fix is recorded in its spec.
 async fn supervise(felix: Arc<Felix>, runtime: Arc<Runtime>, id: String, spec: WorkloadSpec) {
     loop {
         match run_workload(&felix, &runtime, &id, &spec).await {

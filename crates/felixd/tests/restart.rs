@@ -8,19 +8,19 @@ mod common;
 
 use std::time::Duration;
 
-use common::{TestFelix, eventually, test_felix};
-use felixd_agent::admin::{StreamKind, ensure_stream};
+use common::{INPUT, OUTPUT, SNAPSHOTS, TestFelix, eventually, test_felix};
 use felixd_core::output;
-use felixd_runtime::{Limits, Runtime};
+use felixd_core::spec::Limits;
+use felixd_runtime::Runtime;
 
 const INPUTS: u64 = 240;
 
 /// What the output stream should hold: every output of every input, run
 /// through the same module without interruption.
 fn expected(module: &[u8], inputs: &[(u64, Vec<u8>)]) -> Vec<Vec<u8>> {
-    let mut workload = Runtime::new(Limits::default())
+    let mut workload = Runtime::new()
         .unwrap()
-        .load(module)
+        .load(module, Limits::default())
         .unwrap();
     let mut records = Vec::new();
     for (offset, payload) in inputs {
@@ -35,15 +35,26 @@ fn expected(module: &[u8], inputs: &[(u64, Vec<u8>)]) -> Vec<Vec<u8>> {
     records
 }
 
-async fn read_all(t: &TestFelix, stream: &str) -> Vec<(u64, Vec<u8>)> {
-    let tail = t.felix.tail(stream).await.unwrap();
-    t.felix
-        .read_range(stream, 0, tail)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|r| (r.offset, r.payload.to_vec()))
-        .collect()
+/// Waits for the output of every input on the input stream, then checks the
+/// output stream holds exactly that.
+async fn assert_uninterrupted(t: &TestFelix, module: &[u8], inputs: u64) {
+    let inputs_found = t.read_all(INPUT).await;
+    assert_eq!(inputs_found.len() as u64, inputs);
+    let want = expected(module, &inputs_found);
+    eventually("all output", Duration::from_secs(60), || async {
+        let got = t.read_all(OUTPUT).await;
+        (got.len() >= want.len()).then_some(())
+    })
+    .await;
+    // Give a duplicate time to show up before comparing.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let got: Vec<Vec<u8>> = t.read_all(OUTPUT).await.into_iter().map(|r| r.1).collect();
+    assert_eq!(got.len(), want.len(), "output length");
+    assert!(got == want, "output differs from an uninterrupted run");
+}
+
+fn count(i: u64) -> Vec<u8> {
+    i.to_be_bytes().to_vec()
 }
 
 /// `snapshot_every` past the number of inputs means no snapshot is ever
@@ -54,35 +65,8 @@ async fn kill_and_restart(
     input_for: impl Fn(u64) -> Vec<u8> + Send + 'static,
 ) {
     let Some(t) = test_felix().await else { return };
-    let module = felixd_testkit::workload(workload);
-    let dir = std::env::temp_dir().join(format!("felixd-{}", t.settings.namespace));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{workload}.wasm"));
-    std::fs::write(&path, &module).unwrap();
-
-    ensure_stream(
-        &t.settings,
-        "in",
-        StreamKind {
-            replication_factor: 1,
-        },
-    )
-    .await
-    .unwrap();
-    let status = t
-        .felixd(&[
-            "run",
-            "--id",
-            "wl",
-            "--input",
-            "in",
-            "--snapshot-every",
-            "25",
-        ])
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let every = snapshot_every.to_string();
+    let module = t.submit(workload, &["--snapshot-every", &every]).await;
 
     let mut agent = t.start_agent();
     let publishing = {
@@ -91,7 +75,7 @@ async fn kill_and_restart(
             .unwrap();
         tokio::spawn(async move {
             for i in 0..INPUTS {
-                felix.publish("in", input_for(i)).await.unwrap();
+                felix.publish(INPUT, input_for(i)).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(15)).await;
             }
         })
@@ -100,45 +84,33 @@ async fn kill_and_restart(
     // Let the workload get going, past two snapshots when it takes them, then
     // kill the agent without warning.
     let (stream, records) = if snapshot_every < INPUTS {
-        ("wl.wl.snap", 2)
+        (SNAPSHOTS, 2)
     } else {
-        ("wl.wl.out", 20)
+        (OUTPUT, 20)
     };
     eventually("progress", Duration::from_secs(60), || async {
         (t.felix.tail(stream).await.unwrap() >= records).then_some(())
     })
     .await;
-    agent.kill().unwrap();
-    agent.wait().unwrap();
+    agent.kill();
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let mut agent = t.start_agent();
     publishing.await.unwrap();
-
-    let inputs = read_all(&t, "in").await;
-    assert_eq!(inputs.len() as u64, INPUTS);
-    let want = expected(&module, &inputs);
-    eventually("all output", Duration::from_secs(120), || async {
-        let got = read_all(&t, "wl.wl.out").await;
-        (got.len() >= want.len()).then_some(())
-    })
-    .await;
-    // Give a duplicate time to show up before comparing.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let got: Vec<Vec<u8>> = read_all(&t, "wl.wl.out")
-        .await
-        .into_iter()
-        .map(|r| r.1)
-        .collect();
-    agent.kill().unwrap();
-    agent.wait().unwrap();
-    assert_eq!(got.len(), want.len(), "output length");
-    assert!(got == want, "output differs from an uninterrupted run");
+    assert_uninterrupted(&t, &module, INPUTS).await;
+    agent.kill();
+    if snapshot_every >= INPUTS {
+        assert_eq!(
+            t.felix.tail(SNAPSHOTS).await.unwrap(),
+            0,
+            "a snapshot was written"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn counter_resumes_with_no_gap_or_duplicate() {
-    kill_and_restart("counter", 25, |i| i.to_be_bytes().to_vec()).await;
+    kill_and_restart("counter", 25, count).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -155,5 +127,65 @@ async fn window_resumes_with_no_gap_or_duplicate() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn counter_without_a_snapshot_replays_and_skips_what_is_written() {
-    kill_and_restart("counter", u64::MAX, |i| i.to_be_bytes().to_vec()).await;
+    kill_and_restart("counter", u64::MAX, count).await;
+}
+
+/// A snapshot taken while replaying would record the output stream's tail,
+/// which is ahead of the workload's state. If the agent then dies before
+/// passing the outputs already written, the next start trusts that snapshot,
+/// skips nothing and writes those outputs again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_crash_while_replaying_repeats_no_output() {
+    let Some(t) = test_felix().await else { return };
+    let module = t
+        .submit("counter", &["--snapshot-every", &u64::MAX.to_string()])
+        .await;
+    t.publish_all(INPUT, (0..120).map(count)).await;
+    let mut agent = t.start_agent();
+    eventually(
+        "the first run's output",
+        Duration::from_secs(60),
+        || async { (t.felix.tail(OUTPUT).await.unwrap() >= 120).then_some(()) },
+    )
+    .await;
+    agent.kill();
+
+    // The next run replays all 120 inputs, and would snapshot every 10 of them.
+    let mut spec = t.spec().await;
+    spec.snapshot_every = 10;
+    t.put_spec(&spec).await;
+    let mut agent = t.start_agent_with_faults("crash-after-snapshot=1");
+    assert!(!agent.exited(Duration::from_secs(60)).await.success());
+
+    let mut agent = t.start_agent();
+    t.publish_all(INPUT, (120..150).map(count)).await;
+    assert_uninterrupted(&t, &module, 150).await;
+    agent.kill();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_between_append_and_snapshot_resumes_from_the_last_snapshot() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..60).map(count)).await;
+    let mut agent = t.start_agent_with_faults("crash-before-snapshot=3");
+    assert!(!agent.exited(Duration::from_secs(60)).await.success());
+    // Input 29's output is written and its snapshot is not.
+    assert_eq!(t.felix.tail(OUTPUT).await.unwrap(), 30);
+    assert_eq!(t.felix.tail(SNAPSHOTS).await.unwrap(), 2);
+
+    let mut agent = t.start_agent();
+    t.publish_all(INPUT, (60..80).map(count)).await;
+    assert_uninterrupted(&t, &module, 80).await;
+    agent.kill();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_input_the_subscription_dropped_is_read_back() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..40).map(count)).await;
+    let mut agent = t.start_agent_with_faults("drop-input=17");
+    assert_uninterrupted(&t, &module, 40).await;
+    agent.kill();
 }

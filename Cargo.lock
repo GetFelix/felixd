@@ -765,6 +765,7 @@ dependencies = [
 name = "felixd-runtime"
 version = "0.0.0"
 dependencies = [
+ "felixd-core",
  "felixd-testkit",
  "thiserror",
  "wasmtime",

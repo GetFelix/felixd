@@ -11,6 +11,11 @@ pub enum DecodeError {
     Json(String),
 }
 
+/// The most bytes felixd writes to Felix at once: one step's output records,
+/// or one snapshot record. Felix refuses a frame over 16 MiB by default, and
+/// this leaves room for the framing.
+pub const MAX_WRITE_BYTES: usize = 8 << 20;
+
 /// Version byte at the start of every binary record. A format change takes a
 /// new number, so a reader refuses what it does not understand instead of
 /// misreading it.

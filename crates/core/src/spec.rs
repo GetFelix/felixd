@@ -19,9 +19,33 @@ pub struct WorkloadSpec {
     #[serde(default = "default_snapshot_every")]
     pub snapshot_every: u64,
     pub state: WorkloadState,
+    /// What the workload may use. It is in the spec, not node configuration,
+    /// so every node runs the workload under the same limits and fails it at
+    /// the same step.
+    #[serde(default)]
+    pub limits: Limits,
     /// Why the workload failed. Set with [`WorkloadState::Failed`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+}
+
+/// What a workload may use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limits {
+    /// Fuel given to each call into the workload. Running out of it fails the
+    /// workload.
+    pub fuel_per_call: u64,
+    /// The most linear memory the workload may grow to, in bytes.
+    pub max_memory_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            fuel_per_call: 50_000_000,
+            max_memory_bytes: 64 << 20,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

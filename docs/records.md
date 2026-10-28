@@ -29,8 +29,10 @@ On `wl.<id>.snap`.
 
 Values in `workloads` and `leases` are JSON.
 
-- A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000) and
-  `state` (`running`, `stopped` or `failed`). A failed spec also has `failure`.
+- A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000),
+  `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000)
+  and `max_memory_bytes` (default 64 MiB). A spec without `limits` gets the defaults. A failed spec
+  also has `failure`.
 - A lease has `owner` and `epoch`. The epoch goes up by one each time the workload changes owner.
 
 ## The resume fold
@@ -38,7 +40,11 @@ Values in `workloads` and `leases` are JSON.
 `resume::fold` takes the latest snapshot header, the header of the last record on the output stream
 and that stream's next offset. It returns whether to restore the snapshot, the input offset to
 subscribe from, and which outputs the stream already holds: those at or before the last record's
-`(input offset, index)`. The owner runs `step` for those inputs and drops the outputs.
+`(input offset, index)`, starting at the snapshot's output tail. The owner runs `step` for those
+inputs and drops the outputs, after `resume::check_skipped` has compared each with the record in its
+place. `Resume::replaying` says when the owner is still before the last written input, which is when
+it must not snapshot.
 
 It refuses a stream that is shorter than the snapshot expects, or whose newest output belongs to an
-input the snapshot already covers, because a correct owner never produces either.
+input the snapshot already covers, because a correct owner never produces either. Any of these
+errors fails the workload.

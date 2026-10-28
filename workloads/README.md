@@ -14,5 +14,5 @@ They are a separate cargo workspace because they build for `wasm32-unknown-unkno
 cargo test -p felixd-runtime --test example_workloads
 ```
 
-`faulty` is a test fixture, not an example. It loops, traps or allocates too much when asked, to check
-that the host stops it.
+`faulty` is a test fixture, not an example. It loops, traps, allocates too much, outputs a record too
+large to write or traps in `snapshot` when asked, to check that the host stops it.

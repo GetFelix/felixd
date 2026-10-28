@@ -4,11 +4,19 @@
 //! - `spin`: loops forever.
 //! - `trap`: panics, which traps.
 //! - `grow`: allocates 64 MiB.
+//! - `huge`: outputs one 17 MiB record, more than Felix takes in one frame.
+//! - `trap-snapshot`: outputs nothing, and every later `snapshot` traps.
+
+use std::cell::Cell;
 
 wit_bindgen::generate!({
     path: "../../wit",
     world: "workload",
 });
+
+thread_local! {
+    static TRAP_SNAPSHOT: Cell<bool> = const { Cell::new(false) };
+}
 
 struct Faulty;
 
@@ -24,11 +32,17 @@ impl Guest for Faulty {
                 big[0] = 1;
                 vec![vec![std::hint::black_box(big)[0]]]
             }
+            b"huge" => vec![vec![7u8; 17 << 20]],
+            b"trap-snapshot" => {
+                TRAP_SNAPSHOT.set(true);
+                Vec::new()
+            }
             _ => vec![input],
         }
     }
 
     fn snapshot() -> Vec<u8> {
+        assert!(!TRAP_SNAPSHOT.get(), "asked to trap in snapshot");
         Vec::new()
     }
 

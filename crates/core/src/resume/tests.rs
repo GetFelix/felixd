@@ -157,3 +157,60 @@ fn records_with_no_last_header_are_refused() {
     .unwrap_err();
     assert_eq!(err, ResumeError::MissingLastOutput);
 }
+
+#[test]
+fn skipped_outputs_start_at_the_snapshot_tail() {
+    let resume = fold(Found {
+        snapshot: Some(snap(99, 40)),
+        last_output: Some(out(104, 1)),
+        output_tail: 43,
+    })
+    .unwrap();
+    assert_eq!(resume.output_from, 40);
+    let fresh = fold(Found {
+        snapshot: None,
+        last_output: Some(out(7, 0)),
+        output_tail: 8,
+    })
+    .unwrap();
+    assert_eq!(fresh.output_from, 0);
+}
+
+#[test]
+fn the_owner_is_replaying_until_it_reaches_the_last_written_input() {
+    let resume = fold(Found {
+        snapshot: Some(snap(99, 40)),
+        last_output: Some(out(104, 1)),
+        output_tail: 43,
+    })
+    .unwrap();
+    assert!(resume.replaying(100));
+    assert!(resume.replaying(103));
+    // After the step for 104 the output tail is its true value again.
+    assert!(!resume.replaying(104));
+    assert!(!resume.replaying(105));
+}
+
+#[test]
+fn nothing_to_skip_is_not_replaying() {
+    let resume = fold(Found {
+        snapshot: Some(snap(99, 40)),
+        last_output: Some(out(95, 0)),
+        output_tail: 40,
+    })
+    .unwrap();
+    assert!(!resume.replaying(100));
+}
+
+#[test]
+fn a_skipped_output_must_match_the_record_in_its_place() {
+    assert_eq!(check_skipped(3, b"abc", Some(b"abc")), Ok(()));
+    assert_eq!(
+        check_skipped(3, b"abc", Some(b"abd")),
+        Err(ResumeError::Diverged { offset: 3 })
+    );
+    assert_eq!(
+        check_skipped(9, b"abc", None),
+        Err(ResumeError::Diverged { offset: 9 })
+    );
+}

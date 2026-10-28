@@ -18,4 +18,4 @@ pub mod spec;
 
 mod codec;
 
-pub use codec::DecodeError;
+pub use codec::{DecodeError, MAX_WRITE_BYTES};

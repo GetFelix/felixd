@@ -4,9 +4,9 @@
 use felixd_runtime::{Limits, Runtime, Workload};
 
 fn load(name: &str) -> Workload {
-    Runtime::new(Limits::default())
+    Runtime::new()
         .unwrap()
-        .load(&felixd_testkit::workload(name))
+        .load(&felixd_testkit::workload(name), Limits::default())
         .unwrap()
 }
 

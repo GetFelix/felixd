@@ -1,7 +1,8 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use felix_client::ConditionalWrite;
 
 use crate::felix::Felix;
+use crate::runner::poison;
 
 /// Consecutive failed attempts to write one batch before giving up.
 const MAX_ATTEMPTS: u32 = 5;
@@ -33,7 +34,8 @@ impl<'a> OutputLog<'a> {
     /// have appended first. The stream is read at the tail we expected: records
     /// there that are exactly the start of our batch were written by an earlier
     /// owner of the same deterministic workload, so they are skipped, and
-    /// anything else is a divergence we must not write over.
+    /// anything else is a divergence we must not write over, and fails the
+    /// workload.
     pub(crate) async fn append(&mut self, mut batch: Vec<Vec<u8>>) -> Result<()> {
         let mut failures = 0;
         while !batch.is_empty() {
@@ -47,7 +49,10 @@ impl<'a> OutputLog<'a> {
                     return Ok(());
                 }
                 Ok(ConditionalWrite::Written { offset }) => {
-                    bail!("{} wrote at {offset}, expected {}", self.stream, self.tail)
+                    return Err(poison(format!(
+                        "{} wrote at {offset}, expected {}",
+                        self.stream, self.tail
+                    )));
                 }
                 Ok(ConditionalWrite::Refused { tail }) => tail,
                 Err(error) => {
@@ -66,11 +71,10 @@ impl<'a> OutputLog<'a> {
 
     async fn skip_written(&mut self, batch: &mut Vec<Vec<u8>>, seen_tail: u64) -> Result<()> {
         if seen_tail < self.tail {
-            bail!(
+            return Err(poison(format!(
                 "{} ends at {seen_tail}, before the {} already written",
-                self.stream,
-                self.tail
-            );
+                self.stream, self.tail
+            )));
         }
         if seen_tail == self.tail {
             return Ok(());
@@ -85,12 +89,10 @@ impl<'a> OutputLog<'a> {
                 .zip(batch.iter())
                 .all(|(found, ours)| found.payload.as_ref() == ours.as_slice());
         if !same {
-            bail!(
+            return Err(poison(format!(
                 "{} holds records at {}..{} that differ from this workload's output",
-                self.stream,
-                self.tail,
-                seen_tail
-            );
+                self.stream, self.tail, seen_tail
+            )));
         }
         batch.drain(..existing.len());
         self.tail = seen_tail;

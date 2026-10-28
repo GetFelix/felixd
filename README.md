@@ -44,6 +44,10 @@ felixd agent
 stream carries on from the right input with nothing missing and nothing repeated.
 The connection settings are the environment variables `felixctl` reads, plus
 `FELIX_NAMESPACE` (default `default`).
+`felixd run --fuel --max-memory` sets the workload's limits. They are stored in
+its spec, so every node runs it under the same ones. A workload that traps, runs
+out of fuel or finds its streams in a state it can't resume from is marked
+`failed` in its spec, with the reason.
 
 ## What we are trying to achieve
 
