@@ -9,24 +9,21 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use felix_client::{CacheCondition, CacheWatchItem};
-use felixd_core::lease::LeaseTiming;
-use felixd_core::names;
+use felix_client::{CacheCondition, CacheWatchItem, ClusterCacheWatch};
+use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_core::{names, output};
 use felixd_runtime::Runtime;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::faults;
 use crate::felix::Felix;
 use crate::lease::{self, Fence, Held};
 use crate::runner::{Outcome, run_workload};
 use crate::settings::Settings;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
-
-/// How long a new watch gets to deliver the current workloads before tasks
-/// for workloads it did not deliver are stopped.
-const REDELIVERY: Duration = Duration::from_secs(5);
 
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
@@ -58,6 +55,11 @@ pub async fn run(
     config: AgentConfig,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
+    anyhow::ensure!(
+        config.lease.ttl >= MIN_TTL,
+        "the lease TTL must be at least {} ms",
+        MIN_TTL.as_millis()
+    );
     let node = Arc::new(Node {
         felix: Felix::connect(settings).await?,
         runtime: Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?,
@@ -66,59 +68,112 @@ pub async fn run(
     tracing::info!(node = %node.config.node_id, "agent started");
     let mut tasks: HashMap<String, Task> = HashMap::new();
     let mut watch = node.felix.watch_retained(names::WORKLOADS).await?;
-    // After a new watch, the workloads it has delivered so far, and when to
-    // stop the tasks of the ones it did not: they were deleted or stopped
-    // while no watch was open.
-    let mut redelivered: Option<(HashSet<String>, tokio::time::Instant)> = None;
+    // Set while a new watch is redelivering the current workloads.
+    let mut redelivery: Option<Redelivery> = None;
     tokio::pin!(shutdown);
     loop {
-        let prune_at = redelivered.as_ref().map(|(_, at)| *at);
         let item = tokio::select! {
             () = &mut shutdown => {
                 stop_all(tasks).await;
                 return Ok(());
             }
-            () = sleep_until_some(prune_at) => {
-                let ids = redelivered.take().map(|(ids, _)| ids).unwrap_or_default();
-                tasks.retain(|id, task| {
-                    let keep = ids.contains(id);
-                    if !keep {
-                        let _ = task.stop.send(true);
-                    }
-                    keep
-                });
-                continue;
-            }
             item = watch.recv() => item,
         };
-        match item {
+        let reopen_after = match item {
             Some(CacheWatchItem::Change(change)) => {
-                if let Some((ids, _)) = redelivered.as_mut() {
-                    ids.insert(change.key.clone());
+                match faults::drop_watch(&change.key, change.value.is_some()) {
+                    Some(gap) => gap,
+                    None => {
+                        let (id, offset) = (change.key.clone(), change.offset);
+                        apply(&node, &mut tasks, change.key, change.value);
+                        if let Some(r) = redelivery.as_mut()
+                            && r.note(&id, offset)
+                        {
+                            prune(&mut tasks, &r.seen);
+                            redelivery = None;
+                        }
+                        continue;
+                    }
                 }
-                apply(&node, &mut tasks, change.key, change.value);
             }
             // The watch ended; open a new one, which delivers every current
             // workload again.
             Some(CacheWatchItem::Lagged { .. } | CacheWatchItem::ShardMoved(_)) | None => {
-                watch = loop {
-                    tokio::time::sleep(RETRY_DELAY).await;
-                    match node.felix.watch_retained(names::WORKLOADS).await {
-                        Ok(watch) => break watch,
-                        Err(error) => tracing::warn!(%error, "could not watch workloads, retrying"),
-                    }
-                };
-                redelivered = Some((HashSet::new(), tokio::time::Instant::now() + REDELIVERY));
+                RETRY_DELAY
             }
+        };
+        drop(watch);
+        watch = reopen(&node, reopen_after).await;
+        redelivery = match watch.retained_count() {
+            Some(count) => Some(Redelivery::new(count, watch.resume_offset())),
+            None => {
+                tracing::warn!("the new watch did not say how many workloads it redelivers");
+                None
+            }
+        };
+        if let Some(r) = redelivery.as_ref().filter(|r| r.done()) {
+            prune(&mut tasks, &r.seen);
+            redelivery = None;
         }
     }
 }
 
-async fn sleep_until_some(at: Option<tokio::time::Instant>) {
-    match at {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
+async fn reopen(node: &Node, delay: Duration) -> ClusterCacheWatch {
+    loop {
+        tokio::time::sleep(delay).await;
+        match node.felix.watch_retained(names::WORKLOADS).await {
+            Ok(watch) => return watch,
+            Err(error) => tracing::warn!(%error, "could not watch workloads, retrying"),
+        }
     }
+}
+
+/// What a new watch has redelivered. Its retained values come before any
+/// live change and it says how many there are, so once they are all in, a
+/// workload with a task that is not among them was deleted or stopped while
+/// no watch was open.
+#[derive(Debug)]
+pub(crate) struct Redelivery {
+    remaining: u64,
+    live_from: u64,
+    seen: HashSet<String>,
+}
+
+impl Redelivery {
+    pub(crate) fn new(retained: u64, live_from: u64) -> Redelivery {
+        Redelivery {
+            remaining: retained,
+            live_from,
+            seen: HashSet::new(),
+        }
+    }
+
+    /// Notes a change at cache offset `offset`. Returns whether every
+    /// retained value is now in.
+    pub(crate) fn note(&mut self, key: &str, offset: u64) -> bool {
+        self.seen.insert(key.to_owned());
+        if offset < self.live_from {
+            self.remaining = self.remaining.saturating_sub(1);
+        }
+        // A live change also means the retained ones are done.
+        self.done() || offset >= self.live_from
+    }
+
+    pub(crate) fn done(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+/// Stops the tasks of workloads not in `current`.
+fn prune(tasks: &mut HashMap<String, Task>, current: &HashSet<String>) {
+    tasks.retain(|id, task| {
+        let keep = current.contains(id);
+        if !keep {
+            tracing::info!(workload = %id, "gone while the watch was closed, stopping");
+            let _ = task.stop.send(true);
+        }
+        keep
+    });
 }
 
 async fn stop_all(tasks: HashMap<String, Task>) {
@@ -166,7 +221,8 @@ fn apply(node: &Arc<Node>, tasks: &mut HashMap<String, Task>, id: String, value:
 async fn own(node: Arc<Node>, id: String, spec: WorkloadSpec, mut stop: watch::Receiver<bool>) {
     let timing = node.config.lease;
     loop {
-        match lease::claim(&node.felix, &node.config.node_id, &id, timing).await {
+        let floor = output_epoch(&node.felix, &spec.output);
+        match lease::claim(&node.felix, &node.config.node_id, &id, timing, floor).await {
             Ok(Some(mut held)) => {
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let ended = tokio::select! {
@@ -193,25 +249,68 @@ async fn own(node: Arc<Node>, id: String, spec: WorkloadSpec, mut stop: watch::R
     }
 }
 
+/// The epoch of the last record on `stream`, or 0 if it has none. A record
+/// that does not decode counts as 0: the runner fails the workload for it,
+/// which only a holder may do.
+async fn output_epoch(felix: &Felix, stream: &str) -> Result<u64> {
+    let tail = felix.tail(stream).await?;
+    Ok(match felix.last_record(stream, tail).await? {
+        Some(record) => output::decode(&record.payload).map_or(0, |(last, _)| last.epoch),
+        None => 0,
+    })
+}
+
 enum Ended {
     Failed,
     Stopped,
     Lost,
 }
 
-/// Renews the lease and runs the workload until one of them ends.
+/// Runs the workload, and records its failure if it fails, while renewing the
+/// lease. Renewing goes on until the failure is recorded, so a slow write
+/// does not let the lease lapse with the workload still `running`.
 async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -> Ended {
     let (deadline, fence) = held.fence();
+    let (me, epoch) = (held.node.clone(), held.epoch);
     let work = async {
-        loop {
+        let outcome = loop {
             match run_workload(&node.felix, &node.runtime, id, spec, &fence).await {
-                Ok(Outcome::Failed(message)) => return Some(message),
-                Ok(Outcome::Lost) => return None,
+                Ok(outcome) => break outcome,
                 Err(error) => {
                     tracing::warn!(workload = %id, error = %format!("{error:#}"), "retrying");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
+        };
+        let reason = match outcome {
+            Outcome::Failed(message) => message,
+            Outcome::Lost => return Ended::Lost,
+            Outcome::Superseded(found) => {
+                // A later owner means this lease is gone, and a refused
+                // renewal will say so. Still holding it means epochs went
+                // backwards, which nothing here can repair.
+                match lease::still_held(&node.felix, &me, epoch, id).await {
+                    Ok(true) => format!(
+                        "epoch {found} on the output stream is above this holder's {epoch} \
+                         while it still holds the lease, so lease epochs went backwards"
+                    ),
+                    Ok(false) => {
+                        tracing::warn!(workload = %id, "a later owner has taken over");
+                        return Ended::Lost;
+                    }
+                    Err(error) => {
+                        tracing::warn!(workload = %id, %error, "a later owner wrote; could not read the lease");
+                        return Ended::Lost;
+                    }
+                }
+            }
+        };
+        tracing::error!(workload = %id, %reason, "workload failed");
+        if mark_failed(&node.felix, id, &reason, &fence).await {
+            Ended::Failed
+        } else {
+            // Not recorded: claim again, fail again and retry.
+            Ended::Lost
         }
     };
     tokio::select! {
@@ -219,21 +318,7 @@ async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -
             tracing::warn!(workload = %id, ?lost, "lost the lease");
             Ended::Lost
         }
-        failed = work => match failed {
-            Some(message) => {
-                tracing::error!(workload = %id, %message, "workload failed");
-                if mark_failed(&node.felix, id, &message, &fence).await {
-                    Ended::Failed
-                } else {
-                    // Not recorded: claim again, fail again and retry.
-                    Ended::Lost
-                }
-            }
-            None => {
-                tracing::warn!(workload = %id, "a later owner has taken over");
-                Ended::Lost
-            }
-        },
+        ended = work => ended,
     }
 }
 
@@ -254,6 +339,7 @@ async fn mark_failed(felix: &Felix, id: &str, message: &str, fence: &Fence) -> b
             }
             spec.state = WorkloadState::Failed;
             spec.failure = Some(failure.clone());
+            faults::before_failure_record().await;
             let put = felix
                 .cache_put_if(
                     names::WORKLOADS,
@@ -276,3 +362,6 @@ async fn mark_failed(felix: &Felix, id: &str, message: &str, fence: &Fence) -> b
     }
     false
 }
+
+#[cfg(test)]
+mod tests;

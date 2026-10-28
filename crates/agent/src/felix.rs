@@ -75,6 +75,15 @@ impl Felix {
         .await
     }
 
+    pub async fn cache_delete(&self, cache: &str, key: &str) -> Result<()> {
+        until_ready(|| {
+            self.client
+                .cache_delete(&self.tenant, &self.namespace, cache, key)
+        })
+        .await?;
+        Ok(())
+    }
+
     /// The value under `key` and its version.
     pub async fn cache_get_versioned(
         &self,

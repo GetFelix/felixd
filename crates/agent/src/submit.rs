@@ -42,7 +42,12 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let kind = StreamKind {
         replication_factor: submission.replication_factor,
     };
-    for cache in [names::WORKLOADS, names::MODULES, names::LEASES] {
+    for cache in [
+        names::WORKLOADS,
+        names::MODULES,
+        names::LEASES,
+        names::EPOCHS,
+    ] {
         admin::ensure_cache(settings, cache).await?;
     }
     let output = names::output_stream(&submission.id);

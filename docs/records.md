@@ -33,7 +33,7 @@ Values in `workloads` and `leases` are JSON.
   `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000)
   and `max_memory_bytes` (default 64 MiB). A spec without `limits` gets the defaults. A failed spec
   also has `failure`.
-- A lease has `owner` and `epoch`. The epoch goes up by one each time the workload changes owner.
+- A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a decimal number.
 
 ## The resume fold
 

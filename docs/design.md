@@ -228,7 +228,8 @@ Everything lives in one Felix tenant, in a namespace per cluster.
 | Resource | Kind | Key or name | Value | Written by |
 |---|---|---|---|---|
 | `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | `felixd run`, the owner on failure |
-| `leases` | cache, TTL | workload id | owner node id, lease epoch (0 in the claim itself) | agents, with `cache_put_if` |
+| `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
+| `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | address, capacity, version | each agent |
 | `modules` | cache | sha256 of the module | the module bytes | `felixd run` |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
@@ -248,20 +249,34 @@ create streams.
 
 ## Leases and failure detection
 
-A lease is an entry in `leases` with a TTL (default 10 s, `felixd agent
---lease-ttl-ms`). An agent claims a workload with `cache_put_if` on "absent",
-which the broker grants only once it counts the previous lease as expired or
-deleted. The holder renews every TTL/3 with `cache_put_if` at the version it
-last wrote. A refused renewal means the lease is gone: the agent stops the
-workload at once. A renewal whose answer is lost is read back: the lease value
-names the holder's epoch, so finding it at a newer version means the renewal
-landed. A claim whose answer is lost is not adopted; it expires unused.
+A lease is an entry in `leases` with a TTL (default 10 s, at least 2 s,
+`felixd agent --lease-ttl-ms`). An agent claims a workload with `cache_put_if`
+on "absent", which the broker grants only once it counts the previous lease as
+expired or deleted. The holder renews every TTL/3 with `cache_put_if` at the
+version it last wrote. A refused renewal means the lease is gone: the agent
+stops the workload at once. A renewal whose answer is lost is read back: the
+lease value names the holder's epoch, so finding it at a newer version means
+a renewal landed. It is counted from the send of the earliest renewal still
+unanswered, since that may be the one that landed. A claim whose answer is
+lost is not adopted; it expires unused.
 
-The lease's epoch is one more than the cache version of the claim. Felix
-versions only grow within a shard and are never reused, so every claim has a
-higher epoch than all claims before it, including ones that have expired.
-The claim itself writes epoch 0, since its version isn't known until it is
-applied, and each renewal writes the real epoch.
+A claim that wins then takes its epoch: one more than the larger of the last
+epoch in `epochs` and the epoch on the last record of the output stream. It
+writes that to `epochs` with `cache_put_if` at the version it read, then
+rewrites the lease with the epoch, again with `cache_put_if`, and only then
+runs anything. A claimer that was frozen after winning and lost its lease
+meanwhile fails one of the two writes and gives up. The counter makes epochs
+unique and growing; the output tail keeps a new epoch above every epoch
+already written even if `leases` or `epochs` is recreated and starts again.
+The one assumption is that `epochs` is not recreated while a holder that has
+not written anything yet may still be running: its epoch is then on no
+record, so the next claim could get the same one.
+
+A holder that finds a record from a later epoch on the output stream reads
+its lease. If the lease is gone, a later owner has taken over and the holder
+stops. If the lease is still its own, epochs went backwards, which nothing
+can repair automatically, so it logs an error and marks the workload failed
+with that reason instead of stopping and claiming again.
 
 An agent that cannot reach Felix stops its workloads once its own clock says
 two thirds of the TTL have passed since it sent the last successful renewal,
@@ -276,7 +291,14 @@ waits for its old leases to expire, so two processes configured with the same
 node id can't both believe they hold a workload. On a clean shutdown an agent
 deletes its leases with `cache_delete_if`, so another node can claim at once.
 Only a holder marks a workload failed in its spec, so a stale node can't fail
-a workload another node is running.
+a workload another node is running. It keeps renewing the lease until the
+failure is recorded, so a slow write doesn't let the lease lapse with the
+spec still `running`.
+
+Agents watch `workloads` with retained values. When a watch ends they open
+a new one, which redelivers every current spec first and says how many. Once
+all of them are in, the agent stops the workloads that were not among them:
+they were deleted or stopped while no watch was open.
 
 Agents watch `leases` with retained values. When an entry expires or is
 deleted, any agent may claim it, after a random delay so that one node does

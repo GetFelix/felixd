@@ -7,8 +7,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{INPUT, OUTPUT, SNAPSHOTS, eventually, test_felix};
+use common::{ID, INPUT, OUTPUT, SNAPSHOTS, eventually, test_felix};
 use felixd_core::output::{self, OutputHeader};
+use felixd_core::spec::WorkloadState;
 
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
@@ -100,4 +101,50 @@ async fn the_fuel_limit_comes_from_the_spec() {
     let _agent = t.start_agent();
     let failure = t.failure().await;
     assert!(failure.contains("fuel"), "{failure}");
+}
+
+/// Recording the failure is slow, longer than the lease TTL. The lease is
+/// renewed meanwhile, so it is still the holder's until the failure is in
+/// the spec, and then released.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_lease_is_renewed_while_a_slow_failure_is_recorded() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &["--fuel", "10"]).await;
+    t.publish_all(INPUT, [count(0)]).await;
+    let _agent = t.start_agent_with_faults("delay-failure-record=5000");
+    eventually("a lease", Duration::from_secs(30), || t.lease(ID)).await;
+    eventually("the failure", Duration::from_secs(30), || async {
+        let lease = t.lease(ID).await;
+        let spec = t.spec().await;
+        if lease.is_none() {
+            assert_eq!(
+                spec.state,
+                WorkloadState::Failed,
+                "the lease lapsed before the failure was recorded"
+            );
+            return Some(());
+        }
+        None
+    })
+    .await;
+}
+
+/// The spec is edited while the holder is recording a failure. The failure
+/// is written onto the edited spec, not over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_is_recorded_onto_a_spec_edited_meanwhile() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &["--fuel", "10", "--snapshot-every", "10"])
+        .await;
+    t.publish_all(INPUT, [count(0)]).await;
+    let _agent = t.start_agent_with_faults("delay-failure-record=5000");
+    eventually("a lease", Duration::from_secs(30), || t.lease(ID)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let mut spec = t.spec().await;
+    assert_eq!(spec.state, WorkloadState::Running);
+    spec.snapshot_every = 11;
+    t.put_spec(&spec).await;
+    let failure = t.failure().await;
+    assert!(failure.contains("fuel"), "{failure}");
+    assert_eq!(t.spec().await.snapshot_every, 11);
 }

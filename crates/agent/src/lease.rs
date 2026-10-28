@@ -7,6 +7,9 @@
 //! cannot reach Felix stops by its own clock at 2/3 of the TTL, before any
 //! other node can claim.
 //!
+//! A claim that wins then takes the next epoch from the `epochs` cache with
+//! `cache_put_if`, and writes it into the lease before it runs anything.
+//!
 //! The lease decides who should run a workload. What keeps the output correct
 //! when a holder is frozen or its clock is wrong is the epoch on every output
 //! record; see `felixd_core::output::reconcile`.
@@ -16,7 +19,7 @@ use std::future::Future;
 use anyhow::Result;
 use bytes::Bytes;
 use felix_client::{CacheCondition, CacheConditionResult, VersionedValue};
-use felixd_core::lease::{Lease, LeaseTiming};
+use felixd_core::lease::{self as rules, Lease, LeaseTiming};
 use felixd_core::names;
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
@@ -47,6 +50,16 @@ pub(crate) trait LeaseStore: Send + Sync {
         key: &str,
         version: u64,
     ) -> impl Future<Output = Result<CacheConditionResult>> + Send;
+
+    /// The last epoch handed out for `key`, in the `epochs` cache.
+    fn get_epoch(&self, key: &str) -> impl Future<Output = Result<Option<VersionedValue>>> + Send;
+
+    fn put_epoch_if(
+        &self,
+        key: &str,
+        value: Bytes,
+        condition: CacheCondition,
+    ) -> impl Future<Output = Result<CacheConditionResult>> + Send;
 }
 
 impl LeaseStore for Felix {
@@ -68,6 +81,20 @@ impl LeaseStore for Felix {
     async fn delete_if(&self, key: &str, version: u64) -> Result<CacheConditionResult> {
         self.cache_delete_if(names::LEASES, key, version).await
     }
+
+    async fn get_epoch(&self, key: &str) -> Result<Option<VersionedValue>> {
+        self.cache_get_versioned(names::EPOCHS, key).await
+    }
+
+    async fn put_epoch_if(
+        &self,
+        key: &str,
+        value: Bytes,
+        condition: CacheCondition,
+    ) -> Result<CacheConditionResult> {
+        self.cache_put_if(names::EPOCHS, key, value, None, condition)
+            .await
+    }
 }
 
 /// A lease this node holds.
@@ -82,6 +109,10 @@ pub(crate) struct Held {
     pub(crate) version: u64,
     /// When the last applied write was sent.
     pub(crate) sent_at: Instant,
+    /// When the first renewal since then whose outcome is unknown was sent.
+    /// If a read-back finds that one of them landed, it is credited from here,
+    /// since it may have been the earliest.
+    pub(crate) unconfirmed_since: Option<Instant>,
 }
 
 impl Held {
@@ -132,7 +163,11 @@ pub(crate) enum Lost {
 }
 
 /// Claims `workload` for `node` if no live lease exists. `None` means someone
-/// holds it.
+/// holds it, or took an epoch first.
+///
+/// `output_epoch` is the epoch of the last record on the workload's output
+/// stream. It is read only once the claim has won, so every earlier holder's
+/// lease has expired by then.
 ///
 /// An error leaves the claim unknown. It is not adopted even if it was applied:
 /// the lease then expires unused, and the workload waits one TTL.
@@ -141,20 +176,67 @@ pub(crate) async fn claim<S: LeaseStore>(
     node: &str,
     workload: &str,
     timing: LeaseTiming,
+    output_epoch: impl Future<Output = Result<u64>>,
 ) -> Result<Option<Held>> {
-    let sent_at = Instant::now();
     let value = Bytes::from(Lease::claim(node).encode());
     let result = store
         .put_if(workload, value, timing.ttl_millis(), CacheCondition::Absent)
         .await?;
-    Ok(match (result.applied, result.version) {
+    let (true, Some(claimed)) = (result.applied, result.version) else {
+        return Ok(None);
+    };
+    let held = take_epoch(store, node, workload, timing, claimed, output_epoch).await;
+    if !matches!(held, Ok(Some(_))) {
+        let _ = store.delete_if(workload, claimed).await;
+    }
+    held
+}
+
+/// Takes the next epoch from the counter and writes it into the lease. Both
+/// writes are conditional, so a claimer that was frozen after winning and
+/// lost its lease meanwhile gets no epoch, or no lease to write it into.
+async fn take_epoch<S: LeaseStore>(
+    store: &S,
+    node: &str,
+    workload: &str,
+    timing: LeaseTiming,
+    claimed: u64,
+    output_epoch: impl Future<Output = Result<u64>>,
+) -> Result<Option<Held>> {
+    let floor = output_epoch.await?;
+    let (last, condition) = match store.get_epoch(workload).await? {
+        Some(found) => (
+            rules::decode_epoch(&found.value)?,
+            CacheCondition::Version(found.version),
+        ),
+        None => (0, CacheCondition::Absent),
+    };
+    let epoch = Lease::next_epoch(last, floor);
+    let taken = store
+        .put_epoch_if(workload, Bytes::from(rules::encode_epoch(epoch)), condition)
+        .await?;
+    if !taken.applied {
+        return Ok(None);
+    }
+    let sent_at = Instant::now();
+    let value = Bytes::from(Lease::held(node, epoch).encode());
+    let put = store
+        .put_if(
+            workload,
+            value,
+            timing.ttl_millis(),
+            CacheCondition::Version(claimed),
+        )
+        .await?;
+    Ok(match (put.applied, put.version) {
         (true, Some(version)) => Some(Held {
             node: node.to_owned(),
             workload: workload.to_owned(),
             timing,
-            epoch: Lease::claim_epoch(version),
+            epoch,
             version,
             sent_at,
+            unconfirmed_since: None,
         }),
         _ => None,
     })
@@ -192,7 +274,9 @@ pub(crate) async fn hold<S: LeaseStore>(
 /// One renewal. `Ok(false)` is a refusal.
 async fn renew<S: LeaseStore>(store: &S, held: &mut Held) -> Result<bool> {
     let sent_at = Instant::now();
-    let value = Lease::renewal(&held.node, held.epoch);
+    let earlier_unknown = held.unconfirmed_since.is_some();
+    let first_unknown = *held.unconfirmed_since.get_or_insert(sent_at);
+    let value = Lease::held(&held.node, held.epoch);
     let put = store
         .put_if(
             &held.workload,
@@ -201,29 +285,51 @@ async fn renew<S: LeaseStore>(store: &S, held: &mut Held) -> Result<bool> {
             CacheCondition::Version(held.version),
         )
         .await;
-    match put {
+    let error = match put {
         Ok(CacheConditionResult {
             applied: true,
             version: Some(version),
         }) => {
+            // Any earlier renewal still unknown would have moved the version,
+            // and this one would have been refused.
             held.version = version;
             held.sent_at = sent_at;
+            held.unconfirmed_since = None;
+            return Ok(true);
+        }
+        // Refused, and no earlier renewal can be what moved the version.
+        Ok(_) if !earlier_unknown => return Ok(false),
+        Ok(_) => None,
+        Err(error) => Some(error),
+    };
+    // A renewal whose answer was lost may have been applied. Only this holder
+    // writes its own epoch, so finding it at a newer version means one landed.
+    match store.get_versioned(&held.workload).await? {
+        Some(found) if found.version == held.version => match error {
+            Some(error) => Err(error),
+            None => Ok(false),
+        },
+        Some(found) if Lease::decode(&found.value).as_ref() == Ok(&value) => {
+            held.version = found.version;
+            held.sent_at = first_unknown;
+            held.unconfirmed_since = None;
             Ok(true)
         }
-        Ok(_) => Ok(false),
-        // The answer was lost, so the renewal may have been applied. Only this
-        // holder writes its own epoch, so finding it at a newer version means
-        // the renewal landed.
-        Err(error) => match store.get_versioned(&held.workload).await? {
-            Some(found) if found.version == held.version => Err(error),
-            Some(found) if Lease::decode(&found.value).as_ref() == Ok(&value) => {
-                held.version = found.version;
-                held.sent_at = sent_at;
-                Ok(true)
-            }
-            _ => Ok(false),
-        },
+        _ => Ok(false),
     }
+}
+
+/// Whether the lease is still this holder's, by reading it.
+pub(crate) async fn still_held<S: LeaseStore>(
+    store: &S,
+    held_by: &str,
+    epoch: u64,
+    workload: &str,
+) -> Result<bool> {
+    Ok(match store.get_versioned(workload).await? {
+        Some(found) => Lease::decode(&found.value).as_ref() == Ok(&Lease::held(held_by, epoch)),
+        None => false,
+    })
 }
 
 /// Gives the lease up so another node can claim it at once. Best effort: if it

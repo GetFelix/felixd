@@ -5,7 +5,7 @@ use felixd_core::output::{self, Reconciled};
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
-use crate::runner::{LostLease, poison};
+use crate::runner::{LostLease, Superseded, poison};
 
 /// Consecutive failed attempts to write one batch before giving up.
 const MAX_ATTEMPTS: u32 = 5;
@@ -104,7 +104,7 @@ impl<'a> OutputLog<'a> {
                     epoch,
                     "a later owner wrote to the output stream"
                 );
-                Err(LostLease.into())
+                Err(Superseded(epoch).into())
             }
             Reconciled::Behind => Err(anyhow!(
                 "an earlier owner wrote past {} on {}, resuming",

@@ -32,9 +32,13 @@ enum Command {
         /// and process id, so two agents on one host differ.
         #[arg(long, env = "FELIXD_NODE_ID")]
         node_id: Option<String>,
-        /// How long a lease lives without renewal, in milliseconds. Every
-        /// node in a cluster should use the same value.
-        #[arg(long, default_value_t = felixd_core::lease::DEFAULT_TTL.as_millis() as u64)]
+        /// How long a lease lives without renewal, in milliseconds, at least
+        /// 2000. Every node in a cluster should use the same value.
+        #[arg(
+            long,
+            default_value_t = felixd_core::lease::DEFAULT_TTL.as_millis() as u64,
+            value_parser = clap::value_parser!(u64).range(felixd_core::lease::MIN_TTL.as_millis() as u64..),
+        )]
         lease_ttl_ms: u64,
     },
     /// Submit a workload: store its module, create its streams and start it.
@@ -126,3 +130,6 @@ fn default_node_id() -> String {
         .unwrap_or_else(|| "node".to_owned());
     format!("{host}-{}", std::process::id())
 }
+
+#[cfg(test)]
+mod tests;
