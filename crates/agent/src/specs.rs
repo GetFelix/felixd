@@ -157,9 +157,7 @@ pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Opti
     while next < tail {
         let end = tail.min(next + LOOK_RECORDS);
         let (page, after) = felix.read_page(stream, next, end).await?;
-        let found = page.into_iter().find(|r| {
-            output::decode(&r.payload).map_or(true, |found| found.needs_operator_spec().is_none())
-        });
+        let found = page.into_iter().next();
         if let Some(found) = found {
             return Ok(Some((found.offset, found.payload)));
         }
@@ -238,8 +236,8 @@ where
         let from = end.saturating_sub(LOOK_RECORDS);
         for record in read(from, end).await?.iter().rev() {
             match output::decode(record.as_ref()) {
-                Ok(Record::Claim { floor, .. }) => return Ok(floor.max(recorded)),
-                Ok(found) => recorded = recorded.max(found.needs_operator_spec()),
+                Ok(Record::Claim { floor, .. }) => return Ok(floor),
+                Ok(_) => {}
                 Err(_) => {}
             }
         }

@@ -132,7 +132,7 @@ fn needs_operator_found(
             class,
             reason,
             ..
-        } if *found >= spec_version => Some(Recorded::Failed {
+        } if *found >= spec_version && spec_version == u64::MAX => Some(Recorded::Failed {
             spec_version: *found,
             failure: class::Failure {
                 class: *class,
@@ -318,7 +318,6 @@ impl<'a> OutputLog<'a> {
                 {
                     floor = floor.max(claimed);
                 }
-                floor = floor.max(found.needs_operator_spec().unwrap_or(0));
                 // An earlier attempt that landed may carry an older floor.
                 ours |= matches!(found, Record::Claim { epoch, node, spec, .. }
                     if epoch == fence.epoch()
