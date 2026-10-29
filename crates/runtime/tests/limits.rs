@@ -15,6 +15,7 @@ fn load(limits: Limits) -> Workload {
 fn failure(result: Result<Vec<Vec<u8>>, WorkloadError>) -> felixd_runtime::Failure {
     match result {
         Err(WorkloadError::Failed(f)) => f,
+        Err(other) => panic!("expected a failure, got {other}"),
         Ok(out) => panic!("expected a failure, got {out:?}"),
     }
 }
