@@ -568,3 +568,58 @@ fn a_refused_new_module_never_decides_what_a_check_runs() {
     assert_eq!(lineage.module, "aa");
     assert_eq!(limits, [(0, a.limits)]);
 }
+
+/// A needs-operator record for r0 is the stream's first record, then r1
+/// claims and writes. The check runs r1's module and limits, not the cache's
+/// r2, which changed the input and was refused.
+#[test]
+fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
+    use crate::class::OperatorReason;
+    use crate::spec::{Limits, WorkloadSpec, WorkloadState};
+    let spec = |input: &str, fuel: u64| WorkloadSpec {
+        module: "aa".into(),
+        input: input.into(),
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        state: WorkloadState::Running,
+        limits: Limits {
+            fuel_per_call: fuel,
+            ..Limits::default()
+        },
+        failure: None,
+        record: None,
+    };
+    let (r1, r2) = (spec("in", 100), spec("other", 1));
+    let claimed = HashMap::from([(1, r1.clone())]);
+    let records = [
+        output::encode_needs_operator(0, 0, OperatorReason::ModuleMissing, "gone"),
+        output::encode_claim_under(1, 1, 1, "x"),
+        output::encode(header(0, 0), 1, b"x"),
+    ];
+    let cached = WorkloadSpec {
+        record: Some(2),
+        ..r2
+    };
+    let (lineage, limits) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.input, "in");
+    assert_eq!(limits, [(0, r1.limits)]);
+}
+
+/// A needs-operator record for r13 raises the floor like a claim: a stale
+/// owner of r12 that claims after it refuses its spec.
+#[test]
+fn a_needs_operator_record_raises_the_floor() {
+    use crate::class::OperatorReason;
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        output::encode(header(0, 0), 1, b"x"),
+        output::encode_needs_operator(2, 13, OperatorReason::ModuleMissing, "gone"),
+        output::encode_claim_under(3, 12, 13, "c"),
+        output::encode(header(1, 0), 3, b"x"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(0, 10)]
+    );
+}

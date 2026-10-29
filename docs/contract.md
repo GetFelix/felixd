@@ -266,10 +266,10 @@ The host refuses a component that does not export the 0.2 interfaces. It
 names what it found: a component with the 0.1 top-level `step`, `snapshot`,
 `restore` and `inspect` functions is reported as "built against
 felixd:workload@0.1.0, rebuild it against 0.2". `felixd run` refuses it
-before storing anything. An agent that finds one in a spec does not claim
-the workload and does not mark it failed: it is a needs-operator condition
-(design.md, System records and errors), and the fix is a new module under a
-new id, as for any new code.
+before storing anything. An agent that finds one in a spec does not run
+the workload and does not mark it failed: it is a needs-operator condition,
+recorded once on the output stream (design.md, System records and errors),
+and the fix is a new module under a new id, as for any new code.
 
 There is no shim. A 0.1 workload's outputs would need a name, its snapshots a
 chunk layout and its errors a class it never stated, and a shim that chose

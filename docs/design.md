@@ -467,6 +467,13 @@ again, and is passed over. The holder keeps renewing the lease until the
 failure is recorded, so a slow write doesn't let the lease lapse with the
 spec still `running`.
 
+A workload that needs an operator is recorded the same way, with a
+needs-operator record instead of a failure, and the spec is left `running`
+([System records and errors](#system-records-and-errors)). The record lands
+only before any later owner has begun, and a claimer that finds it last
+before its claim, or past the tail when its claim is refused, stops instead
+of claiming after it.
+
 Agents watch `workloads` with retained values. When a watch ends they open
 a new one, which redelivers every current spec first and says how many. Once
 all of them are in, the agent stops the workloads that were not among them:
@@ -1013,17 +1020,35 @@ Spaces in Plan 9" (1993); Pike, "Lexical File Names in Plan 9" (2000).
 Payloads stay opaque bytes. The system's own records do not (#73):
 
 - Specs, leases, failures, effect requests and effect responses are versioned
-  typed records, defined once in WIT with the workload contract and generated
-  into `core`. Today's JSON cache values and the free-text `failure` field are
-  replaced.
+  typed records. Today they are defined once, in `core`, and every write goes
+  through them: the cache values carry a format number under which the value
+  sits, so an older build refuses them instead of reading what it can, and a
+  failure carries its class ([records.md](records.md)). Defining them in WIT
+  with the workload contract waits for the effect records, which are not
+  built.
 - Every error has a class: **transient** (retried while the lease is held),
   **needs operator** (a missing module, an input past retention, a changed
   incarnation) or **poison** (an input the workload deterministically fails on).
   The [trap classes](#determinism) map onto these. The text is detail, never
-  what a program compares.
-  Today needs operator is only a log line and a released lease on the node
-  that hit it, not a recorded state
-  ([#112](https://github.com/GetFelix/felixd/issues/112)).
+  what a program compares. A needs-operator error also has a reason code.
+- **Needs operator is recorded** (#112). It is an observation, not spec
+  state: a record on `wl.<id>.out` naming the spec record, the reason and
+  detail, appended by a holder and fenced by epoch like the failure record
+  ([Leases and failure detection](#leases-and-failure-detection)). A node that
+  finds the problem before claiming claims only to write it. Every node whose
+  spec names that record finds it last on the stream and leaves the workload
+  alone, so it is written once per workload, spec record and reason. It is
+  not a takeover, so it does not count toward restart intensity. Only a spec
+  change, which is a new spec record, or removing the workload clears it. A
+  module still missing after 30 s, a module this build refuses, a spec that
+  is not in the history or conflicts with the output, and a restore out of
+  fuel are recorded. A stale spec is not, since only the node holding it sees
+  it. The record raises the spec floor like a claim and is passed over when
+  finding the first claim, so it neither hides the history nor lets a stale
+  node claim after it. A spec record still read as past the tail of
+  `sys.specs` after 30 s is recorded, so a lagging spec-history read stops the
+  workload cluster-wide until the spec is submitted again. `felixd ps` is to show it
+  ([#17](https://github.com/GetFelix/felixd/issues/17)).
 - A workload stuck on a transient error past a bound releases its lease and is
   recorded `degraded` with its class and reason, so it is visible instead of
   retrying silently on one node. `degraded` is not built yet
@@ -1050,9 +1075,10 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   as needs operator (`docs/contract.md`); this section does not change that.
 - A divergence record carries the node, its determinism ABI, the input offset,
   the snapshot it started from, and the digests of both the expected and the
-  actual output, so `felixd replay` can reproduce it.
+  actual output, so `felixd replay` can reproduce it. Not built yet.
 - Metrics and traces use OpenTelemetry: input lag, last output offset, epoch,
-  takeovers, replay time and per-effect latency per workload.
+  takeovers, replay time and per-effect latency per workload. Not built yet
+  ([#18](https://github.com/GetFelix/felixd/issues/18)).
 
 Plan 9's `ctl` files each had their own text commands and `errstr` returned a
 string that callers matched by text. Linux sysfs had to impose one value per

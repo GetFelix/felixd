@@ -1,4 +1,5 @@
 use super::*;
+use crate::class::{ErrorClass, Failure};
 
 fn spec() -> WorkloadSpec {
     WorkloadSpec {
@@ -29,7 +30,7 @@ fn the_json_form_is_fixed() {
     assert_eq!(
         json,
         format!(
-            r#"{{"module":"{}","input":"sensors","output":"wl.temp.out","snapshot_every":50,"state":"running","limits":{{"fuel_per_call":1000,"max_memory_bytes":1048576,"snapshot_fuel":5000}}}}"#,
+            r#"{{"format":1,"value":{{"module":"{}","input":"sensors","output":"wl.temp.out","snapshot_every":50,"state":"running","limits":{{"fuel_per_call":1000,"max_memory_bytes":1048576,"snapshot_fuel":5000}}}}}}"#,
             "ab".repeat(32)
         )
     );
@@ -60,10 +61,53 @@ fn limits_without_snapshot_fuel_get_ten_times_the_step_default() {
 fn a_failed_spec_keeps_its_reason() {
     let failed = WorkloadSpec {
         state: WorkloadState::Failed,
-        failure: Some("out of fuel".into()),
+        failure: Some(Failure {
+            class: ErrorClass::Poison,
+            detail: "out of fuel".into(),
+        }),
         ..spec()
     };
     assert_eq!(WorkloadSpec::decode(&failed.encode()), Ok(failed));
+}
+
+#[test]
+fn a_spec_from_before_formats_still_reads() {
+    let mut legacy = serde_json::to_value(spec()).unwrap();
+    legacy["state"] = "failed".into();
+    legacy["failure"] = "trap".into();
+    let read = WorkloadSpec::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(
+        read.failure,
+        Some(Failure {
+            class: ErrorClass::Poison,
+            detail: "trap".into()
+        })
+    );
+}
+
+#[test]
+fn a_build_before_formats_refuses_a_spec_instead_of_misreading_it() {
+    // What an older build decodes a `workloads` value into: the fields at the
+    // top, unknown ones ignored.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Before {
+        module: String,
+        input: String,
+        output: String,
+        state: WorkloadState,
+    }
+    assert!(serde_json::from_slice::<Before>(&spec().encode()).is_err());
+}
+
+#[test]
+fn a_spec_of_another_format_is_refused() {
+    let mut value: serde_json::Value = serde_json::from_slice(&spec().encode()).unwrap();
+    value["format"] = 2.into();
+    assert_eq!(
+        WorkloadSpec::decode(&serde_json::to_vec(&value).unwrap()),
+        Err(DecodeError::UnknownVersion(2))
+    );
 }
 
 #[test]
@@ -127,7 +171,10 @@ fn a_cache_value_matches_its_record_whatever_its_state() {
     };
     assert!(cached.matches_record(&record));
     cached.state = WorkloadState::Failed;
-    cached.failure = Some("trap".into());
+    cached.failure = Some(Failure {
+        class: ErrorClass::Poison,
+        detail: "trap".into(),
+    });
     assert!(cached.matches_record(&record));
     cached.limits.fuel_per_call = 1;
     assert!(!cached.matches_record(&record));

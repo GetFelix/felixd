@@ -11,7 +11,7 @@ On `wl.<id>.out`. The version is 4, followed by a kind byte.
 | Bytes | Field |
 |---|---|
 | 1 | version, 4 |
-| 1 | kind: 0 for an output, 1 for a claim, 2 for a failure, 3 for a rejection, 4 for a claim under a spec |
+| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator |
 | 8 | the writer's lease epoch |
 
 An output continues with:
@@ -38,20 +38,45 @@ their node as unknown. A new owner appends one before it resumes, so a stale own
 The floor is the highest spec record claimed on the stream so far, this claim's own included. An
 owner takes it from the last claim before its own, and from any claim it finds past the tail when
 its claim is refused, so the last claim alone says whether an older spec is being run, even when
-that claim's owner refused its spec. Kind 1 claims
+that claim's owner refused its spec. A needs-operator record after the last claim raises the floor
+to its spec record too, since it can be written with no claim. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
 judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
 run a spec whose module or input differ from the one the stream's first claim names, or whose
-record is below one a claim already names. A failure continues with:
+record is below the floor. Needs-operator records before the first claim ran nothing and are passed
+over when finding it. A failure, kind 5, continues with:
 
 | Bytes | Field |
 |---|---|
 | 8 | the `workloads` cache version of the spec the workload failed under |
-| rest | the reason, UTF-8 |
+| 1 | the error class: 0 transient, 1 needs operator, 2 poison |
+| rest | the reason, UTF-8, for people |
 
 A holder appends it when the workload fails, before it writes `failed` into the spec. It is the
 last record of that run: an owner of the same spec version that finds it writes `failed` into the
-spec and stops.
+spec and stops. A kind 2 failure, from an older build, has no class byte and reads as poison. An
+unknown class is refused.
+
+A needs-operator record, kind 6, says that no node can run a spec record until an operator acts. It
+continues with:
+
+| Bytes | Field |
+|---|---|
+| 8 | the `sys.specs` offset of the spec record |
+| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel |
+| rest | detail for people, UTF-8 |
+
+A holder appends it the way it appends a failure, behind everything of earlier epochs, and then
+releases the lease. A node that finds the problem before it claims claims only to write the record,
+with no claim record before it. A reason this build does not know is refused. Any node whose spec
+names that record and that finds it last on the stream, before it claims or while claiming, leaves
+the workload alone, so it is written once per workload, spec record and reason. It is not a failure
+and the spec stays `running`. A new spec record, which `felixd run` writes for any change, or
+removing the workload clears it. A stale spec is never recorded, since only the node holding it
+sees the problem, and a node checks for one before it records anything else. A spec record that a
+node still reads as past the tail of `sys.specs` after 30 seconds is recorded as spec not recorded,
+so a spec-history read lagging that long stops the workload on every node until the spec is
+submitted again.
 
 A rejection says the workload's `step` returned `reject` for an input and carried on. It continues with:
 
@@ -65,10 +90,13 @@ A rejection says the workload's `step` returned `reject` for an input and carrie
 A rejection is that input's only output. The resume fold, the skipped-output checks, reconcile and
 `felixd check` match it by `(input offset, index)` and compare it exactly like an output, so a
 stream with a rejection where a replay produces an output, or the other way round, diverges. They
-pass over claims and failures. A workload whose input is another workload's output stream reads only
-the outputs addressed to one name, `out`, and passes over claims, failures, rejections and outputs of
+pass over claims, failures and needs-operator records. A workload whose input is another workload's output stream reads only
+the outputs addressed to one name, `out`, and passes over these, rejections and outputs of
 other names (`output::addressed_to`). Its step gets the output's key and payload, not the record. A
 record there that does not decode fails the reader, since it cannot tell what the record holds.
+That includes kinds 5 and 6 read by a build from before them: an older felixd whose workload reads
+another workload's output stream fails its own workload as poison once a failure or needs-operator
+record lands there. Upgrade every node before a workload can write them.
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
@@ -121,18 +149,23 @@ the stream is the spec history. Records are never rewritten; `failed` stays in t
 
 ## Caches
 
-Values in `workloads` and `leases` are JSON. They are to become versioned typed records
-([design.md, System records and errors](design.md#system-records-and-errors)).
+Values in `workloads`, `leases`, `epochs` and `nodes` are JSON of the form
+`{"format": 1, "value": ...}`, each with its own format number. A reader refuses a format it does
+not know. The value sits under its own key so that a build from before formats, which reads the
+fields at the top, refuses it instead of reading what it can. A value with no `format` is from such
+a build and still reads.
 
 - A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000),
   `snapshot_every_ms` (absent unless set), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000),
   `max_memory_bytes` (default 64 MiB) and `snapshot_fuel` (default 500,000,000, for a whole
   snapshot or restore; a snapshot that runs out is skipped, a restore that runs out
 needs an operator). A spec without `limits` gets the defaults. A failed spec
-  also has `failure`. The cache value also has `record`, the `sys.specs` offset of the spec record
+  also has `failure`: `class` (`transient`, `needs-operator` or `poison`) and `detail`. A
+  `failure` that is a string is from an older build and reads as poison. The cache value also has `record`, the `sys.specs` offset of the spec record
   it comes from. An agent runs a spec only when that record says the same, state aside, and leaves
   one without `record` to an operator.
-- A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a decimal number.
+- A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a number.
+- A node has `version`, `max_workloads` and `held`.
 
 ## The resume fold
 

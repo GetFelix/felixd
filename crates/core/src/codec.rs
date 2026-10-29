@@ -1,3 +1,5 @@
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 /// Why a record could not be read.
@@ -19,6 +21,10 @@ pub enum DecodeError {
     RejectionIndex(u32),
     #[error("record has {0} bytes after its last field")]
     TrailingBytes(usize),
+    #[error("unknown error class {0}")]
+    UnknownClass(u8),
+    #[error("unknown needs-operator reason {0}")]
+    UnknownReason(u16),
     #[error("manifest names {0} chunks, more than {max}", max = crate::snapshot::MAX_CHUNKS)]
     TooManyChunks(u32),
 }
@@ -79,4 +85,40 @@ impl<'a> Reader<'a> {
     pub(crate) fn remaining(&self) -> usize {
         self.record.len() - self.at
     }
+}
+
+/// A cache value: `{"format": N, "value": ...}`. The value sits under its own
+/// key so that a build from before formats, which reads the value's fields at
+/// the top, refuses it instead of reading what it can.
+#[derive(Serialize)]
+struct Envelope<'a, T> {
+    format: u32,
+    value: &'a T,
+}
+
+pub(crate) fn encode_json<T: Serialize>(format: u32, value: &T) -> Vec<u8> {
+    serde_json::to_vec(&Envelope { format, value }).expect("a cache value is always valid JSON")
+}
+
+/// Reads a cache value of `format`. Another format is refused. A value
+/// without a format is from a build before formats and reads as `T` itself.
+pub(crate) fn decode_json<T: DeserializeOwned>(
+    format: u32,
+    bytes: &[u8],
+) -> Result<T, DecodeError> {
+    let json = |e: serde_json::Error| DecodeError::Json(e.to_string());
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).map_err(json)?;
+    if let Some(object) = value.as_object_mut()
+        && let Some(found) = object.remove("format")
+    {
+        let found = found.as_u64().unwrap_or(u64::MAX);
+        if found != u64::from(format) {
+            return Err(DecodeError::UnknownVersion(
+                u8::try_from(found).unwrap_or(u8::MAX),
+            ));
+        }
+        let inner = object.remove("value").unwrap_or(serde_json::Value::Null);
+        return serde_json::from_value(inner).map_err(json);
+    }
+    serde_json::from_value(value).map_err(json)
 }

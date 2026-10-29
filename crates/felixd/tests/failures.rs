@@ -8,6 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
+use felixd_core::class::ErrorClass;
 use felixd_core::output::{self, OutputHeader, Record};
 use felixd_core::spec::WorkloadState;
 
@@ -242,7 +243,12 @@ async fn a_failure_record_fails_the_workload_on_the_next_claim() {
     let version = t.spec_version().await;
     t.publish_if(
         OUTPUT,
-        vec![output::encode_failure(0, version, "a trap")],
+        vec![output::encode_failure(
+            0,
+            version,
+            ErrorClass::Poison,
+            "a trap",
+        )],
         0,
     )
     .await;
@@ -262,7 +268,12 @@ async fn a_resubmitted_workload_runs_past_an_earlier_failure_record() {
     let version = t.spec_version().await;
     t.publish_if(
         OUTPUT,
-        vec![output::encode_failure(0, version, "a trap")],
+        vec![output::encode_failure(
+            0,
+            version,
+            ErrorClass::Poison,
+            "a trap",
+        )],
         0,
     )
     .await;

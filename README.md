@@ -139,7 +139,7 @@ rejects the input. A rejection is recorded on the output stream and the
 workload carries on. Snapshots are written in chunks, and a chunk the last
 snapshot already holds is not written again. `felixd run` refuses a component
 built against contract 0.1, and an agent that finds one in a spec leaves it
-alone and logs it, rather than failing it.
+to an operator rather than failing it.
 `felixd run --fuel --max-memory --snapshot-fuel` sets the workload's limits:
 fuel per step, memory, and fuel for a whole snapshot or restore. A snapshot that
 runs out of fuel is skipped and the workload resumes from the previous one; a restore that
@@ -155,7 +155,19 @@ out of fuel, returns `poison`, breaks the contract (an invalid output name, an
 effect request, a chunk over 4 MiB) or finds its streams in a state it can't resume from is marked
 `failed` in its spec, with the reason. The failure is first a record on its
 output stream, fenced by epoch like an output, so a node that was frozen
-while another took over can't fail it.
+while another took over can't fail it. Its class says whether it is poison or
+needs an operator.
+
+What no node can get past without an operator, such as a module that is
+still missing after 30 seconds, a 0.1 module or a restore out of fuel, is
+not a failure: the spec stays `running`, and the node writes one
+needs-operator record with the reason to the output stream, fenced the same
+way. Every node then leaves the workload alone until its spec changes or it
+is removed. Cache values and stream records carry a format version, so an
+older felixd refuses a newer record instead of misreading it. For a workload
+that reads another workload's output stream, refusing means failing: an older
+felixd fails it as poison once a failure or needs-operator record lands on
+the stream it reads. Upgrade every node first.
 
 ## Try it on three nodes
 

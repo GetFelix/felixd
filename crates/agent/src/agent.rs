@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use bytes::Bytes;
 use felix_client::{CacheChange, CacheCondition, CacheWatchItem, ClusterCacheWatch};
+use felixd_core::class::{ErrorClass, Failure, OperatorReason};
 use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
 use felixd_core::placement::{FirstClaimWins, Placement};
@@ -26,8 +27,8 @@ use tokio::task::JoinHandle;
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held};
-use crate::output::{Recorded, record_failure};
-use crate::runner::{Modules, NeedsOperator, Outcome, run_workload};
+use crate::output::{self as output_log, Recorded, record_failure};
+use crate::runner::{LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload};
 use crate::settings::Settings;
 use crate::specs;
 
@@ -400,7 +401,7 @@ fn apply(
 }
 
 /// Claims the workload whenever its lease is free and runs it while the claim
-/// holds, until `stop` is set or the workload fails.
+/// holds, until `stop` is set or the workload fails or needs an operator.
 async fn own(
     node: Arc<Node>,
     id: String,
@@ -408,53 +409,51 @@ async fn own(
     mut lease: watch::Receiver<Seen>,
     mut stop: watch::Receiver<bool>,
 ) {
-    // A module this build refuses is left to an operator before anything is
-    // claimed, so no node takes the lease or fails the workload for it.
-    if let Err(error) = node.modules.compiled(&node.felix, &spec.module).await
-        && let Some(reason) = error.downcast_ref::<NeedsOperator>()
-    {
-        needs_operator(&id, reason, &mut stop).await;
+    // What is found before the lease claim. It is recorded under a claim, so
+    // that the record is fenced like a failure and the other nodes skip the
+    // workload instead of finding the same thing.
+    let Some(mut pending) = before_claim(&node, &id, &spec, &mut stop).await else {
         return;
-    }
-    // Only a spec in the history runs, so check and replay see what ran.
-    let past_tail_until = tokio::time::Instant::now() + RECORD_WAIT;
-    while let Err(error) = specs::check_record(&node.felix, &id, &spec).await {
-        if let Some(reason) = error.downcast_ref::<NeedsOperator>() {
-            needs_operator(&id, reason, &mut stop).await;
-            return;
-        }
-        if let Some(past) = error.downcast_ref::<specs::PastTail>()
-            && tokio::time::Instant::now() >= past_tail_until
-        {
-            needs_operator(&id, &NeedsOperator(past.to_string()), &mut stop).await;
-            return;
-        }
-        tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the spec record");
-        tokio::select! {
-            () = tokio::time::sleep(RETRY_DELAY) => {}
-            _ = stop.wait_for(|stop| *stop) => return,
-        }
-    }
+    };
     loop {
         if !node.wait_for_chance(&id, &mut lease, &mut stop).await {
             return;
         }
+        match recorded_needs_operator(&node.felix, &spec).await {
+            Ok(Some(reason)) => {
+                tracing::error!(workload = %id, %reason, "the output stream records that the workload needs an operator, not running it");
+                let _ = stop.wait_for(|stop| *stop).await;
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                if !pause(&mut stop).await {
+                    return;
+                }
+                continue;
+            }
+        }
         // Before the lease claim, so a spec every node refuses does not
         // take an epoch on each of them. The runner looks again after its
-        // claim is on the stream.
+        // claim is on the stream. A node with a problem to record looks too:
+        // a stale one must not record over a later spec.
         match specs::refuse_stale_or_foreign(&node.felix, &id, &spec).await {
             Ok(()) => {}
             Err(error) => {
-                if let Some(reason) = error.downcast_ref::<NeedsOperator>() {
-                    needs_operator(&id, reason, &mut stop).await;
-                    return;
+                if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
+                    if !recordable(&spec, problem) {
+                        needs_operator(&id, problem, &mut stop).await;
+                        return;
+                    }
+                    pending.get_or_insert_with(|| problem.clone());
+                } else {
+                    tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                    if !pause(&mut stop).await {
+                        return;
+                    }
+                    continue;
                 }
-                tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
-                tokio::select! {
-                    () = tokio::time::sleep(RETRY_DELAY) => {}
-                    _ = stop.wait_for(|stop| *stop) => return,
-                }
-                continue;
             }
         }
         let slot = Slot::take(&node);
@@ -467,15 +466,20 @@ async fn own(
             Ok(Some(mut held)) => {
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();
-                let ended = run_held(&node, &id, &spec, &mut held, claim_from, &mut stop).await;
+                let run = Run {
+                    spec: &spec,
+                    claim_from,
+                    pending: pending.as_ref(),
+                };
+                let ended = run_held(&node, &id, run, &mut held, &mut stop).await;
                 match ended {
                     Ended::Failed | Ended::Stopped => {
                         lease::release(&node.felix, &held).await;
                         return;
                     }
-                    Ended::NeedsOperator(reason) => {
+                    Ended::NeedsOperator(problem) => {
                         lease::release(&node.felix, &held).await;
-                        needs_operator(&id, &reason, &mut stop).await;
+                        needs_operator(&id, &problem, &mut stop).await;
                         return;
                     }
                     Ended::Lost => {}
@@ -495,10 +499,105 @@ async fn own(
     }
 }
 
+/// The checks before any claim: the module and the spec record. `None` means
+/// stop; `Some(problem)` is a problem to record under a claim, if any.
+async fn before_claim(
+    node: &Node,
+    id: &str,
+    spec: &WorkloadSpec,
+    stop: &mut watch::Receiver<bool>,
+) -> Option<Option<NeedsOperator>> {
+    let found = async {
+        // A module missing for this long is not a stale read.
+        let missing_until = tokio::time::Instant::now() + RECORD_WAIT;
+        loop {
+            let Err(error) = node.modules.compiled(&node.felix, &spec.module).await else {
+                break;
+            };
+            if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
+                return Some(Some(problem.clone()));
+            }
+            // The runner fails the workload for a module it cannot load.
+            if !error.is::<ModuleMissing>() {
+                break;
+            }
+            if tokio::time::Instant::now() >= missing_until {
+                let problem = NeedsOperator::new(OperatorReason::ModuleMissing, error.to_string());
+                return Some(Some(problem));
+            }
+            tracing::warn!(workload = %id, %error, "waiting for the module");
+            if !pause(stop).await {
+                return None;
+            }
+        }
+        // Only a spec in the history runs, so check and replay see what ran.
+        let past_tail_until = tokio::time::Instant::now() + RECORD_WAIT;
+        loop {
+            let Err(error) = specs::check_record(&node.felix, id, spec).await else {
+                return Some(None);
+            };
+            if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
+                return Some(Some(problem.clone()));
+            }
+            if let Some(past) = error.downcast_ref::<specs::PastTail>()
+                && tokio::time::Instant::now() >= past_tail_until
+            {
+                let problem = NeedsOperator::new(OperatorReason::SpecUnrecorded, past.to_string());
+                return Some(Some(problem));
+            }
+            tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the spec record");
+            if !pause(stop).await {
+                return None;
+            }
+        }
+    };
+    match found.await? {
+        Some(problem) if !recordable(spec, &problem) => {
+            needs_operator(id, &problem, stop).await;
+            None
+        }
+        found => Some(found),
+    }
+}
+
+/// Whether `problem` is written to the output stream. A record names the
+/// spec record, so a spec with none cannot have one. A stale spec is this
+/// node's alone, and its watch restarts it once it catches up.
+fn recordable(spec: &WorkloadSpec, problem: &NeedsOperator) -> bool {
+    spec.record.is_some() && problem.reason != OperatorReason::SpecStale
+}
+
+/// The reason, if the last record on the output stream says that the spec
+/// record this spec comes from needs an operator. Only a spec change, which
+/// is a new spec record, or removing the workload clears it.
+async fn recorded_needs_operator(
+    felix: &Felix,
+    spec: &WorkloadSpec,
+) -> Result<Option<OperatorReason>> {
+    let Some(record) = spec.record else {
+        return Ok(None);
+    };
+    let tail = felix.tail(&spec.output).await?;
+    let last = felix.last_record(&spec.output, tail).await?;
+    Ok(last.and_then(|last| {
+        output::decode(&last.payload)
+            .ok()
+            .and_then(|found| found.needs_operator_under(record))
+    }))
+}
+
+/// Waits a moment before trying again. `false` means stop.
+async fn pause(stop: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(RETRY_DELAY) => true,
+        _ = stop.wait_for(|stop| *stop) => false,
+    }
+}
+
 /// Logs that the workload needs an operator and waits for its spec to
 /// change or go, which restarts or stops the task.
-async fn needs_operator(id: &str, reason: &NeedsOperator, stop: &mut watch::Receiver<bool>) {
-    tracing::error!(workload = %id, %reason, "the workload needs an operator, not running it");
+async fn needs_operator(id: &str, problem: &NeedsOperator, stop: &mut watch::Receiver<bool>) {
+    tracing::error!(workload = %id, reason = %problem, "the workload needs an operator, not running it");
     let _ = stop.wait_for(|stop| *stop).await;
 }
 
@@ -635,11 +734,15 @@ enum Ended {
 async fn run_held(
     node: &Arc<Node>,
     id: &str,
-    spec: &WorkloadSpec,
+    run: Run<'_>,
     held: &mut Held,
-    mut claim_from: Option<u64>,
     stop: &mut watch::Receiver<bool>,
 ) -> Ended {
+    let Run {
+        spec,
+        mut claim_from,
+        pending,
+    } = run;
     let (deadline, fence) = held.fence();
     let (confirmer, mut asks) = Confirmer::new();
     let (end_renewals, ended) = oneshot::channel::<()>();
@@ -655,6 +758,9 @@ async fn run_held(
     }));
     let epoch = held.epoch;
     let work = async {
+        if let Some(problem) = pending {
+            return record_needs_operator(node, id, spec, problem, &fence, &confirmer).await;
+        }
         let outcome = loop {
             if faults::fail_workload() {
                 break Outcome::Failed("injected failure".to_owned());
@@ -680,16 +786,26 @@ async fn run_held(
         // went backwards, so it stays above every record before it and below
         // any claim taken after.
         let mut at_epoch = epoch;
+        let mut class = ErrorClass::Poison;
         let reason = match outcome {
             Outcome::Failed(message) => message,
             Outcome::Lost => return Ended::Lost,
-            Outcome::NeedsOperator(reason) => return Ended::NeedsOperator(NeedsOperator(reason)),
+            Outcome::NeedsOperator {
+                problem,
+                recorded: true,
+            } => return Ended::NeedsOperator(problem),
+            Outcome::NeedsOperator { problem, .. } if !recordable(spec, &problem) => {
+                return Ended::NeedsOperator(problem);
+            }
+            Outcome::NeedsOperator { problem, .. } => {
+                return record_needs_operator(node, id, spec, &problem, &fence, &confirmer).await;
+            }
             Outcome::FailedOnStream {
                 spec_version,
-                reason,
+                failure,
             } => {
-                tracing::error!(workload = %id, %reason, "the output stream records a failure");
-                return if write_failed(&node.felix, id, spec_version, &reason).await {
+                tracing::error!(workload = %id, reason = %failure.detail, "the output stream records a failure");
+                return if write_failed(&node.felix, id, spec_version, &failure).await {
                     Ended::Failed
                 } else {
                     Ended::Lost
@@ -705,6 +821,7 @@ async fn run_held(
                     return Ended::Lost;
                 }
                 at_epoch = found;
+                class = ErrorClass::NeedsOperator;
                 format!(
                     "epoch {found} on the output stream is above this holder's {epoch} \
                      while it still holds the lease, so lease epochs went backwards"
@@ -714,7 +831,10 @@ async fn run_held(
         tracing::error!(workload = %id, %reason, "workload failed");
         let failing = Failing {
             spec,
-            message: &reason,
+            failure: Failure {
+                class,
+                detail: reason.lines().next().unwrap_or_default().to_owned(),
+            },
             epoch: at_epoch,
         };
         if mark_failed(&node.felix, id, &failing, &fence, &confirmer).await {
@@ -754,8 +874,89 @@ impl<T> Drop for AbortOnDrop<T> {
 /// A failure to record: the spec that ran, why, and the failure record's epoch.
 struct Failing<'a> {
     spec: &'a WorkloadSpec,
-    message: &'a str,
+    failure: Failure,
     epoch: u64,
+}
+
+/// What a claim that won runs: the spec, from the output stream tail read
+/// with the epoch, or only the needs-operator record for `pending`.
+struct Run<'a> {
+    spec: &'a WorkloadSpec,
+    claim_from: Option<u64>,
+    pending: Option<&'a NeedsOperator>,
+}
+
+/// Records that the spec record `spec` comes from needs an operator, as a
+/// holder: it renews through `confirmer` first, then appends the record
+/// behind everything of earlier epochs, like a failure. A holder that claimed
+/// only to record it writes no claim, so this is no takeover. It is not a
+/// failure: the spec stays `running`, and the other nodes find the record
+/// and leave the workload alone.
+async fn record_needs_operator(
+    node: &Node,
+    id: &str,
+    spec: &WorkloadSpec,
+    problem: &NeedsOperator,
+    fence: &Fence,
+    confirmer: &Confirmer,
+) -> Ended {
+    let Some(record) = spec.record else {
+        return Ended::NeedsOperator(problem.clone());
+    };
+    while fence.holds() {
+        // The cache version, which a failure already on the stream is compared with.
+        let version = match node.felix.cache_get_versioned(names::WORKLOADS, id).await {
+            Ok(Some(found)) if WorkloadSpec::decode(&found.value).as_ref() == Ok(spec) => {
+                found.version
+            }
+            // Stopped, edited, or a stale read: the watch restarts or stops
+            // the task, which decides again.
+            Ok(_) => return Ended::Lost,
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not read the spec, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+        };
+        faults::before_failure_record().await;
+        if !confirmer.confirm().await || !fence.holds() {
+            tracing::warn!(workload = %id, "the lease is lost, not recording that it needs an operator");
+            return Ended::Lost;
+        }
+        let recorded = output_log::record_needs_operator(
+            &node.felix,
+            &spec.output,
+            fence,
+            fence.epoch(),
+            (version, record),
+            problem,
+        )
+        .await;
+        match recorded {
+            Ok(Recorded::NeedsOperator) => return Ended::NeedsOperator(problem.clone()),
+            Ok(Recorded::Superseded(epoch)) => {
+                tracing::warn!(workload = %id, epoch, "a later owner has written, not recording");
+                return Ended::Lost;
+            }
+            Ok(Recorded::Failed {
+                spec_version,
+                failure,
+            }) => {
+                tracing::error!(workload = %id, reason = %failure.detail, "the output stream records a failure");
+                return if write_failed(&node.felix, id, spec_version, &failure).await {
+                    Ended::Failed
+                } else {
+                    Ended::Lost
+                };
+            }
+            Err(error) if error.is::<LostLease>() => return Ended::Lost,
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not record that it needs an operator, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+    }
+    Ended::Lost
 }
 
 /// Records that the workload failed: a failure record on its output stream,
@@ -773,12 +974,7 @@ async fn mark_failed(
     confirmer: &Confirmer,
 ) -> bool {
     let running = failing.spec;
-    let failure = failing
-        .message
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    let failure = &failing.failure;
     while fence.holds() {
         let attempt = async {
             let Some(found) = felix.cache_get_versioned(names::WORKLOADS, id).await? else {
@@ -801,7 +997,7 @@ async fn mark_failed(
                 fence,
                 failing.epoch,
                 found.version,
-                &failure,
+                failure,
             )
             .await?;
             anyhow::Ok(Ok(recorded))
@@ -809,8 +1005,9 @@ async fn mark_failed(
         match attempt.await {
             Ok(Ok(Recorded::Failed {
                 spec_version,
-                reason,
-            })) => return write_failed(felix, id, spec_version, &reason).await,
+                failure,
+            })) => return write_failed(felix, id, spec_version, &failure).await,
+            Ok(Ok(Recorded::NeedsOperator)) => return false,
             Ok(Ok(Recorded::Superseded(epoch))) => {
                 tracing::warn!(workload = %id, epoch, "a later owner has written, not failing");
                 return false;
@@ -853,7 +1050,7 @@ fn spec_write(found: u64, state: WorkloadState, version: u64) -> SpecWrite {
     }
 }
 
-async fn write_failed(felix: &Felix, id: &str, version: u64, reason: &str) -> bool {
+async fn write_failed(felix: &Felix, id: &str, version: u64, failure: &Failure) -> bool {
     loop {
         let attempt = async {
             let Some(found) = felix.cache_get_versioned(names::WORKLOADS, id).await? else {
@@ -868,7 +1065,7 @@ async fn write_failed(felix: &Felix, id: &str, version: u64, reason: &str) -> bo
                 SpecWrite::Write => {}
             }
             spec.state = WorkloadState::Failed;
-            spec.failure = Some(reason.to_owned());
+            spec.failure = Some(failure.clone());
             let put = felix
                 .cache_put_if(
                     names::WORKLOADS,

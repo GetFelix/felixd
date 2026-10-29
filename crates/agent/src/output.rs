@@ -1,11 +1,14 @@
 use anyhow::{Result, anyhow};
 use felix_client::ConditionalWrite;
+use felixd_core::class;
 use felixd_core::output::{self, Reconciled, Record};
 
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
-use crate::runner::{FailedOnStream, LostLease, Superseded, poison};
+use crate::runner::{
+    FailedOnStream, LostLease, NeedsOperator, NeedsOperatorOnStream, Superseded, poison,
+};
 use crate::specs;
 
 /// Consecutive failed attempts to write one batch before giving up.
@@ -19,15 +22,24 @@ pub(crate) struct OutputLog<'a> {
     /// The version of the spec this owner runs. A failure record under it,
     /// or a later one, ends the run.
     spec_version: u64,
+    /// The spec record it runs. A needs-operator record under it ends the
+    /// claim.
+    spec_record: u64,
     tail: u64,
 }
 
-/// How [`record_failure`] ended.
+/// How [`record_failure`] or [`record_needs_operator`] ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Recorded {
     /// The failure record landed, or was already there: under this spec
     /// version, for this reason.
-    Failed { spec_version: u64, reason: String },
+    Failed {
+        spec_version: u64,
+        failure: class::Failure,
+    },
+    /// The needs-operator record landed, or one for the same spec record and
+    /// reason was already there.
+    NeedsOperator,
     /// A later owner has written, so this node must not fail the workload.
     Superseded(u64),
 }
@@ -47,7 +59,103 @@ pub(crate) async fn record_failure(
     fence: &Fence,
     epoch: u64,
     spec_version: u64,
-    reason: &str,
+    failure: &class::Failure,
+) -> Result<Recorded> {
+    let record = output::encode_failure(epoch, spec_version, failure.class, &failure.detail);
+    let ours = Recorded::Failed {
+        spec_version,
+        failure: failure.clone(),
+    };
+    append_last(
+        felix,
+        stream,
+        fence,
+        epoch,
+        record,
+        ours,
+        |found| match found {
+            Record::Failure {
+                spec_version: found,
+                class,
+                reason,
+                ..
+            } if *found >= spec_version => Some(Recorded::Failed {
+                spec_version: *found,
+                failure: class::Failure {
+                    class: *class,
+                    detail: String::from_utf8_lossy(reason).into_owned(),
+                },
+            }),
+            _ => None,
+        },
+    )
+    .await
+}
+
+/// Appends a record at `epoch` saying that spec record `spec` needs an
+/// operator, fenced like [`record_failure`]. One already last for the same
+/// spec record and reason is not written again, and a failure last under
+/// `spec_version` or a later one ends the run instead.
+pub(crate) async fn record_needs_operator(
+    felix: &Felix,
+    stream: &str,
+    fence: &Fence,
+    epoch: u64,
+    (spec_version, spec): (u64, u64),
+    problem: &NeedsOperator,
+) -> Result<Recorded> {
+    let record = output::encode_needs_operator(epoch, spec, problem.reason, &problem.detail);
+    append_last(
+        felix,
+        stream,
+        fence,
+        epoch,
+        record,
+        Recorded::NeedsOperator,
+        |found| needs_operator_found(found, (spec_version, spec), problem.reason),
+    )
+    .await
+}
+
+/// What [`record_needs_operator`] makes of `found`, the last record: a
+/// failure under `spec_version` or later is the outcome, and a needs-operator
+/// record for spec record `spec` and `reason` means it is already written.
+/// One for another reason is not, so each reason is written once.
+fn needs_operator_found(
+    found: &Record<'_>,
+    (spec_version, spec): (u64, u64),
+    reason: class::OperatorReason,
+) -> Option<Recorded> {
+    match found {
+        Record::Failure {
+            spec_version: found,
+            class,
+            reason,
+            ..
+        } if *found >= spec_version => Some(Recorded::Failed {
+            spec_version: *found,
+            failure: class::Failure {
+                class: *class,
+                detail: String::from_utf8_lossy(reason).into_owned(),
+            },
+        }),
+        found => {
+            (found.needs_operator_under(spec) == Some(reason)).then_some(Recorded::NeedsOperator)
+        }
+    }
+}
+
+/// Appends `record`, the last of this run, at the tail unless the last record
+/// there is from a later epoch or is what `already` recognises. Returns
+/// `ours` once it lands.
+async fn append_last(
+    felix: &Felix,
+    stream: &str,
+    fence: &Fence,
+    epoch: u64,
+    record: Vec<u8>,
+    ours: Recorded,
+    already: impl Fn(&Record<'_>) -> Option<Recorded>,
 ) -> Result<Recorded> {
     let mut failures = 0;
     loop {
@@ -55,40 +163,34 @@ pub(crate) async fn record_failure(
             return Err(LostLease.into());
         }
         let tail = felix.tail(stream).await?;
-        if let Some(last) = felix.last_record(stream, tail).await? {
-            match output::decode(&last.payload) {
-                Ok(found) if found.epoch() > epoch => {
-                    return Ok(Recorded::Superseded(found.epoch()));
-                }
-                Ok(Record::Failure {
-                    spec_version: found,
-                    reason,
-                    ..
-                }) if found >= spec_version => {
-                    return Ok(Recorded::Failed {
-                        spec_version: found,
-                        reason: String::from_utf8_lossy(reason).into_owned(),
-                    });
-                }
-                _ => {}
+        if let Some(last) = felix.last_record(stream, tail).await?
+            && let Ok(found) = output::decode(&last.payload)
+        {
+            if found.epoch() > epoch {
+                return Ok(Recorded::Superseded(found.epoch()));
+            }
+            if let Some(recorded) = already(&found) {
+                return Ok(recorded);
             }
         }
         faults::before_failure_append();
-        let record = output::encode_failure(epoch, spec_version, reason);
-        match send(felix, stream, vec![record], tail, faults::Write::Failure).await {
-            Ok(ConditionalWrite::Written { .. }) => {
-                return Ok(Recorded::Failed {
-                    spec_version,
-                    reason: reason.to_owned(),
-                });
-            }
+        match send(
+            felix,
+            stream,
+            vec![record.clone()],
+            tail,
+            faults::Write::Failure,
+        )
+        .await
+        {
+            Ok(ConditionalWrite::Written { .. }) => return Ok(ours),
             Ok(ConditionalWrite::Refused { .. }) => {}
             Err(error) => {
                 failures += 1;
                 if failures >= MAX_ATTEMPTS {
-                    return Err(error.context(format!("record the failure on {stream}")));
+                    return Err(error.context(format!("append the last record on {stream}")));
                 }
-                tracing::warn!(stream, %error, "failure record failed, checking the tail");
+                tracing::warn!(stream, %error, "last record failed, checking the tail");
             }
         }
     }
@@ -117,7 +219,7 @@ impl<'a> OutputLog<'a> {
         felix: &'a Felix,
         stream: &'a str,
         fence: &'a Fence,
-        spec_version: u64,
+        (spec_version, spec_record): (u64, u64),
         tail: u64,
     ) -> Self {
         OutputLog {
@@ -125,6 +227,7 @@ impl<'a> OutputLog<'a> {
             stream,
             fence,
             spec_version,
+            spec_record,
             tail,
         }
     }
@@ -140,21 +243,21 @@ impl<'a> OutputLog<'a> {
     /// owner is superseded, its own claim means an earlier attempt landed, and
     /// anything else is claimed after. Once the claim is on the stream `from`
     /// is cleared, and later resumes only check that no later owner wrote.
-    /// A failure record under this owner's spec, last before the tail or among
-    /// the records past it, ends the claim instead.
+    /// A failure record under this owner's spec, or a needs-operator record
+    /// under its spec record, last before the tail or among the records past
+    /// it, ends the claim instead, so that each is acted on once.
     pub(crate) async fn claim(
         felix: &'a Felix,
         stream: &'a str,
         fence: &'a Fence,
-        spec_version: u64,
-        spec_record: u64,
+        (spec_version, spec_record): (u64, u64),
         from: &mut Option<u64>,
     ) -> Result<OutputLog<'a>> {
         let start = match *from {
             Some(start) => start,
             None => felix.tail(stream).await?,
         };
-        let mut log = OutputLog::new(felix, stream, fence, spec_version, start);
+        let mut log = OutputLog::new(felix, stream, fence, (spec_version, spec_record), start);
         if let Some(last) = felix.last_record(stream, start).await? {
             log.check_found(&last.payload, last.offset)?;
         }
@@ -215,6 +318,7 @@ impl<'a> OutputLog<'a> {
                 {
                     floor = floor.max(claimed);
                 }
+                floor = floor.max(found.needs_operator_spec().unwrap_or(0));
                 // An earlier attempt that landed may carry an older floor.
                 ours |= matches!(found, Record::Claim { epoch, node, spec, .. }
                     if epoch == fence.epoch()
@@ -250,6 +354,7 @@ impl<'a> OutputLog<'a> {
         }
         if let Record::Failure {
             spec_version,
+            class,
             reason,
             ..
         } = found
@@ -257,9 +362,18 @@ impl<'a> OutputLog<'a> {
         {
             return Err(FailedOnStream {
                 spec_version,
-                reason: String::from_utf8_lossy(reason).into_owned(),
+                failure: class::Failure {
+                    class,
+                    detail: String::from_utf8_lossy(reason).into_owned(),
+                },
             }
             .into());
+        }
+        if let Record::NeedsOperator { reason, detail, .. } = found
+            && found.needs_operator_under(self.spec_record).is_some()
+        {
+            let detail = String::from_utf8_lossy(detail).into_owned();
+            return Err(NeedsOperatorOnStream(NeedsOperator::new(reason, detail)).into());
         }
         Ok(found)
     }
@@ -357,10 +471,14 @@ impl<'a> OutputLog<'a> {
             )),
             Reconciled::Failed {
                 spec_version,
+                class,
                 reason,
             } if spec_version >= self.spec_version => Err(FailedOnStream {
                 spec_version,
-                reason,
+                failure: class::Failure {
+                    class,
+                    detail: reason,
+                },
             }
             .into()),
             Reconciled::Failed { .. } | Reconciled::Diverged => Err(poison(format!(
@@ -370,3 +488,6 @@ impl<'a> OutputLog<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

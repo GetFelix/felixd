@@ -1,4 +1,5 @@
 use super::*;
+use crate::class::{ErrorClass, OperatorReason};
 
 fn h(input_offset: u64, index: u32) -> OutputHeader {
     OutputHeader {
@@ -133,6 +134,7 @@ fn a_version_3_record_reads_as_out_with_no_key() {
         Ok(Record::Failure {
             epoch: 5,
             spec_version: 1,
+            class: ErrorClass::Poison,
             reason: b"r"
         })
     );
@@ -210,7 +212,7 @@ fn every_cut_of_a_record_fails_without_panicking() {
                 detail: b"",
             },
         ),
-        encode_failure(1, 2, ""),
+        encode_failure(1, 2, ErrorClass::Poison, ""),
     ];
     for record in records {
         for cut in 0..record.len() {
@@ -327,7 +329,7 @@ fn a_reader_of_another_stream_gets_only_outputs_of_its_name() {
             },
         ),
         encode_claim(1, "node"),
-        encode_failure(1, 1, "trap"),
+        encode_failure(1, 1, ErrorClass::Poison, "trap"),
     ];
     for record in &others {
         assert_eq!(addressed_to(record, "out"), Ok(None), "{record:?}");
@@ -345,8 +347,8 @@ fn an_unknown_version_or_kind_is_refused() {
     record[0] = 5;
     assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(5)));
     record[0] = 4;
-    record[1] = 5;
-    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(5)));
+    record[1] = 7;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(7)));
 }
 
 #[test]
@@ -453,35 +455,88 @@ fn earlier_claims_are_passed_over() {
 
 #[test]
 fn a_failure_round_trips_and_holds_no_output() {
-    let record = encode_failure(4, 12, "out of fuel");
-    assert_eq!(&record[..2], [4, 2]);
+    let record = encode_failure(4, 12, ErrorClass::NeedsOperator, "epochs went backwards");
+    assert_eq!(&record[..2], [4, 5]);
     assert_eq!(
         decode(&record),
         Ok(Record::Failure {
             epoch: 4,
             spec_version: 12,
-            reason: b"out of fuel",
+            class: ErrorClass::NeedsOperator,
+            reason: b"epochs went backwards",
         })
     );
     assert_eq!(decode(&record).unwrap().epoch(), 4);
     assert_eq!(decode(&record).unwrap().output(), None);
     assert!(is_marker(&record));
     assert!(!same_output(&record, &record));
-    assert!(decode(&record[..17]).is_err());
+    assert!(decode(&record[..18]).is_err());
+}
+
+#[test]
+fn a_failure_of_an_unknown_class_is_refused() {
+    let mut record = encode_failure(4, 12, ErrorClass::Poison, "trap");
+    record[18] = 9;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownClass(9)));
+}
+
+#[test]
+fn a_needs_operator_record_round_trips_and_holds_no_output() {
+    let record = encode_needs_operator(3, 40, OperatorReason::ModuleMissing, "module ab");
+    assert_eq!(&record[..2], [4, 6]);
+    let decoded = decode(&record).unwrap();
+    assert_eq!(
+        decoded,
+        Record::NeedsOperator {
+            epoch: 3,
+            spec: 40,
+            reason: OperatorReason::ModuleMissing,
+            detail: b"module ab",
+        }
+    );
+    assert_eq!(decoded.epoch(), 3);
+    assert_eq!(decoded.written(), None);
+    assert_eq!(
+        decoded.needs_operator_under(40),
+        Some(OperatorReason::ModuleMissing)
+    );
+    assert_eq!(decoded.needs_operator_under(41), None);
+    assert!(is_marker(&record));
+    assert!(passed_over(&record, DEFAULT_NAME));
+    assert!(decode(&record[..19]).is_err());
+    // A spec change is a new spec record, so it no longer matches.
+    let mut unknown = record.clone();
+    unknown[18..20].copy_from_slice(&99u16.to_be_bytes());
+    assert_eq!(decode(&unknown), Err(DecodeError::UnknownReason(99)));
+}
+
+#[test]
+fn a_build_before_version_4_refuses_the_new_kinds() {
+    // Version 3 knew only outputs, claims and failures.
+    for kind in [5, 6] {
+        let mut record = encode_needs_operator(1, 1, OperatorReason::ModuleRefused, "");
+        record[0] = 3;
+        record[1] = kind;
+        assert_eq!(decode(&record), Err(DecodeError::UnknownKind(kind)));
+    }
 }
 
 #[test]
 fn a_failure_ends_the_run_unless_a_later_owner_wrote() {
     let ours = batch(7, &[10]);
-    let theirs = [encode_failure(5, 3, "trap")];
+    let theirs = [encode_failure(5, 3, ErrorClass::Poison, "trap")];
     assert_eq!(
         reconcile(7, &ours, &refs(&theirs)),
         Reconciled::Failed {
             spec_version: 3,
+            class: ErrorClass::Poison,
             reason: "trap".to_owned()
         }
     );
-    let theirs = [encode_failure(5, 3, "trap"), encode_claim(8, "")];
+    let theirs = [
+        encode_failure(5, 3, ErrorClass::Poison, "trap"),
+        encode_claim(8, ""),
+    ];
     assert_eq!(
         reconcile(7, &ours, &refs(&theirs)),
         Reconciled::Superseded { epoch: 8 }

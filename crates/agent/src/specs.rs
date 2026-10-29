@@ -4,6 +4,7 @@
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{CacheCondition, ConditionalWrite};
+use felixd_core::class::OperatorReason;
 use felixd_core::names;
 use felixd_core::output::{self, Record};
 use felixd_core::spec::{SpecRecord, WorkloadSpec, moves_forward};
@@ -59,9 +60,9 @@ pub(crate) async fn read(felix: &Felix, id: &str, offset: u64) -> Result<Workloa
         bail!("no spec record at {at}");
     };
     let record = SpecRecord::decode(&found.payload)
-        .map_err(|e| NeedsOperator(format!("the spec record at {at}: {e}")))?;
+        .map_err(|e| unrecorded(format!("the spec record at {at}: {e}")))?;
     if record.id != id {
-        return Err(NeedsOperator(format!(
+        return Err(unrecorded(format!(
             "the spec record at {at} is workload {}'s",
             record.id
         ))
@@ -74,19 +75,20 @@ pub(crate) async fn read(felix: &Felix, id: &str, offset: u64) -> Result<Workloa
 /// an agent runs only specs in the history. A mismatch is [`NeedsOperator`].
 pub(crate) async fn check_record(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Result<()> {
     let Some(offset) = spec.record else {
-        return Err(NeedsOperator(
-            "its workloads entry names no spec record; submit it again".to_owned(),
-        )
-        .into());
+        return Err(unrecorded("its workloads entry names no spec record; submit it again").into());
     };
     if !spec.matches_record(&read(felix, id, offset).await?) {
-        return Err(NeedsOperator(format!(
+        return Err(unrecorded(format!(
             "its workloads entry differs from its spec record at {}:{offset}",
             names::SPECS
         ))
         .into());
     }
     Ok(())
+}
+
+fn unrecorded(detail: impl Into<String>) -> NeedsOperator {
+    NeedsOperator::new(OperatorReason::SpecUnrecorded, detail)
 }
 
 /// Writes `spec`, the cache value of the record at `spec.record`, into
@@ -134,19 +136,32 @@ const LOOK_RECORDS: u64 = 16;
 /// no claim, or whose first claim or output predates spec records.
 pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<WorkloadSpec>> {
     let stream = names::output_stream(id);
-    let tail = felix.tail(&stream).await?;
+    let Some((offset, first)) = first_run_record(felix, &stream).await? else {
+        return Ok(None);
+    };
+    match output::decode(&first) {
+        Ok(Record::Claim {
+            spec: Some(spec), ..
+        }) => Ok(Some(read(felix, id, spec).await?)),
+        Ok(_) => Ok(None),
+        Err(error) => bail!("{stream}:{offset}: {error}"),
+    }
+}
+
+/// The first record on `stream` that is not a needs-operator record, with
+/// its offset. A needs-operator record can be written before any claim and
+/// ran nothing, so it never says what the stream was written under.
+pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
+    let tail = felix.tail(stream).await?;
     let mut next = 0;
     while next < tail {
         let end = tail.min(next + LOOK_RECORDS);
-        let (page, after) = felix.read_page(&stream, next, end).await?;
-        if let Some(first) = page.first() {
-            return match output::decode(&first.payload) {
-                Ok(Record::Claim {
-                    spec: Some(spec), ..
-                }) => Ok(Some(read(felix, id, spec).await?)),
-                Ok(_) => Ok(None),
-                Err(error) => bail!("{stream}:{}: {error}", first.offset),
-            };
+        let (page, after) = felix.read_page(stream, next, end).await?;
+        let found = page.into_iter().find(|r| {
+            output::decode(&r.payload).map_or(true, |found| found.needs_operator_spec().is_none())
+        });
+        if let Some(found) = found {
+            return Ok(Some((found.offset, found.payload)));
         }
         next = after;
     }
@@ -155,8 +170,9 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
 
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
 /// was written under another module or input, which `spec` would not
-/// reproduce, or when the last claim's floor is above `spec`'s record, which
-/// means a later spec has been claimed and this node's view is stale. Called
+/// reproduce, or when the floor ([`claim_floor`]) is above `spec`'s record,
+/// which means a later spec has been claimed or recorded and this node's view
+/// is stale. Called
 /// before the lease claim and again once this owner's claim is on the
 /// stream, when the last claim is its own and its floor still says whether a
 /// later spec was claimed before it. Both are [`NeedsOperator`]; a stale node
@@ -169,9 +185,12 @@ pub(crate) async fn refuse_stale_or_foreign(
     if let Some(written) = written_under(felix, id).await?
         && let Some(conflict) = written.conflicts_with_history(spec)
     {
-        return Err(NeedsOperator(format!(
-            "the workload already has output, and {conflict}; submit the change under a new id"
-        ))
+        return Err(NeedsOperator::new(
+            OperatorReason::SpecConflict,
+            format!(
+                "the workload already has output, and {conflict}; submit the change under a new id"
+            ),
+        )
         .into());
     }
     let ours = spec.record.context("the spec names no spec record")?;
@@ -181,19 +200,22 @@ pub(crate) async fn refuse_stale_or_foreign(
         .await?
         .filter(|&floor| floor > ours)
     {
-        return Err(NeedsOperator(format!(
-            "spec record {floor} has already been claimed, and this node has {ours}"
-        ))
+        return Err(NeedsOperator::new(
+            OperatorReason::SpecStale,
+            format!("spec record {floor} has already been claimed, and this node has {ours}"),
+        )
         .into());
     }
     Ok(())
 }
 
-/// The floor of the last claim on `stream` below `end`: the highest spec
-/// record claimed on it so far. `None` if that claim predates spec records or
-/// there is none. It pages back from `end` a few records at a time and stops
-/// at the first claim of any kind, so it reads every output since the last
-/// takeover but holds only one page.
+/// The highest spec record claimed on `stream` below `end`: the floor of
+/// the last claim, raised by any needs-operator record after it, since that
+/// record's writer passed the same refusals a claimer does. `None` if there
+/// is neither, or the last claim predates spec records and no needs-operator
+/// record follows it. It pages back from `end` a few records at a time and
+/// stops at the first claim of any kind, so it reads every output since the
+/// last takeover but holds only one page.
 pub(crate) async fn claim_floor(felix: &Felix, stream: &str, end: u64) -> Result<Option<u64>> {
     claim_floor_in(end, |from, end| async move {
         let records = felix.read_range(stream, from, end).await?;
@@ -211,16 +233,19 @@ where
     P: AsRef<[u8]>,
 {
     let mut end = end;
+    let mut recorded = None;
     while end > 0 {
         let from = end.saturating_sub(LOOK_RECORDS);
         for record in read(from, end).await?.iter().rev() {
-            if let Ok(Record::Claim { floor, .. }) = output::decode(record.as_ref()) {
-                return Ok(floor);
+            match output::decode(record.as_ref()) {
+                Ok(Record::Claim { floor, .. }) => return Ok(floor.max(recorded)),
+                Ok(found) => recorded = recorded.max(found.needs_operator_spec()),
+                Err(_) => {}
             }
         }
         end = from;
     }
-    Ok(None)
+    Ok(recorded)
 }
 
 /// The spec whose module and input workload `id`'s output stream was written
