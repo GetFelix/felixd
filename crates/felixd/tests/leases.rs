@@ -211,10 +211,8 @@ async fn a_claim_takes_an_epoch_above_the_output_streams() {
     let Some(t) = test_felix().await else { return };
     let module = t.submit("counter", &["--snapshot-every", "10"]).await;
     t.publish_all(INPUT, (0..10).map(count)).await;
-    t.felix
-        .publish_if(OUTPUT, (0..5).map(|i| counted(i, 500)).collect(), 0)
-        .await
-        .unwrap();
+    t.publish_if(OUTPUT, (0..5).map(|i| counted(i, 500)).collect(), 0)
+        .await;
     let _agent = t.start_agent();
     assert_uninterrupted(&t, &module, 10).await;
     assert_eq!(epochs(&t).await, [[500; 5], [501; 5]].concat());

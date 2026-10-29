@@ -278,6 +278,21 @@ impl Felix {
             .await
     }
 
+    /// Whether the broker serving `watch` answers a read of `cache` within
+    /// `within`. A watch whose broker died can wait forever without ending,
+    /// so the agent asks now and then.
+    pub async fn watch_answers(
+        &self,
+        watch: &felix_client::ClusterCacheWatch,
+        cache: &str,
+        within: Duration,
+    ) -> bool {
+        let read = watch
+            .client()
+            .cache_get(&self.tenant, &self.namespace, cache, "felixd-probe");
+        matches!(tokio::time::timeout(within, read).await, Ok(Ok(_)))
+    }
+
     /// Watches every key of `cache`, delivering the current entries first.
     pub async fn watch_retained(&self, cache: &str) -> Result<felix_client::ClusterCacheWatch> {
         self.client

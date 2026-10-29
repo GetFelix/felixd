@@ -47,12 +47,14 @@ FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test failover -- --test-threads=1
 By hand, with a workload component and a durable input stream that already exists:
 
 ```
-felixd run --id counter --input in counter.wasm
+felixd run --id counter --input in --replication-factor 1 counter.wasm
 felixd agent
 ```
 
 `felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
-`wl.<id>.snap` streams and writes the spec. The agent reads every spec in the
+`wl.<id>.snap` streams and writes the spec. It creates felixd's caches and
+streams with three `Quorum` replicas unless `--replication-factor` says
+otherwise; the single-broker test stack needs 1. The agent reads every spec in the
 `workloads` cache, claims the lease of each one nobody holds and runs it while
 the lease holds. Start a second agent and kill the first: within one lease TTL
 (10 s by default and at least 2 s, `--lease-ttl-ms`) the second carries on from the right input,

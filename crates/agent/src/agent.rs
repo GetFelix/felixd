@@ -25,11 +25,19 @@ use tokio::task::JoinHandle;
 
 use crate::faults;
 use crate::felix::Felix;
-use crate::lease::{self, Fence, Held};
+use crate::lease::{self, Confirmer, Fence, Held};
 use crate::runner::{Modules, Outcome, run_workload};
 use crate::settings::Settings;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// How long opening a watch may take. Right after a broker dies, a client
+/// whose routing still names it can wait on it with no error.
+const OPEN_WATCH_WITHIN: Duration = Duration::from_secs(10);
+
+/// How often the brokers serving the watches are asked whether they are
+/// still there, and how long they have to answer.
+const PROBE_WATCHES_EVERY: Duration = Duration::from_secs(5);
 
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
@@ -122,6 +130,8 @@ pub async fn run(
     };
     // Set while a new watch is redelivering the current workloads.
     let mut redelivery: Option<Redelivery> = None;
+    let mut probe = tokio::time::interval(PROBE_WATCHES_EVERY);
+    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let item = tokio::select! {
             // A lease change waiting to be read comes before a workload, so a
@@ -144,6 +154,20 @@ pub async fn run(
                 continue;
             }
             item = watch.recv() => item,
+            _ = probe.tick() => {
+                if !node.felix.watch_answers(&leases, names::LEASES, PROBE_WATCHES_EVERY).await {
+                    tracing::warn!(cache = names::LEASES, "the watched broker does not answer, watching again");
+                    match unless(shutdown.as_mut(), reopen(&node, names::LEASES, Duration::ZERO)).await {
+                        Some(opened) => leases = opened,
+                        None => return shut_down(&node, presence, tasks).await,
+                    }
+                }
+                if node.felix.watch_answers(&watch, names::WORKLOADS, PROBE_WATCHES_EVERY).await {
+                    continue;
+                }
+                tracing::warn!(cache = names::WORKLOADS, "the watched broker does not answer, watching again");
+                None
+            }
         };
         let reopen_after = match item {
             Some(CacheWatchItem::Change(change)) => {
@@ -221,9 +245,10 @@ async fn shut_down(
 async fn reopen(node: &Node, cache: &str, delay: Duration) -> ClusterCacheWatch {
     tokio::time::sleep(delay).await;
     loop {
-        match node.felix.watch_retained(cache).await {
-            Ok(watch) => return watch,
-            Err(error) => tracing::warn!(cache, %error, "could not watch, retrying"),
+        match tokio::time::timeout(OPEN_WATCH_WITHIN, node.felix.watch_retained(cache)).await {
+            Ok(Ok(watch)) => return watch,
+            Ok(Err(error)) => tracing::warn!(cache, %error, "could not watch, retrying"),
+            Err(_) => tracing::warn!(cache, "opening a watch timed out, retrying"),
         }
         tokio::time::sleep(RETRY_DELAY).await;
     }
@@ -538,20 +563,24 @@ async fn run_held(
     stop: &mut watch::Receiver<bool>,
 ) -> Ended {
     let (deadline, fence) = held.fence();
+    let (confirmer, mut asks) = Confirmer::new();
     let (end_renewals, ended) = oneshot::channel::<()>();
     let mut renewals = AbortOnDrop(tokio::spawn({
         let (node, mut held) = (node.clone(), held.clone());
         async move {
             let lost = tokio::select! {
-                lost = lease::hold(&node.felix, &mut held, &deadline) => Some(lost),
+                lost = lease::hold(&node.felix, &mut held, &deadline, &mut asks) => Some(lost),
                 _ = ended => None,
             };
             (held, lost)
         }
     }));
-    let (me, epoch) = (held.node.clone(), held.epoch);
+    let epoch = held.epoch;
     let work = async {
         let outcome = loop {
+            if faults::fail_workload() {
+                break Outcome::Failed("injected failure".to_owned());
+            }
             match run_workload(&node.felix, &node.modules, id, spec, &fence).await {
                 Ok(outcome) => break outcome,
                 Err(error) => {
@@ -564,27 +593,22 @@ async fn run_held(
             Outcome::Failed(message) => message,
             Outcome::Lost => return Ended::Lost,
             Outcome::Superseded(found) => {
-                // A later owner means this lease is gone, and a refused
-                // renewal will say so. Still holding it means epochs went
-                // backwards, which nothing here can repair.
-                match lease::still_held(&node.felix, &me, epoch, id).await {
-                    Ok(true) => format!(
-                        "epoch {found} on the output stream is above this holder's {epoch} \
-                         while it still holds the lease, so lease epochs went backwards"
-                    ),
-                    Ok(false) => {
-                        tracing::warn!(workload = %id, "a later owner has taken over");
-                        return Ended::Lost;
-                    }
-                    Err(error) => {
-                        tracing::warn!(workload = %id, %error, "a later owner wrote; could not read the lease");
-                        return Ended::Lost;
-                    }
+                // A later owner means this lease is gone. If a renewal at the
+                // held version is still applied, epochs went backwards, which
+                // nothing here can repair. A read of the lease would not do:
+                // it can be stale.
+                if !confirmer.confirm().await {
+                    tracing::warn!(workload = %id, "a later owner has taken over");
+                    return Ended::Lost;
                 }
+                format!(
+                    "epoch {found} on the output stream is above this holder's {epoch} \
+                     while it still holds the lease, so lease epochs went backwards"
+                )
             }
         };
         tracing::error!(workload = %id, %reason, "workload failed");
-        if mark_failed(&node.felix, id, &reason, &fence).await {
+        if mark_failed(&node.felix, id, &reason, &fence, &confirmer).await {
             Ended::Failed
         } else {
             // Not recorded: claim again, fail again and retry.
@@ -620,22 +644,33 @@ impl<T> Drop for AbortOnDrop<T> {
 
 /// Records why the workload failed in its spec, with `cache_put_if` on the
 /// version read so a concurrent edit is not overwritten. Only a holder does
-/// this, so a stale node cannot fail a workload another node is running.
-/// Returns whether it was recorded before the fence lapsed.
-async fn mark_failed(felix: &Felix, id: &str, message: &str, fence: &Fence) -> bool {
+/// this: right before each write it renews its lease through `confirmer`, and
+/// writes nothing if that renewal is refused, so a node that was frozen while
+/// another took over cannot fail the workload it now runs. Returns whether
+/// the failure was recorded.
+async fn mark_failed(
+    felix: &Felix,
+    id: &str,
+    message: &str,
+    fence: &Fence,
+    confirmer: &Confirmer,
+) -> bool {
     let failure = message.lines().next().unwrap_or_default().to_owned();
     while fence.holds() {
         let attempt = async {
             let Some(found) = felix.cache_get_versioned(names::WORKLOADS, id).await? else {
-                return Ok(true);
+                return Ok(Some(true));
             };
             let mut spec = WorkloadSpec::decode(&found.value)?;
             if spec.state != WorkloadState::Running {
-                return Ok(true);
+                return Ok(Some(true));
             }
             spec.state = WorkloadState::Failed;
             spec.failure = Some(failure.clone());
             faults::before_failure_record().await;
+            if !confirmer.confirm().await || !fence.holds() {
+                return Ok(None);
+            }
             let put = felix
                 .cache_put_if(
                     names::WORKLOADS,
@@ -645,11 +680,15 @@ async fn mark_failed(felix: &Felix, id: &str, message: &str, fence: &Fence) -> b
                     CacheCondition::Version(found.version),
                 )
                 .await?;
-            anyhow::Ok(put.applied)
+            anyhow::Ok(Some(put.applied))
         };
         match attempt.await {
-            Ok(true) => return true,
-            Ok(false) => {}
+            Ok(Some(true)) => return true,
+            Ok(Some(false)) => {}
+            Ok(None) => {
+                tracing::warn!(workload = %id, "the lease is lost, not recording the failure");
+                return false;
+            }
             Err(error) => {
                 tracing::warn!(workload = %id, %error, "could not record the failure, retrying");
                 tokio::time::sleep(RETRY_DELAY).await;

@@ -10,6 +10,11 @@
 //! A claim that wins then takes the next epoch from the `epochs` cache with
 //! `cache_put_if`, and writes it into the lease before it runs anything.
 //!
+//! A holder about to act on what it read, such as failing a workload, first
+//! renews at once through [`Confirmer`]. The cache offers only absent and
+//! version conditions, so an applied renewal at the held version is the only
+//! evidence that the lease is still this holder's; a read could be stale.
+//!
 //! The lease decides who should run a workload. What keeps the output correct
 //! when a holder is frozen or its clock is wrong is the epoch on every output
 //! record; see `felixd_core::output::reconcile`.
@@ -21,7 +26,7 @@ use bytes::Bytes;
 use felix_client::{CacheCondition, CacheConditionResult, VersionedValue};
 use felixd_core::lease::{self as rules, Lease, LeaseTiming};
 use felixd_core::names;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Duration, Instant};
 
 use crate::felix::Felix;
@@ -242,19 +247,49 @@ async fn take_epoch<S: LeaseStore>(
     })
 }
 
+/// Asks the renewal task for a renewal now. See [`Confirmer::confirm`].
+pub(crate) type Asks = mpsc::Receiver<oneshot::Sender<()>>;
+
+/// Lets a holder check that its lease is still its own before it acts.
+#[derive(Clone)]
+pub(crate) struct Confirmer(mpsc::Sender<oneshot::Sender<()>>);
+
+impl Confirmer {
+    pub(crate) fn new() -> (Confirmer, Asks) {
+        let (tx, rx) = mpsc::channel(4);
+        (Confirmer(tx), rx)
+    }
+
+    /// Renews the lease at once, conditional on the held version. `true` only
+    /// if that renewal was applied. Anything else, including a renewal task
+    /// that has stopped, means the lease may be another node's.
+    pub(crate) async fn confirm(&self) -> bool {
+        let (tx, rx) = oneshot::channel();
+        self.0.send(tx).await.is_ok() && rx.await.is_ok()
+    }
+}
+
 /// Renews `held` until it is lost, moving `deadline` forward after each
-/// renewal. Runs until it returns or is dropped.
+/// renewal. A request on `asks` renews at once and is answered only if that
+/// renewal is applied. Runs until it returns or is dropped.
 pub(crate) async fn hold<S: LeaseStore>(
     store: &S,
     held: &mut Held,
     deadline: &watch::Sender<Instant>,
+    asks: &mut Asks,
 ) -> Lost {
     loop {
-        tokio::time::sleep_until(held.sent_at + held.timing.renew_after()).await;
+        let asked = tokio::select! {
+            () = tokio::time::sleep_until(held.sent_at + held.timing.renew_after()) => None,
+            Some(reply) = asks.recv() => Some(reply),
+        };
         loop {
             match renew(store, held).await {
                 Ok(true) => {
                     let _ = deadline.send(held.deadline());
+                    if let Some(reply) = asked {
+                        let _ = reply.send(());
+                    }
                     break;
                 }
                 Ok(false) => return Lost::Refused,
@@ -317,19 +352,6 @@ async fn renew<S: LeaseStore>(store: &S, held: &mut Held) -> Result<bool> {
         }
         _ => Ok(false),
     }
-}
-
-/// Whether the lease is still this holder's, by reading it.
-pub(crate) async fn still_held<S: LeaseStore>(
-    store: &S,
-    held_by: &str,
-    epoch: u64,
-    workload: &str,
-) -> Result<bool> {
-    Ok(match store.get_versioned(workload).await? {
-        Some(found) => Lease::decode(&found.value).as_ref() == Ok(&Lease::held(held_by, epoch)),
-        None => false,
-    })
 }
 
 /// Gives the lease up so another node can claim it at once. Best effort: if it

@@ -17,6 +17,10 @@
 //!   the test sends `SIGCONT`, as a node out of a long GC pause would.
 //! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
 //!   workload's spec and writing the failure into it, as a slow broker would.
+//! - `freeze-before-failure-record=1`: stop the process with `SIGSTOP` at the
+//!   same point. It carries on at `SIGCONT`.
+//! - `fail-workload=1`: fail every workload this node claims, as a trap would,
+//!   but only on this node.
 //! - `drop-watch=MS`: when the key `drop-watch` is written to the workloads
 //!   cache, end the workloads watch and wait MS milliseconds before opening a
 //!   new one.
@@ -125,6 +129,13 @@ pub(crate) async fn before_failure_record() {
     if let Some(ms) = fault("delay-failure-record") {
         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
+    if fault("freeze-before-failure-record") == Some(1) {
+        freeze();
+    }
+}
+
+pub(crate) fn fail_workload() -> bool {
+    fault("fail-workload") == Some(1)
 }
 
 /// How long to stay without a watch, if the change to `key` should end it.

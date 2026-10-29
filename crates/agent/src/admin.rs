@@ -6,10 +6,22 @@ use serde_json::{Value, json};
 
 use crate::settings::Settings;
 
-/// How a stream is created.
+/// How a stream or cache is replicated.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamKind {
     pub replication_factor: u32,
+}
+
+impl StreamKind {
+    /// `Quorum` with more than one replica, so an acknowledged write survives
+    /// the loss of its leader. `Leader` otherwise.
+    fn consistency(self) -> &'static str {
+        if self.replication_factor > 1 {
+            "Quorum"
+        } else {
+            "Leader"
+        }
+    }
 }
 
 /// Creates the namespace, if it does not exist.
@@ -18,21 +30,15 @@ pub async fn ensure_namespace(settings: &Settings) -> Result<()> {
     post(settings, "namespaces", body).await
 }
 
-/// Creates a single-shard durable stream, if it does not exist. With more than
-/// one replica it is a `Quorum` stream, otherwise `Leader`.
+/// Creates a single-shard durable stream, if it does not exist.
 pub async fn ensure_stream(settings: &Settings, stream: &str, kind: StreamKind) -> Result<()> {
-    let consistency = if kind.replication_factor > 1 {
-        "Quorum"
-    } else {
-        "Leader"
-    };
     let body = json!({
         "stream": stream,
         "kind": "Stream",
         "shards": 1,
         "replication_factor": kind.replication_factor,
         "retention": {"max_age_seconds": null, "max_size_bytes": null},
-        "consistency": consistency,
+        "consistency": kind.consistency(),
         "delivery": "AtLeastOnce",
         "durable": true,
     });
@@ -44,9 +50,15 @@ pub async fn ensure_stream(settings: &Settings, stream: &str, kind: StreamKind) 
     .await
 }
 
-/// Creates a cache, if it does not exist.
-pub async fn ensure_cache(settings: &Settings, cache: &str) -> Result<()> {
-    let body = json!({"cache": cache, "display_name": cache});
+/// Creates a cache, if it does not exist. An existing cache keeps the
+/// replication it was created with.
+pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) -> Result<()> {
+    let body = json!({
+        "cache": cache,
+        "display_name": cache,
+        "replication_factor": kind.replication_factor,
+        "consistency": kind.consistency(),
+    });
     post(
         settings,
         &format!("{}/caches", namespace_path(settings)),
