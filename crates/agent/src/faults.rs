@@ -11,6 +11,14 @@
 //!   Nth output append when it holds more than one, and answer it with an
 //!   error, as when a `Quorum` leader keeps part of a batch through a
 //!   failover. With `crash-after-append-sent=N` the process aborts instead.
+//! - `freeze-after-append-sent=N`: stop the process with `SIGSTOP` once the
+//!   Nth output append has been answered, before the answer is acted on. It
+//!   carries on at `SIGCONT`.
+//! - `drop-append=N`, `drop-claim=N`, `drop-failure=N`: the Nth output
+//!   append, claim or failure record never reaches Felix, and the caller
+//!   gets an error.
+//! - `lose-append-answer=N`, `lose-claim-answer=N`, `lose-failure-answer=N`:
+//!   the Nth one lands, and the caller gets an error instead of the answer.
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
 //! - `freeze-before-snapshot-write=N`: stop the process with `SIGSTOP` once
@@ -52,6 +60,25 @@ static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static APPENDS: AtomicU64 = AtomicU64::new(0);
 static SKIPPED: AtomicU64 = AtomicU64::new(0);
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
+static FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// A conditional write the answer faults count.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Write {
+    Append,
+    Claim,
+    Failure,
+}
+
+/// What the answer faults do to the current write of a kind.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Sent,
+    /// The request never reaches Felix.
+    Dropped,
+    /// The request lands and its answer is lost.
+    Lost,
+}
 
 #[cfg(not(feature = "faults"))]
 fn fault(_name: &str) -> Option<u64> {
@@ -112,8 +139,32 @@ pub(crate) fn skip_snapshot() -> bool {
 }
 
 pub(crate) fn after_append_sent() {
-    if fault("crash-after-append-sent") == Some(APPENDS.load(Ordering::Relaxed)) {
+    let n = APPENDS.load(Ordering::Relaxed);
+    if fault("crash-after-append-sent") == Some(n) {
         crash("crash-after-append-sent");
+    }
+    if fault("freeze-after-append-sent") == Some(n) {
+        freeze();
+    }
+}
+
+/// What happens to the current `write`, counted by the `before_*` hook
+/// called just before it.
+pub(crate) fn answer(write: Write) -> Answer {
+    let (n, dropped, lost) = match write {
+        Write::Append => (&APPENDS, "drop-append", "lose-append-answer"),
+        Write::Claim => (&CLAIMS, "drop-claim", "lose-claim-answer"),
+        Write::Failure => (&FAILURES, "drop-failure", "lose-failure-answer"),
+    };
+    let n = n.load(Ordering::Relaxed);
+    if fault(dropped) == Some(n) {
+        tracing::warn!(?write, "injected dropped request");
+        Answer::Dropped
+    } else if fault(lost) == Some(n) {
+        tracing::warn!(?write, "injected lost answer");
+        Answer::Lost
+    } else {
+        Answer::Sent
     }
 }
 
@@ -162,6 +213,7 @@ pub(crate) async fn before_failure_record() {
 }
 
 pub(crate) fn before_failure_append() {
+    FAILURES.fetch_add(1, Ordering::Relaxed);
     if fault("freeze-before-failure-append") == Some(1) {
         freeze();
     }

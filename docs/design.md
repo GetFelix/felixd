@@ -501,9 +501,25 @@ a merge order (#58) or an effect (#27), may rely only on the first.
 Each input offset's outputs appear once, in order. Without the epoch, a stale owner that finds the new owner's
 identical records would skip them and write after them, and the two would take
 turns on the stream. A new owner that finds a later epoch already on the
-output stream when it resumes stops too. A lost answer to
-`publish_if` is resolved by reading the stream at the expected offset, as the
-Felix docs say to do.
+output stream when it resumes stops too.
+
+A refused or lost answer to `publish_if` is never retried blindly. The
+writer reads the stream from the offset it expected, as the Felix docs say to
+do, and decides on what is there:
+
+- Its own records: the write landed. An output batch skips them and writes
+  the rest, a claim counts as made, a failure record as written.
+- A record from a later epoch: someone else owns the workload. The writer
+  stops without writing anything more.
+- Nothing: the write did not land, or has not yet. It is sent again at the
+  same offset, so if the first one lands after all, one of the two is
+  refused and the next read finds it.
+
+`tests/answers.rs` covers each with faults that drop the request before it
+lands (`drop-append`, `drop-claim`, `drop-failure`) or lose the answer after
+it lands (`lose-append-answer` and the like), and with an owner frozen after
+a lost answer while another takes over. That owner has a long TTL, so its
+own lease check does not stop it: the later owner's records do.
 
 A batch is not all or nothing. Felix ships a `Quorum` stream's records to
 followers by bytes, so a batch of several records can reach a follower in
