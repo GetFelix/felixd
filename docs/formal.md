@@ -30,7 +30,7 @@ written, or the workload failed).
 ## Configurations
 
 No single configuration turns every mechanism on at full size: with two inputs, three claims, a
-crash and a generation-start record together, TLC does not finish in an hour. The passing
+crash and a generation-start record together, the state space is too large to check in CI. The passing
 configurations split those across smaller models, each checked exhaustively with node symmetry.
 Each twin turns one mechanism off, or drops one assumption, and must find the named violation.
 Every configuration has two nodes.
