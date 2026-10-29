@@ -2,12 +2,19 @@ name: Release
 
 # A v* tag builds felixd for three targets, checks each build is reproducible,
 # signs the checksums and publishes a release. Run by hand (workflow_dispatch)
-# it does everything except publish, and keeps the files as workflow artifacts.
+# it (or a pull request touching this file) does everything except publish, and keeps the files as workflow artifacts.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+  # Changes to the release machinery rehearse themselves.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release-build.sh
+      - Cargo.lock
+      - rust-toolchain.toml
 
 permissions:
   contents: read
