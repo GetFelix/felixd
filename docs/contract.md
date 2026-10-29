@@ -192,8 +192,16 @@ exactly like the one snapshotted. A chunk may be empty. A chunk larger than
 
 The snapshot calls and the restore calls together run under
 `limits.snapshot_fuel`, separate from `fuel_per_call` (design.md, State
-size). The default is ten times the step default. Running out is poison,
-like a step. `inspect` runs under `fuel_per_call`.
+size). The default is ten times the step default. `inspect` runs under
+`fuel_per_call`.
+
+Running out of snapshot fuel is not poison. A snapshot that runs out is
+abandoned: nothing is written, the previous snapshot stays current, the host
+counts and logs it, and the workload keeps running and replays from the older
+snapshot if it restarts. A restore that runs out puts the workload in
+needs-operator, not failed, so the limit can be raised and the workload
+resumed. Fuel metering is deterministic, so every replica skips the same
+snapshots.
 
 Chunks are the unit a snapshot writes. A guest that keeps stable chunk
 boundaries (by key range, say) lets the host write only the chunks that
@@ -237,9 +245,12 @@ earlier snapshot. Restore reads the manifest, reads each chunk at its offset
 and checks its hash; a mismatch is a resume error. A version 2 snapshot
 restores as one chunk.
 
-The snapshot stream is what changes: a chunk is held by offset on `.snap`
-until the content-addressed store (#77) exists, at which point manifests name
-hashes only. Retention (#63) must keep every chunk a kept manifest names.
+A chunk is held by offset on `.snap` until the content-addressed store (#77)
+exists. The manifest already records each chunk's sha256, so moving to that
+store is a storage swap, not a format change. A skipped snapshot writes no
+chunks, since chunks go out only once the whole snapshot has run, so a
+restore never sees a partial one. Retention (#63) must keep every chunk the
+live manifest references.
 
 ## Inputs from another workload
 
@@ -288,20 +299,23 @@ build has no effect executors.
 - Typed spec and failure records (#73). The error classes here are the ones
   #73 will record.
 
-## Decisions this note makes
+## Decisions
 
 design.md fixes the outline. These are the choices this note adds:
 
-1. One fenced output stream holds every named output, with the name and key in
-   the header, instead of a stream per name. A stream per name would need a
-   claim on each and a fold across several tails, and `publish_if` orders one
-   shard only.
+1. One fenced output stream, `wl.<id>.out`, holds every named output, with the
+   name and key in the header, instead of a stream per name. A stream per name
+   would need a claim on each and a fold across several tails, and
+   `publish_if` orders one shard only.
 2. Rejections are records on the output stream at `(offset, 0)`, so they are
    exactly once and replay checks them.
 3. Snapshot chunks are records on `.snap`, referenced by offset from a
-   manifest, until #77.
-4. `snapshot_fuel` covers a whole snapshot or restore, with a default of ten
-   times the step default.
+   manifest that also records each chunk's sha256, until #77.
+4. `snapshot_fuel` is one budget per snapshot or restore, default ten times
+   the step default. A snapshot that runs out is skipped; a restore that runs
+   out is needs-operator.
 5. 0.1 components are refused, not shimmed, and the refusal does not fail the
    workload.
-6. The default output name is `out`, and a downstream workload reads one name.
+6. The default output name is `out`, and a downstream workload reads one
+   named output. Reading several outputs at once waits for the determinism
+   work in #62.
