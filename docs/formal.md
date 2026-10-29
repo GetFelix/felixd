@@ -37,33 +37,33 @@ configurations split those across smaller models, each checked exhaustively with
 Each twin turns one mechanism off, or drops one assumption, and must find the named violation.
 Every configuration has two nodes.
 
-Distinct states and times are from TLC 1.7.4 with `-workers 4` on an Apple M-series laptop. The
-whole script takes about six minutes there. A twin's count varies a little between runs,
+Distinct states and times are from TLC 1.7.4 with `-workers 4` on the CI runner (`ubuntu-latest`),
+where the whole script takes about 21 minutes. A twin's count varies a little between runs,
 since TLC stops at the first violation a worker finds.
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `Felixd` | pass | two inputs, two claims, a crash, a clock fault, a snapshot | 3,636,093 | 50 s |
-| `FelixdGen` | pass | one input, two claims, a generation-start record, a clock fault, a snapshot | 4,628,610 | 57 s |
-| `FelixdThree` | pass | one input, three claims, a clock fault, a snapshot | 7,194,107 | 91 s |
-| `FelixdIdle` | pass | an input with no output, then one with two | 1,153,049 | 15 s |
-| `FelixdRecreate` | pass | `epochs` recreated once, while every live epoch is on a record | 1,084,222 | 14 s |
-| `FelixdFailWindow` | pass | one input, two claims, a clock fault anywhere in the failure path | 142,402 | 3 s |
-| `FelixdLive` | pass | no timing faults, local faults; liveness | 153,378 | 5 s |
-| `FelixdPartial` | pass | an input with no output, then a batch of two that may land in part, a crash, a clock fault | 5,391,648 | 75 s |
-| `FelixdNoMarker` | `NoInterleave` | the claim record off | about 5,000 | under 1 s |
-| `FelixdNoFloor` | `EpochMonotone` | the epoch floor off | about 64,000 | under 1 s |
+| `Felixd` | pass | two inputs, two claims, a crash, a clock fault, a snapshot | 6,446,504 | 2 min 48 s |
+| `FelixdGen` | pass | one input, two claims, a generation-start record, a clock fault, a snapshot | 9,807,531 | 3 min 46 s |
+| `FelixdThree` | pass | one input, three claims, a clock fault, a snapshot | 20,207,128 | 7 min 47 s |
+| `FelixdIdle` | pass | an input with no output, then one with two | 2,161,306 | 52 s |
+| `FelixdRecreate` | pass | `epochs` recreated once, while every live epoch is on a record | 2,356,734 | 56 s |
+| `FelixdFailWindow` | pass | one input, two claims, a clock fault anywhere in the failure path | 395,543 | 10 s |
+| `FelixdLive` | pass | no timing faults, local faults; liveness | 318,874 | 47 s |
+| `FelixdPartial` | pass | an input with no output, then a batch of two that may land in part, a crash, a clock fault | 9,489,712 | 4 min 5 s |
+| `FelixdNoMarker` | `NoInterleave` | the claim record off | about 9,000 | 1 s |
+| `FelixdNoFloor` | `EpochMonotone` | the epoch floor off | about 43,000 | 2 s |
 | `FelixdNoConfirm` | `NoStaleFailure` | the `Confirmer` and the failure record off | about 2,000 | under 1 s |
 | `FelixdNoFailRecord` | `NoStaleFailure` | the failure record off, with a clock fault allowed between an applied confirm and the spec write | about 3,000 | under 1 s |
-| `FelixdNoReplayGuard` | `OutputsExact` | the `replaying` guard on snapshots off | about 59,000 | under 1 s |
-| `FelixdNoReplayGuardSplit` | `SnapshotsSplit` | the same | about 24,000 | under 1 s |
+| `FelixdNoReplayGuard` | `OutputsExact` | the `replaying` guard on snapshots off | about 60,000 | 2 s |
+| `FelixdNoReplayGuardSplit` | `SnapshotsSplit` | the same | about 26,000 | 2 s |
 | `FelixdRecreateAnytime` | `UniqueEpoch` | `epochs` recreated while an epoch is on no record | about 1,500 | under 1 s |
 | `FelixdTailFold` | `NoPoison` | the fold on event offsets off (#67) | 20 | under 1 s |
-| `FelixdNoLaterEpochWins` | `EpochMonotone` | reconcile's later-epoch rule off | about 20,000 | under 1 s |
-| `FelixdPartialNoIndex` | `NoPoison` | the fold skipping whole inputs, not outputs by index | about 300,000 | 4 s |
+| `FelixdNoLaterEpochWins` | `EpochMonotone` | reconcile's later-epoch rule off | about 21,000 | 2 s |
+| `FelixdPartialNoIndex` | `NoPoison` | the fold skipping whole inputs, not outputs by index | about 700,000 | 14 s |
 
 `FelixdFull` has everything at once, with a second input whose batch of two may land in part. The `TLA nightly` workflow walks three million random
-behaviours of it with `TLC_SIMULATE`, which takes about five minutes on the laptop above. A
+behaviours of it with `TLC_SIMULATE`, which takes about five minutes on an Apple M-series laptop. A
 simulation can miss a violation that exhaustive checking would find, so it backs the passing
 configurations rather than replacing them.
 
