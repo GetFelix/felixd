@@ -33,11 +33,12 @@ fn counted(i: u64, epoch: u64) -> Vec<u8> {
     output::encode(header, epoch, &count(i + 1))
 }
 
+/// The epochs of the output records, without claims.
 async fn epochs(t: &common::TestFelix) -> Vec<u64> {
-    t.read_all(OUTPUT)
+    t.outputs(OUTPUT)
         .await
         .iter()
-        .map(|(_, r)| output::decode(r).unwrap().0.epoch)
+        .map(|(_, r)| output::decode(r).unwrap().epoch())
         .collect()
 }
 
@@ -63,7 +64,7 @@ async fn another_node_takes_over_when_the_holder_dies() {
     let mut agents = [t.start_agent(), t.start_agent()];
     t.publish_all(INPUT, (0..40).map(count)).await;
     eventually("output", Duration::from_secs(60), || async {
-        (t.felix.tail(OUTPUT).await.unwrap() >= 40).then_some(())
+        (t.outputs(OUTPUT).await.len() >= 40).then_some(())
     })
     .await;
     let (lease, _) = t.lease(ID).await.expect("a live lease");
@@ -113,13 +114,13 @@ async fn a_holder_frozen_past_its_lease_writes_nothing_after_the_new_owner() {
     })
     .await;
     let (stale, _) = t.lease(ID).await.expect("the frozen node's lease");
-    assert_eq!(t.felix.tail(OUTPUT).await.unwrap(), 19);
+    assert_eq!(t.outputs(OUTPUT).await.len(), 19);
 
     let _next = t.start_agent();
     eventually(
         "the new owner's output",
         Duration::from_secs(60),
-        || async { (t.felix.tail(OUTPUT).await.unwrap() >= 40).then_some(()) },
+        || async { (t.outputs(OUTPUT).await.len() >= 40).then_some(()) },
     )
     .await;
     let (owner, _) = t.lease(ID).await.expect("the new lease");
@@ -159,11 +160,8 @@ async fn a_holder_stops_at_the_first_record_of_a_later_epoch() {
         .cache_delete_if(names::LEASES, ID, version)
         .await
         .unwrap();
-    // What a later owner would write for input 19.
-    t.felix
-        .publish_if(OUTPUT, vec![counted(19, 1 << 40)], 19)
-        .await
-        .unwrap();
+    // What a later owner would write for input 19, after the holder's claim.
+    t.publish_if(OUTPUT, vec![counted(19, 1 << 40)], 20).await;
 
     holder.resume();
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -192,19 +190,16 @@ async fn a_later_epoch_under_a_live_lease_fails_the_workload() {
         holder.stopped().then_some(())
     })
     .await;
-    t.felix
-        .publish_if(OUTPUT, vec![counted(19, 1 << 40)], 19)
-        .await
-        .unwrap();
+    t.publish_if(OUTPUT, vec![counted(19, 1 << 40)], 20).await;
     holder.resume();
     let failure = t.failure().await;
     assert!(failure.contains("epochs went backwards"), "{failure}");
-    assert_eq!(t.felix.tail(OUTPUT).await.unwrap(), 20);
+    assert_eq!(t.outputs(OUTPUT).await.len(), 20);
 }
 
 /// The output stream holds epoch 500 but the leases cache is new, as after
 /// it was recreated, so its versions start again. A claim must still take an
-/// epoch above 500, or its first append would find a "later" owner and the
+/// epoch above 500, or its claim record would find a "later" owner and the
 /// workload would stall.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claim_takes_an_epoch_above_the_output_streams() {
@@ -218,15 +213,16 @@ async fn a_claim_takes_an_epoch_above_the_output_streams() {
     assert_eq!(epochs(&t).await, [[500; 5], [501; 5]].concat());
 }
 
-/// The new owner is stopped just before its first append. A stale owner's
-/// write of the same input then lands first, at a lower epoch, and the new
-/// owner skips it.
+/// The new owner is stopped just before it appends its claim. A stale
+/// owner's write of the same input then lands first, at a lower epoch. The
+/// claim is refused, the owner finds only a lower epoch, claims after it and
+/// skips that output.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_write_that_lands_first_is_skipped() {
     let Some(t) = test_felix().await else { return };
     let module = t.submit("counter", &["--snapshot-every", "10"]).await;
     t.publish_all(INPUT, (0..10).map(count)).await;
-    let owner = t.start_node_with_ttl("owner", "freeze-before-append=1", Duration::from_secs(30));
+    let owner = t.start_node_with_ttl("owner", "freeze-before-claim=1", Duration::from_secs(30));
     eventually("the freeze", Duration::from_secs(60), || async {
         owner.stopped().then_some(())
     })
@@ -243,15 +239,14 @@ async fn a_stale_write_that_lands_first_is_skipped() {
     assert_eq!(epochs(&t).await, want);
 }
 
-/// As above, but the stale owner got further than the new owner's batch. The
-/// new owner resumes from the streams, checks what the stale one wrote and
-/// carries on after it.
+/// As above, but the stale owner wrote several outputs. The new owner
+/// resumes past them, checks what the stale one wrote and carries on after it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_writer_that_got_further_makes_the_new_owner_resume() {
     let Some(t) = test_felix().await else { return };
     let module = t.submit("counter", &["--snapshot-every", "10"]).await;
     t.publish_all(INPUT, (0..10).map(count)).await;
-    let owner = t.start_node_with_ttl("owner", "freeze-before-append=1", Duration::from_secs(30));
+    let owner = t.start_node_with_ttl("owner", "freeze-before-claim=1", Duration::from_secs(30));
     eventually("the freeze", Duration::from_secs(60), || async {
         owner.stopped().then_some(())
     })

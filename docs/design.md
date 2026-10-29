@@ -249,10 +249,13 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
+Claim records on another workload's `.out` are not inputs: the owner and
+`felixd check` pass over them, so only outputs reach `step`.
 
 Each output record carries a small header: the input offset that produced it,
 its index among that step's outputs, and the lease epoch of the owner that
-wrote it. Each snapshot carries the input offset it covers and the output tail
+wrote it. The output stream also holds claim records, one per takeover, which
+carry only the new owner's epoch. Each snapshot carries the input offset it covers and the output tail
 at that point.
 
 `felixd run` creates the workload's streams through the control plane's REST
@@ -362,23 +365,37 @@ without touching the lease code.
 
 ## Exactly-once output
 
-The owner appends a step's outputs as one batch with `publish_if`, at the
-offset it expects to be the output stream's tail. `publish_if` is a
-compare-and-set on the whole shard (`crates/sdk/felix-client/src/client/commit.rs:162-181`
-in Felix), and every `.out` stream has one shard and one writer at a time, so:
+Every write to the output stream is a `publish_if` at the offset the writer
+expects to be the tail. `publish_if` is a compare-and-set on the whole shard
+(`crates/sdk/felix-client/src/client/commit.rs:162-181` in Felix), and every
+`.out` stream has one shard.
 
-- If a stale owner wakes up and writes, the write is refused as soon as the
-  new owner has appended anything. The records it finds at its expected tail
-  carry a later epoch, so it stops without writing anything more.
-- If the stale owner writes first, the new owner's write is refused, and it
-  rereads the tail. Because the workload is deterministic, the stale owner
-  wrote exactly what the new owner would have, so the new owner skips past it.
-  If the stale owner got further than the new owner's batch, the new owner
-  resumes from the streams again.
+The claim fences the stream. Before a new owner reads anything to resume
+from, it appends a claim record carrying its epoch at the tail. It skips this
+when the last record is already from its own epoch, as when it resumes again
+after an error. A refused claim means someone else appended first, and the
+records past the tail decide: one from a later epoch means this owner is
+superseded and stops, its own claim means an earlier attempt whose answer was
+lost landed, and anything else is claimed after. Then:
 
-Either way each input offset's outputs appear once, in order, and the epochs
-on the stream never decrease: once a later owner has written, no earlier one
-writes again. Without the epoch, a stale owner that finds the new owner's
+- If a stale owner wakes up and writes, the write is refused, because the
+  claim moved the tail past what the stale owner expects. The records it finds
+  at its expected tail include the claim, from a later epoch, so it stops
+  without writing anything more. This holds when the new owner has written no
+  output, for example because its input is idle.
+- If the stale owner writes before the claim lands, the claim is refused and
+  lands after it. The new owner then resumes past those outputs like any
+  others, and because the workload is deterministic they are what it would
+  have written.
+
+The safety argument has two layers. The fence alone guarantees that nothing
+from a lower epoch lands after a claim, so the epochs on the stream never
+decrease and two owners never take turns. Determinism adds that what a stale
+owner wrote before the claim equals what the new owner would have written.
+Anything recorded that is not a deterministic function of the input, such as
+a merge order (#58) or an effect (#27), may rely only on the first.
+
+Each input offset's outputs appear once, in order. Without the epoch, a stale owner that finds the new owner's
 identical records would skip them and write after them, and the two would take
 turns on the stream. A new owner that finds a later epoch already on the
 output stream when it resumes stops too. A lost answer to
@@ -395,11 +412,12 @@ not wrongly.
 
 A new owner:
 
-1. Reads the latest record on `wl.<id>.snap` and calls `restore`. With no
+1. Appends its claim to `wl.<id>.out`, as described above.
+2. Reads the latest record on `wl.<id>.snap` and calls `restore`. With no
    snapshot it starts from the workload's initial state at input offset 0.
-2. Reads the last output record. It names the input offset `k` that
-   produced it.
-3. Subscribes to the input with `subscribe_from(snapshot offset + 1)`. For
+3. Reads the last output record, passing over claims. It names the input
+   offset `k` that produced it.
+4. Subscribes to the input with `subscribe_from(snapshot offset + 1)`. For
    inputs up to `k` it runs `step` and drops the outputs, which are already on
    the stream, after checking each against the record in its place. From
    `k + 1` on it writes them.
@@ -451,8 +469,11 @@ snapshot from a later epoch means this owner is superseded and stops; ones
 from its own epoch or earlier are a stale owner's that landed first, which
 determinism makes correct, so it writes after them. A new owner that finds a
 snapshot from an epoch above its own stops at once, as it does for an output
-record, rather than ignoring it: a later owner exists, and the output fence
-would stop this one at its first write anyway.
+record, rather than ignoring it: a later owner exists, and that owner's claim
+on the output stream would stop this one at its next output anyway. The
+snapshot stream has no claim of its own, so a stale owner can still append a
+snapshot after the new owner's claim until the new owner writes one. That
+snapshot is of a correct state, by determinism.
 
 ## Checking output
 
@@ -464,7 +485,8 @@ replayed output. It reports:
 - a gap: a replayed output missing from the stream while a later one is there;
 - a duplicate: a second record for the same input offset and index;
 - a record out of order: one for an output before one already on the stream;
-- an epoch regression: a record whose epoch is below an earlier record's;
+- an epoch regression: a record, output or claim, whose epoch is below an
+  earlier record's;
 - a record that differs from the replay, or that the replay did not produce,
   or that does not decode;
 - a snapshot whose output tail does not split the output stream at its input
@@ -472,7 +494,9 @@ replayed output. It reports:
   X, and every record from it on an output of a later input. A resume from
   such a snapshot would skip or repeat outputs.
 
-With `--complete` it also reports outputs missing from the end of the stream.
+Claims are not outputs, so they are matched to nothing; only their epochs
+are checked. With `--complete` it also reports outputs missing from the end of
+the stream.
 Without it those are not a finding, since a running workload may not have
 caught up. The snapshot stream is read first, then the output stream, then
 the input, so every output a snapshot counts is on the stream read and every
@@ -534,7 +558,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 |---|---|---|
 | 0 | One node, one workload | A counter workload runs against a local Felix; killing and restarting felixd resumes at the right offset with no repeated output |
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
-| 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing; a fault-injection test runs this in CI |
+| 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
 | 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |

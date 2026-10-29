@@ -1,14 +1,15 @@
 //! What `felixd check` finds wrong with an output stream, given the outputs
 //! a replay of the module over the input produced.
 //!
-//! The replay says what the stream should hold, in order. Every record on the
-//! stream is matched to a replayed output by its header, and anything that
-//! does not match up is a finding.
+//! The replay says what the stream should hold, in order. Every output record
+//! on the stream is matched to a replayed output by its header, and anything
+//! that does not match up is a finding. Claims hold no output, so only their
+//! epochs are checked.
 
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::output::{self, OutputHeader};
+use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::{self, SnapshotHeader};
 
 /// One output a replay produced.
@@ -36,7 +37,8 @@ pub enum Finding {
         header: OutputHeader,
         after: OutputHeader,
     },
-    /// A record whose writer's epoch is below the previous record's.
+    /// A record, output or claim, whose writer's epoch is below an earlier
+    /// record's.
     EpochRegression {
         offset: u64,
         epoch: u64,
@@ -79,7 +81,7 @@ pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) ->
     let mut furthest: Option<usize> = None;
     let mut last_epoch: Option<u64> = None;
     for &(offset, record) in records {
-        let (written, payload) = match output::decode(record) {
+        let decoded = match output::decode(record) {
             Ok(decoded) => decoded,
             Err(error) => {
                 findings.push(Finding::Undecodable {
@@ -89,17 +91,21 @@ pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) ->
                 continue;
             }
         };
-        let header = written.header;
+        let epoch = decoded.epoch();
         if let Some(previous) = last_epoch
-            && written.epoch < previous
+            && epoch < previous
         {
             findings.push(Finding::EpochRegression {
                 offset,
-                epoch: written.epoch,
+                epoch,
                 previous,
             });
         }
-        last_epoch = Some(last_epoch.map_or(written.epoch, |e| e.max(written.epoch)));
+        last_epoch = Some(last_epoch.map_or(epoch, |e| e.max(epoch)));
+        let Record::Output(written, payload) = decoded else {
+            continue;
+        };
+        let header = written.header;
         let Some(&at) = position.get(&header) else {
             findings.push(Finding::Unexpected { offset, header });
             continue;
@@ -152,7 +158,7 @@ pub fn check_snapshots(
     let outputs: Vec<(u64, u64)> = records
         .iter()
         .filter_map(|&(offset, record)| {
-            let (written, _) = output::decode(record).ok()?;
+            let (written, _) = output::decode(record).ok()?.output()?;
             Some((offset, written.header.input_offset))
         })
         .collect();

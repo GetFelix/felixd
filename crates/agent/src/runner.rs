@@ -217,6 +217,10 @@ async fn run(
     spec: &WorkloadSpec,
     fence: &Fence,
 ) -> Result<Infallible> {
+    // The claim comes first, so that from here on a stale owner's append is
+    // refused, whether or not this owner ever writes an output.
+    let log = OutputLog::claim(felix, &spec.output, fence).await?;
+    let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
         runtime
@@ -243,18 +247,7 @@ async fn run(
         }
         None => None,
     };
-    let output_tail = felix.tail(&spec.output).await?;
-    // Reads return events only, so this is the last output even when a new
-    // shard leader's generation-start record sits at the tail.
-    let last_output = match felix.last_record(&spec.output, output_tail).await? {
-        Some(record) => Some((
-            record.offset,
-            output::decode(&record.payload)
-                .map_err(|e| poison(format!("output at {}:{}: {e}", spec.output, record.offset)))?
-                .0,
-        )),
-        None => None,
-    };
+    let last_output = last_output(felix, &spec.output, output_tail).await?;
     if let Some((_, last)) = last_output.filter(|(_, last)| last.epoch > fence.epoch()) {
         tracing::info!(
             workload = id,
@@ -289,7 +282,8 @@ async fn run(
         fence,
         workload,
         resume,
-        log: OutputLog::new(felix, &spec.output, fence, output_tail),
+        log,
+        skip_claims: names::is_output_stream(&spec.input),
         written: Written {
             felix,
             stream: &spec.output,
@@ -340,12 +334,18 @@ struct Steps<'a> {
     workload: Option<Workload>,
     resume: Resume,
     log: OutputLog<'a>,
+    /// Whether the input is another workload's output stream, whose claims
+    /// are not inputs.
+    skip_claims: bool,
     written: Written<'a>,
     since_snapshot: u64,
 }
 
 impl Steps<'_> {
     async fn step(&mut self, offset: u64, input: Bytes) -> Result<()> {
+        if self.skip_claims && output::is_claim(&input) {
+            return Ok(());
+        }
         let outputs = blocking(&self.modules.calls, &mut self.workload, move |w| {
             w.step(&input)
         })
@@ -445,8 +445,32 @@ impl Steps<'_> {
     }
 }
 
+/// The last output record below `tail` and where it is, passing over claims.
+async fn last_output(
+    felix: &Felix,
+    stream: &str,
+    tail: u64,
+) -> Result<Option<(u64, output::Written)>> {
+    let mut end = tail;
+    let mut window = 16;
+    while end > 0 {
+        let from = end.saturating_sub(window);
+        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+            let found = output::decode(&record.payload)
+                .map_err(|e| poison(format!("output at {stream}:{}: {e}", record.offset)))?;
+            if let Some((written, _)) = found.output() {
+                return Ok(Some((record.offset, written)));
+            }
+        }
+        end = from;
+        window = window.saturating_mul(8);
+    }
+    Ok(None)
+}
+
 /// The output records a resuming owner skips, read a page at a time so each
-/// can be checked against what the owner produced in its place.
+/// can be checked against what the owner produced in its place. Claims are
+/// passed over.
 struct Written<'a> {
     felix: &'a Felix,
     stream: &'a str,
@@ -462,7 +486,11 @@ impl Written<'_> {
                 .felix
                 .read_page(self.stream, self.next, self.end)
                 .await?;
-            self.page.extend(records);
+            self.page.extend(
+                records
+                    .into_iter()
+                    .filter(|r| !output::is_claim(&r.payload)),
+            );
             self.next = after;
         }
         let found = self.page.pop_front();

@@ -16,8 +16,9 @@
 //! evidence that the lease is still this holder's; a read could be stale.
 //!
 //! The lease decides who should run a workload. What keeps the output correct
-//! when a holder is frozen or its clock is wrong is the epoch on every output
-//! record; see `felixd_core::output::reconcile`.
+//! when a holder is frozen or its clock is wrong is the claim a new owner
+//! appends to the output stream and the epoch on every record; see
+//! `felixd_core::output`.
 
 use std::future::Future;
 

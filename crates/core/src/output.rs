@@ -1,16 +1,26 @@
-//! The header on every record in a workload's output stream, and how an owner
-//! reconciles its outputs with records it finds already written.
+//! The records on a workload's output stream, and how an owner reconciles its
+//! outputs with records it finds already written.
 //!
-//! A record is `version (1) | input_offset (8) | index (4) | epoch (8) |
-//! payload`, integers big endian. The header says which input produced the
-//! output and which of that step's outputs it is, so a new owner can tell what
-//! its predecessor already wrote. `epoch` is the lease epoch of the owner that
-//! wrote it; see [`crate::lease`].
+//! Every record is `version (1) | kind (1) | epoch (8) | body`, integers big
+//! endian, where `epoch` is the lease epoch of the owner that wrote it; see
+//! [`crate::lease`]. An output's body is `input_offset (8) | index (4) |
+//! payload`: which input produced it and which of that step's outputs it is,
+//! so a new owner can tell what its predecessor already wrote. A claim has no
+//! body. A new owner appends one before it runs anything, so a stale owner's
+//! next conditional append is refused even if the new owner never writes an
+//! output.
+//!
+//! Version 2 records are outputs without a kind byte, with the epoch after the
+//! index, and still read.
 
-use crate::codec::{DecodeError, split_header};
+use crate::codec::DecodeError;
 
-const VERSION: u8 = 2;
-const HEADER_BYTES: usize = 20;
+const VERSION: u8 = 3;
+const OUTPUTS_ONLY: u8 = 2;
+const OUTPUT: u8 = 0;
+const CLAIM: u8 = 1;
+const COMMON_BYTES: usize = 1 + 8;
+const OUTPUT_BYTES: usize = 8 + 4;
 
 /// Where an output record came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -29,24 +39,105 @@ pub struct Written {
     pub epoch: u64,
 }
 
+/// A decoded record of an output stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Record<'a> {
+    /// One of the workload's outputs and its payload.
+    Output(Written, &'a [u8]),
+    /// An owner at `epoch` took the workload over here. It holds no output.
+    Claim { epoch: u64 },
+}
+
+impl<'a> Record<'a> {
+    /// The epoch of the owner that wrote the record.
+    pub fn epoch(&self) -> u64 {
+        match self {
+            Record::Output(written, _) => written.epoch,
+            Record::Claim { epoch } => *epoch,
+        }
+    }
+
+    /// The output, unless this is a claim.
+    pub fn output(self) -> Option<(Written, &'a [u8])> {
+        match self {
+            Record::Output(written, payload) => Some((written, payload)),
+            Record::Claim { .. } => None,
+        }
+    }
+}
+
 /// Builds an output record from its header, its writer's epoch and the
 /// workload's payload.
 pub fn encode(header: OutputHeader, epoch: u64, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + HEADER_BYTES + payload.len());
-    out.push(VERSION);
+    let mut out = Vec::with_capacity(1 + COMMON_BYTES + OUTPUT_BYTES + payload.len());
+    out.extend([VERSION, OUTPUT]);
+    out.extend(epoch.to_be_bytes());
     out.extend(header.input_offset.to_be_bytes());
     out.extend(header.index.to_be_bytes());
-    out.extend(epoch.to_be_bytes());
     out.extend(payload);
     out
 }
 
-/// Splits an output record into its header and payload.
-pub fn decode(record: &[u8]) -> Result<(Written, &[u8]), DecodeError> {
-    let (header, payload) = split_header::<HEADER_BYTES>(record, VERSION)?;
-    let (offset, rest) = header.split_at(8);
+/// Builds the record an owner at `epoch` appends when it takes a workload over.
+pub fn encode_claim(epoch: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + COMMON_BYTES);
+    out.extend([VERSION, CLAIM]);
+    out.extend(epoch.to_be_bytes());
+    out
+}
+
+/// Reads an output stream record.
+pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
+    match record.first() {
+        Some(&OUTPUTS_ONLY) => return decode_outputs_only(record),
+        Some(&VERSION) => {}
+        Some(&other) => return Err(DecodeError::UnknownVersion(other)),
+        None => {
+            return Err(DecodeError::Truncated {
+                need: 1 + COMMON_BYTES,
+                got: 0,
+            });
+        }
+    }
+    let Some((&[_, kind], rest)) = record.split_first_chunk::<2>() else {
+        return Err(truncated(1 + COMMON_BYTES, record));
+    };
+    let need = match kind {
+        OUTPUT => 1 + COMMON_BYTES + OUTPUT_BYTES,
+        CLAIM => 1 + COMMON_BYTES,
+        other => return Err(DecodeError::UnknownKind(other)),
+    };
+    let Some((epoch, body)) = rest.split_first_chunk::<8>() else {
+        return Err(truncated(need, record));
+    };
+    let epoch = u64::from_be_bytes(*epoch);
+    if kind == CLAIM {
+        return Ok(Record::Claim { epoch });
+    }
+    let Some((fields, payload)) = body.split_first_chunk::<OUTPUT_BYTES>() else {
+        return Err(truncated(need, record));
+    };
+    let (offset, index) = fields.split_at(8);
+    Ok(Record::Output(
+        Written {
+            header: OutputHeader {
+                input_offset: u64::from_be_bytes(offset.try_into().unwrap()),
+                index: u32::from_be_bytes(index.try_into().unwrap()),
+            },
+            epoch,
+        },
+        payload,
+    ))
+}
+
+fn decode_outputs_only(record: &[u8]) -> Result<Record<'_>, DecodeError> {
+    let need = 1 + OUTPUT_BYTES + 8;
+    let Some((fields, payload)) = record[1..].split_first_chunk::<20>() else {
+        return Err(truncated(need, record));
+    };
+    let (offset, rest) = fields.split_at(8);
     let (index, epoch) = rest.split_at(4);
-    Ok((
+    Ok(Record::Output(
         Written {
             header: OutputHeader {
                 input_offset: u64::from_be_bytes(offset.try_into().unwrap()),
@@ -58,11 +149,25 @@ pub fn decode(record: &[u8]) -> Result<(Written, &[u8]), DecodeError> {
     ))
 }
 
+fn truncated(need: usize, record: &[u8]) -> DecodeError {
+    DecodeError::Truncated {
+        need,
+        got: record.len(),
+    }
+}
+
+/// Whether `record` is a claim. A workload reading another's output stream
+/// skips claims, so only outputs reach its `step`.
+pub fn is_claim(record: &[u8]) -> bool {
+    matches!(decode(record), Ok(Record::Claim { .. }))
+}
+
 /// Whether two records hold the same output, whichever owner wrote them.
-/// A record that does not decode is the same as nothing.
+/// A record that does not decode, or is a claim, is the same as nothing.
 pub fn same_output(a: &[u8], b: &[u8]) -> bool {
-    match (decode(a), decode(b)) {
-        (Ok((a, pa)), Ok((b, pb))) => a.header == b.header && pa == pb,
+    let output = |r| decode(r).ok().and_then(Record::output);
+    match (output(a), output(b)) {
+        (Some((a, pa)), Some((b, pb))) => a.header == b.header && pa == pb,
         _ => false,
     }
 }
@@ -86,32 +191,44 @@ pub enum Reconciled {
 
 /// Decides what to do about records found at the expected tail.
 ///
-/// A record from a later epoch wins over everything else. Without that rule
-/// a stale owner that finds the new owner's identical records would skip them
-/// and write after them, and two owners would take turns on the stream.
+/// A record from a later epoch, a claim included, wins over everything else.
+/// Without that rule a stale owner that finds the new owner's identical
+/// records would skip them and write after them, and two owners would take
+/// turns on the stream. Claims from earlier epochs hold no output and are
+/// passed over.
 pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconciled {
     let mut found = Vec::with_capacity(existing.len());
-    for record in existing {
-        let Ok((written, _)) = decode(record) else {
+    for &record in existing {
+        let Ok(decoded) = decode(record) else {
             return Reconciled::Diverged;
         };
-        found.push(written);
+        found.push((decoded, record));
     }
-    if let Some(later) = found.iter().map(|w| w.epoch).filter(|&e| e > epoch).max() {
+    if let Some(later) = found
+        .iter()
+        .map(|(r, _)| r.epoch())
+        .filter(|&e| e > epoch)
+        .max()
+    {
         return Reconciled::Superseded { epoch: later };
     }
-    let compared = existing.len().min(batch.len());
-    if !existing[..compared]
+    let outputs: Vec<&[u8]> = found
+        .iter()
+        .filter(|(r, _)| matches!(r, Record::Output(..)))
+        .map(|&(_, record)| record)
+        .collect();
+    let compared = outputs.len().min(batch.len());
+    if !outputs[..compared]
         .iter()
         .zip(batch)
         .all(|(found, ours)| same_output(found, ours))
     {
         return Reconciled::Diverged;
     }
-    if existing.len() > batch.len() {
+    if outputs.len() > batch.len() {
         Reconciled::Behind
     } else {
-        Reconciled::Skip(existing.len())
+        Reconciled::Skip(outputs.len())
     }
 }
 

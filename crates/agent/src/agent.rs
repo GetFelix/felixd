@@ -527,7 +527,7 @@ fn now_millis() -> u64 {
 }
 
 /// The larger epoch of the last records on the output and snapshot streams,
-/// or 0 if they have none. A record that does not decode counts as 0: the
+/// claims included, or 0 if they have none. A record that does not decode counts as 0: the
 /// runner fails the workload for it, which only a holder may do.
 async fn written_epoch(felix: &Felix, id: &str, output: &str) -> Result<u64> {
     let last = async |stream: &str| -> Result<Option<Bytes>> {
@@ -536,7 +536,7 @@ async fn written_epoch(felix: &Felix, id: &str, output: &str) -> Result<u64> {
     };
     let output = last(output)
         .await?
-        .map_or(0, |r| output::decode(&r).map_or(0, |(w, _)| w.epoch));
+        .map_or(0, |r| output::decode(&r).map_or(0, |r| r.epoch()));
     let snapshot = last(&names::snapshot_stream(id))
         .await?
         .map_or(0, |r| snapshot::decode(&r).map_or(0, |(t, _)| t.epoch));
