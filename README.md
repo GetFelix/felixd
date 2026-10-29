@@ -7,7 +7,8 @@ A node agent that runs programs across a cluster with
 
 > **Status:** milestone 1 in progress. Agents hold a lease per workload,
 > spread workloads across nodes, and take a dead node's workloads over within
-> one lease TTL. The output checker and the three-node failover test are next. The plan is in
+> one lease TTL. `felixd check` verifies the output streams. The three-node
+> failover test in CI is next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -52,6 +53,12 @@ first agent to see it does not take everything. Each agent also writes itself
 to the `nodes` cache, with the same TTL as its leases.
 The connection settings are the environment variables `felixctl` reads, plus
 `FELIX_NAMESPACE` (default `default`).
+`felixd check` replays each workload's module over its input and compares
+the result with its output stream. It reports gaps, duplicates, records out of
+order, epoch regressions and outputs that differ from the replay, and exits
+with 1 if it finds any. `--id` limits it to one workload; `--complete` also
+reports outputs missing from the end of a stream, for when the workloads
+should have caught up. It needs only read grants.
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in
 its spec, so every node runs it under the same ones. A workload that traps, runs
 out of fuel or finds its streams in a state it can't resume from is marked

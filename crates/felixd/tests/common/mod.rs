@@ -193,6 +193,21 @@ impl TestFelix {
             .unwrap();
     }
 
+    /// Runs `felixd check <args>`. Returns whether it passed, and what it
+    /// printed.
+    pub(crate) fn check(&self, args: &[&str]) -> (bool, String) {
+        let out = self
+            .felixd(&["check"])
+            .args(args)
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
     /// Waits for the workload to be marked failed and returns why.
     pub(crate) async fn failure(&self) -> String {
         eventually("the workload to fail", Duration::from_secs(30), || async {
@@ -351,4 +366,10 @@ pub(crate) async fn assert_uninterrupted_on(
         epochs.is_sorted(),
         "two owners took turns on {output}: {epochs:?}"
     );
+    let id = output
+        .strip_prefix("wl.")
+        .and_then(|o| o.strip_suffix(".out"))
+        .unwrap();
+    let (ok, report) = t.check(&["--id", id, "--complete"]);
+    assert!(ok, "felixd check found problems:\n{report}");
 }

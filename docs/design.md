@@ -170,6 +170,7 @@ One Rust workspace and one binary.
 ```
 felixd agent      run on every node
 felixd run        submit a workload
+felixd check      verify output streams against a replay of their inputs
 felixd ps         list workloads, owners and positions
 felixd drain      release a node's workloads
 felixd replay     rebuild a workload at an offset or time
@@ -389,6 +390,27 @@ Snapshots are written every N inputs (default 1000) or every T seconds of
 activity. A stale owner's snapshot is harmless: determinism makes it identical
 to the one the new owner would have written for that offset.
 
+## Checking output
+
+`felixd check` runs each workload's module over its whole input stream, from
+its initial state, and lines the outputs it produces up with the records on
+the output stream by their headers. Each record should match the next
+replayed output. It reports:
+
+- a gap: a replayed output missing from the stream while a later one is there;
+- a duplicate: a second record for the same input offset and index;
+- a record out of order: one for an output before one already on the stream;
+- an epoch regression: a record whose epoch is below an earlier record's;
+- a record that differs from the replay, or that the replay did not produce,
+  or that does not decode.
+
+With `--complete` it also reports outputs missing from the end of the stream.
+Without it those are not a finding, since a running workload may not have
+caught up. The output stream is read before the input, so every record it
+checks was produced from inputs the replay sees. A step that fails ends the
+replay there, as it ends the workload on every node. Every failover test ends
+with `felixd check --complete`.
+
 ## Replay
 
 `felixd replay <workload> --to <offset | time>`:
@@ -413,7 +435,7 @@ grants.
 |---|---|
 | Node | Read `workloads` and `modules`; write `leases` and `nodes`; read every input; publish to `wl.*.out` and `wl.*.snap` |
 | Operator (`felixd run`, `drain`) | Write `workloads` and `modules`; create streams through the control plane |
-| Viewer (`ps`, `replay`) | Read everything, write nothing |
+| Viewer (`ps`, `replay`, `check`) | Read everything, write nothing |
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
 but a compromised node could write garbage. Per-workload grants are a later
