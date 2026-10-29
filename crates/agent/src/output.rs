@@ -173,7 +173,7 @@ async fn append_last(
                 return Ok(recorded);
             }
         }
-        faults::before_failure_append().await;
+        faults::before_failure_append();
         match send(
             felix,
             stream,
@@ -272,7 +272,7 @@ impl<'a> OutputLog<'a> {
             if !fence.holds() {
                 return Err(LostLease.into());
             }
-            faults::before_claim().await;
+            faults::before_claim();
             let claim = vec![output::encode_claim_under(
                 fence.epoch(),
                 spec_record,
@@ -396,7 +396,7 @@ impl<'a> OutputLog<'a> {
             if !self.fence.holds() {
                 return Err(LostLease.into());
             }
-            faults::before_append().await;
+            faults::before_append();
             let sent = match faults::append_prefix(&batch) {
                 Some(prefix) => self
                     .felix
@@ -408,7 +408,7 @@ impl<'a> OutputLog<'a> {
                     send(self.felix, self.stream, batch.clone(), self.tail, write).await
                 }
             };
-            faults::after_append_sent().await;
+            faults::after_append_sent();
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == self.tail => {
                     self.tail += batch.len() as u64;

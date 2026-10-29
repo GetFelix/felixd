@@ -5,7 +5,7 @@ use super::*;
 /// A stop that reaches the process but not this thread yet, as when the
 /// kernel hands `kill -STOP` to another thread, must still hold this thread
 /// until the process is continued.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_freeze_holds_the_caller_until_the_process_is_continued() {
     let started = Instant::now();
     let pause = Duration::from_millis(300);
@@ -17,7 +17,7 @@ async fn a_freeze_holds_the_caller_until_the_process_is_continued() {
             .unwrap();
     });
     // The stop never lands on this thread.
-    until_continued(|| {}).await;
+    until_continued(|| {});
     assert!(started.elapsed() >= pause, "returned before SIGCONT");
     cont.join().unwrap();
 }

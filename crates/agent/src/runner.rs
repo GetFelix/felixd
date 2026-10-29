@@ -620,7 +620,7 @@ impl Steps<'_> {
             },
             epoch: self.fence.epoch(),
         };
-        faults::before_snapshot_write().await;
+        faults::before_snapshot_write();
         let manifest = self.write_snapshot(taken, &chunks).await?;
         self.previous = Some(manifest);
         faults::after_snapshot();
