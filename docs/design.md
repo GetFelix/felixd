@@ -536,6 +536,56 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 Anything Felix doesn't do yet that felixd needs gets an issue labelled
 `felix-gap`, with the Felix code it refers to.
 
+## Determinism
+
+A workload must produce the same outputs on any node, after any history of
+failovers. Four rules hold that:
+
+- **Snapshot points are a function of input offsets**, never of when a node
+  happened to start. After a snapshot point, execution always continues from a
+  fresh instance restored from that snapshot, so an instance's age can't change
+  where a memory or stack limit trips. `restore(snapshot())` must behave as the
+  identity, and `snapshot` must not change state.
+- **A determinism ABI** names everything that affects results: the felixd
+  runtime version, the wasmtime version and its settings, limits, and the
+  instruction set while stack depth still depends on it. It is recorded in the
+  spec, in each snapshot header and in `nodes`. A node never claims a workload
+  pinned to an ABI it doesn't implement. Until stack depth is deterministic,
+  mixed x86_64 and aarch64 clusters pin workloads by instruction set.
+- **Trap classes.** A trap that depends only on the inputs (a guest panic,
+  running out of fuel) is a poison input and fails the workload. A trap that
+  can depend on the host (stack overflow, a host resource failure) is retried
+  once on a fresh instance before it counts as poison.
+
+## State size
+
+State is not capped by the size of one record. Snapshots are written in chunks,
+and a snapshot writes only the chunks that changed since the last one, with
+separate fuel from `step`. Snapshots are taken by input count and by time, old
+snapshots and inputs are trimmed by a stated retention, and each workload has a
+recovery time budget that bounds how far a resume may replay.
+
+## The workload contract, version 0.2
+
+Before anything is built on it, the contract moves to a versioned interface:
+exports carry their version, `step` receives the input's offset and time,
+outputs are addressed (a key and a named output) rather than a single stream,
+a workload can `reject` one input without failing, and snapshots are exported
+in chunks. Upgrading a running workload's module is a recorded change that
+takes effect at a stated input offset, after `felixd replay --module` shows the
+new module agrees on the inputs it has already seen.
+
+## Upgrading felixd and scale
+
+A node that meets a record version it doesn't understand stops claiming that
+workload; it never marks it failed. New record formats are written only after
+every node advertises that it reads them. Nodes advertise their versions and
+labels (failure domain, instruction set) in `nodes`.
+
+The control plane must not grow as nodes times workloads. Nodes hold one
+session lease each, and assignments (from the scheduler in #60) replace every
+agent watching every workload lease.
+
 ## Several inputs
 
 A workload reads one input stream. Replay is deterministic because the input's
