@@ -5,11 +5,13 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 1 done. Agents hold a lease per workload, spread
+> **Status:** milestone 2 done. Agents hold a lease per workload, spread
 > workloads across nodes, and take a dead node's workloads over within one
-> lease TTL. A three-node failover test that keeps killing lease holders runs
-> on every pull request and ends with `felixd check`. Fencing a frozen node
-> (milestone 2) is next. The plan is in
+> lease TTL. A new owner fences the output stream with a claim record, so a
+> node frozen past its lease writes no output when it wakes, and each output
+> lands once through lost answers, partial batches and crashes. A three-node
+> failover test that keeps killing lease holders runs on every pull request
+> and ends with `felixd check`. Replay (milestone 3) is next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -245,7 +247,7 @@ owner knows which outputs already exist and does not write them again.
 |---|---|---|---|
 | 0 | One node, one workload | The workload contract works; a restart resumes where it stopped | Done |
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
-| 2 | Exactly-once output | A frozen node that comes back cannot write | Planned |
+| 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Planned |
 | 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Planned |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
