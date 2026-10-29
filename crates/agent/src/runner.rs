@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use felix_client::{ConditionalWrite, StreamRecord};
+use felixd_core::class::{self, OperatorReason};
 use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
@@ -53,7 +54,7 @@ impl Modules {
                 let bytes = felix
                     .cache_get(names::MODULES, hash)
                     .await?
-                    .with_context(|| format!("module {hash} is not in the modules cache"))?;
+                    .ok_or_else(|| ModuleMissing(hash.to_owned()))?;
                 if module::hash(&bytes) != hash {
                     return Err(poison(format!("module {hash} does not match its hash")));
                 }
@@ -65,9 +66,11 @@ impl Modules {
                 })
                 .await?
                 .map_err(|error| match error {
-                    LoadError::Contract01 => {
-                        NeedsOperator(format!("module {hash}: {error}")).into()
-                    }
+                    LoadError::Contract01 => NeedsOperator::new(
+                        OperatorReason::ModuleRefused,
+                        format!("module {hash}: {error}"),
+                    )
+                    .into(),
                     error => poison(error),
                 })
             })
@@ -144,23 +147,72 @@ pub(crate) enum Outcome {
     Superseded(u64),
     /// The output stream records that the workload failed under this spec
     /// version, which is the one this node runs or a later one.
-    FailedOnStream { spec_version: u64, reason: String },
+    FailedOnStream {
+        spec_version: u64,
+        failure: class::Failure,
+    },
     /// No node of this build can run the workload, and it is not the
-    /// workload's fault: an operator has to act.
-    NeedsOperator(String),
+    /// workload's fault: an operator has to act. `recorded` if the output
+    /// stream already says so for this spec record.
+    NeedsOperator {
+        problem: NeedsOperator,
+        recorded: bool,
+    },
 }
 
 /// A workload no node of this build can run, through no fault of its
 /// inputs, such as a module built against the 0.1 contract. It is not
-/// marked failed; the fix is a new module under a new id.
-#[derive(Debug)]
-pub(crate) struct NeedsOperator(pub(crate) String);
+/// marked failed; the fix is a spec change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NeedsOperator {
+    pub(crate) reason: OperatorReason,
+    pub(crate) detail: String,
+}
+
+impl NeedsOperator {
+    pub(crate) fn new(reason: OperatorReason, detail: impl Into<String>) -> Self {
+        NeedsOperator {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
 
 impl fmt::Display for NeedsOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        write!(f, "{}: {}", self.reason, self.detail)
     }
 }
+
+/// The output stream already records that the spec record this owner runs
+/// needs an operator.
+#[derive(Debug)]
+pub(crate) struct NeedsOperatorOnStream(pub(crate) NeedsOperator);
+
+impl fmt::Display for NeedsOperatorOnStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the output stream records that it needs an operator: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NeedsOperatorOnStream {}
+
+/// The module is not in the `modules` cache. Transient at first, since a
+/// read can be stale; the agent leaves it to an operator once it has lasted.
+#[derive(Debug)]
+pub(crate) struct ModuleMissing(pub(crate) String);
+
+impl fmt::Display for ModuleMissing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "module {} is not in the modules cache", self.0)
+    }
+}
+
+impl std::error::Error for ModuleMissing {}
 
 impl std::error::Error for NeedsOperator {}
 
@@ -180,12 +232,16 @@ impl std::error::Error for LostLease {}
 #[derive(Debug)]
 pub(crate) struct FailedOnStream {
     pub(crate) spec_version: u64,
-    pub(crate) reason: String,
+    pub(crate) failure: class::Failure,
 }
 
 impl fmt::Display for FailedOnStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the output stream records a failure: {}", self.reason)
+        write!(
+            f,
+            "the output stream records a failure: {}",
+            self.failure.detail
+        )
     }
 }
 
@@ -284,11 +340,20 @@ pub(crate) async fn run_workload(
     if let Some(found) = error.downcast_ref::<FailedOnStream>() {
         return Ok(Outcome::FailedOnStream {
             spec_version: found.spec_version,
-            reason: found.reason.clone(),
+            failure: found.failure.clone(),
         });
     }
-    if let Some(NeedsOperator(reason)) = error.downcast_ref::<NeedsOperator>() {
-        return Ok(Outcome::NeedsOperator(reason.clone()));
+    if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
+        return Ok(Outcome::NeedsOperator {
+            problem: problem.clone(),
+            recorded: false,
+        });
+    }
+    if let Some(NeedsOperatorOnStream(problem)) = error.downcast_ref::<NeedsOperatorOnStream>() {
+        return Ok(Outcome::NeedsOperator {
+            problem: problem.clone(),
+            recorded: true,
+        });
     }
     if error.is::<Poison>() {
         Ok(Outcome::Failed(format!("{error:#}")))
@@ -316,8 +381,7 @@ async fn run(
         felix,
         &spec.output,
         fence,
-        spec_version,
-        spec_record,
+        (spec_version, spec_record),
         claim_from,
     )
     .await?;
@@ -375,10 +439,13 @@ async fn run(
             WorkloadError::Failed(Failure {
                 kind: FailureKind::OutOfFuel,
                 ..
-            }) => NeedsOperator(format!(
-                "restoring the snapshot ran out of snapshot_fuel ({}), raise limits.snapshot_fuel",
-                spec.limits.snapshot_fuel
-            ))
+            }) => NeedsOperator::new(
+                OperatorReason::RestoreFuel,
+                format!(
+                    "restoring the snapshot ran out of snapshot_fuel ({}), raise limits.snapshot_fuel",
+                    spec.limits.snapshot_fuel
+                ),
+            )
             .into(),
             error => failed(error),
         })?;

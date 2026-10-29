@@ -4,7 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::DecodeError;
+use crate::class::{ErrorClass, Failure};
+use crate::{DecodeError, codec};
 
 /// How often a workload is snapshotted unless its spec says otherwise.
 pub const DEFAULT_SNAPSHOT_EVERY: u64 = 1000;
@@ -32,8 +33,12 @@ pub struct WorkloadSpec {
     #[serde(default)]
     pub limits: Limits,
     /// Why the workload failed. Set with [`WorkloadState::Failed`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "failure_or_text"
+    )]
+    pub failure: Option<Failure>,
     /// The `sys.specs` offset of the spec record this cache value comes from.
     /// Only the cache value has it. An agent runs a spec only with its record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,13 +117,39 @@ impl WorkloadSpec {
         cached == *record
     }
 
+    /// The `workloads` cache value.
     pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("a spec is always valid JSON")
+        codec::encode_json(CACHE_FORMAT, self)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<WorkloadSpec, DecodeError> {
-        serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
+        codec::decode_json(CACHE_FORMAT, bytes)
     }
+}
+
+/// The `workloads` value format this build writes and reads.
+const CACHE_FORMAT: u32 = 1;
+
+/// A failure as it is, or as text from a build before error classes, which
+/// failed a workload only for poison or a lease epoch gone backwards.
+fn failure_or_text<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Failure>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Found {
+        Typed(Failure),
+        Text(String),
+    }
+    Ok(
+        Option::<Found>::deserialize(deserializer)?.map(|found| match found {
+            Found::Typed(failure) => failure,
+            Found::Text(detail) => Failure {
+                class: ErrorClass::Poison,
+                detail,
+            },
+        }),
+    )
 }
 
 /// Whether a `workloads` value naming spec record `ours` may replace one

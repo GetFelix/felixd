@@ -8,7 +8,39 @@ fn a_lease_round_trips() {
 
 #[test]
 fn the_json_form_is_fixed() {
-    assert_eq!(Lease::claim("n1").encode(), br#"{"owner":"n1","epoch":0}"#);
+    assert_eq!(
+        Lease::claim("n1").encode(),
+        br#"{"format":1,"value":{"owner":"n1","epoch":0}}"#
+    );
+}
+
+#[test]
+fn values_from_before_formats_still_read() {
+    assert_eq!(
+        Lease::decode(br#"{"owner":"n1","epoch":3}"#),
+        Ok(Lease::held("n1", 3))
+    );
+    assert_eq!(decode_epoch(b"501"), Ok(501));
+}
+
+#[test]
+fn a_build_before_formats_refuses_the_values() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Before {
+        owner: String,
+        epoch: u64,
+    }
+    assert!(serde_json::from_slice::<Before>(&Lease::held("n1", 3).encode()).is_err());
+    assert!(serde_json::from_slice::<u64>(&encode_epoch(501)).is_err());
+}
+
+#[test]
+fn another_format_is_refused() {
+    assert_eq!(
+        Lease::decode(br#"{"format":2,"value":{"owner":"n1","epoch":3}}"#),
+        Err(DecodeError::UnknownVersion(2))
+    );
 }
 
 #[test]
@@ -21,7 +53,7 @@ fn a_new_epoch_is_above_the_counter_and_the_output_tail() {
 
 #[test]
 fn the_epoch_counter_round_trips() {
-    assert_eq!(encode_epoch(501), b"501");
+    assert_eq!(encode_epoch(501), br#"{"format":1,"value":501}"#);
     assert_eq!(decode_epoch(&encode_epoch(501)), Ok(501));
     assert!(decode_epoch(b"x").is_err());
 }

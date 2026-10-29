@@ -123,7 +123,7 @@ NodeInit == [pc |-> "idle", ep |-> 0, cid |-> 0, ok |-> FALSE, desync |-> FALSE,
              up |-> TRUE, kt |-> 0, kst |-> 0, pos |-> 0, skip |-> NoSkip,
              wnext |-> 0, wend |-> 0, batch |-> <<>>, want |-> 0,
              cseen |-> [present |-> FALSE, ver |-> 0], sseen |-> NoSnap,
-             await |-> NoMsg, rep |-> "none"]
+             await |-> NoMsg, rep |-> "none", nop |-> FALSE]
 
 Init ==
     /\ out = <<>>
@@ -151,12 +151,16 @@ LastOf(s, kinds) ==
     IN IF ps = {} THEN 0 ELSE Max(ps)
 
 LastEpoch(s) ==
-    LET p == LastOf(s, {"out", "claim", "fail", "snap"}) IN IF p = 0 THEN 0 ELSE s[p].e
+    LET p == LastOf(s, {"out", "claim", "fail", "nop", "snap"}) IN IF p = 0 THEN 0 ELSE s[p].e
 
 \* Position of the last record on .out that is not a generation start.
-LastRec(s) == LastOf(s, {"out", "claim", "fail"})
+LastRec(s) == LastOf(s, {"out", "claim", "fail", "nop"})
 
 Failed(s) == \E j \in 1..Len(s) : s[j].k = "fail"
+
+\* A needs-operator record: no node can run the spec until an operator acts.
+\* The model has one spec, so any such record is for it.
+NeedsOp(s) == \E j \in 1..Len(s) : s[j].k = "nop"
 
 MaxEpochOn(s) ==
     LET es == {s[p].e : p \in {q \in 1..Len(s) : s[q].k # "gen"}}
@@ -167,7 +171,7 @@ Owns(n) == lease.owner = n /\ lease.cid = nd[n].cid
 InFlight(n) == Cardinality({m \in net : m.n = n})
 
 \* After PutLease: running, or stale and not yet stopped.
-Live(n) == nd[n].up /\ nd[n].pc \notin {"idle", "epoch", "putepoch", "putlease"}
+Live(n) == nd[n].up /\ nd[n].pc \notin {"idle", "epoch", "putepoch", "putlease", "parked"}
 
 AlreadyWritten(n, i, x) ==
     LET s == nd[n].skip
@@ -205,6 +209,11 @@ Superseded(n) ==
 \* writes that into the spec instead of running.
 FoundFailure(n) ==
     nd' = [nd EXCEPT ![n].pc = "derive", ![n].await = NoMsg, ![n].rep = "none"]
+
+\* A needs-operator record is on the stream: the node releases the lease and
+\* leaves the workload alone.
+FoundNeedsOp(n) ==
+    nd' = [nd EXCEPT ![n].pc = "parking", ![n].await = NoMsg, ![n].rep = "none"]
 
 Send(n, m, pc) ==
     /\ net' = net \cup {m}
@@ -265,6 +274,8 @@ Marker(n) ==
     /\ LET p == LastRec(SubSeq(out, 1, Min2(nd[n].kt, Len(out))))
        IN IF FailRecord /\ p > 0 /\ out[p].k = "fail"
           THEN FoundFailure(n) /\ UNCHANGED net
+          ELSE IF FailRecord /\ p > 0 /\ out[p].k = "nop"
+          THEN FoundNeedsOp(n) /\ UNCHANGED net
           ELSE Send(n, [n |-> n, s |-> "out", at |-> nd[n].kt,
                         recs |-> <<Rec("claim", nd[n].ep, nd[n].cid, 0, 0)>>], "mwait")
     /\ UNCHANGED <<out, snap, lease, ctr, spec, bud, ghosts>>
@@ -283,6 +294,8 @@ MarkerRetry(n) ==
           THEN Superseded(n)
           ELSE IF FailRecord /\ Failed(found)
           THEN FoundFailure(n)
+          ELSE IF FailRecord /\ NeedsOp(found)
+          THEN FoundNeedsOp(n)
           ELSE IF \E j \in 1..Len(found) : found[j].k = "claim" /\ found[j].e = nd[n].ep
           THEN nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out),
                                 ![n].await = NoMsg, ![n].rep = "none"]
@@ -302,6 +315,8 @@ Probe(n) ==
           THEN Superseded(n)
           ELSE IF FailRecord /\ p > 0 /\ out[p].k = "fail"
           THEN FoundFailure(n)
+          ELSE IF FailRecord /\ p > 0 /\ out[p].k = "nop"
+          THEN FoundNeedsOp(n)
           ELSE nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out)]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -498,7 +513,9 @@ WriteFail(n) ==
     /\ UNCHANGED <<out, snap, net, ctr, bud, started, poisoned>>
 
 \* With FailRecord: the failure record at the tail just read, unless the last
-\* record there is from a later epoch or is already a failure.
+\* record there is from a later epoch or is already a failure. A node that
+\* needs an operator sends a needs-operator record the same way, and takes
+\* one already there as its own; a failure record does not.
 FailSend(n) ==
     /\ FailRecord
     /\ nd[n].pc = IF Confirmer THEN "confirmed" ELSE "failing"
@@ -509,13 +526,16 @@ FailSend(n) ==
           THEN nd' = Left(n) /\ UNCHANGED net
           ELSE IF p > 0 /\ out[p].k = "fail"
           THEN FoundFailure(n) /\ UNCHANGED net
+          ELSE IF nd[n].nop /\ p > 0 /\ out[p].k = "nop"
+          THEN FoundNeedsOp(n) /\ UNCHANGED net
           ELSE Send(n, [n |-> n, s |-> "out", at |-> Len(out),
-                        recs |-> <<Rec("fail", nd[n].ep, nd[n].cid, 0, 0)>>], "fwait")
+                        recs |-> <<Rec(IF nd[n].nop THEN "nop" ELSE "fail",
+                                       nd[n].ep, nd[n].cid, 0, 0)>>], "fwait")
     /\ UNCHANGED <<out, snap, lease, ctr, spec, bud, ghosts>>
 
 FailAck(n) ==
     /\ nd[n].pc = "fwait" /\ nd[n].rep = "ok"
-    /\ FoundFailure(n)
+    /\ IF nd[n].nop THEN FoundNeedsOp(n) ELSE FoundFailure(n)
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
 \* Refused or unanswered: read the tail again and decide, either at once
@@ -526,6 +546,25 @@ FailRetry(n) ==
     /\ \E pc \in {"failing", IF Confirmer THEN "confirmed" ELSE "failing"} :
           nd' = [nd EXCEPT ![n].pc = pc, ![n].await = NoMsg, ![n].rep = "none"]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
+
+\* No node of this build can run the workload until an operator acts: found
+\* before the claim (a module refused or missing, a spec not in the history
+\* or conflicting with the output), when the node claims only to record it,
+\* or while running (a restore out of fuel). It is recorded like a failure.
+NeedsOperator(n) ==
+    /\ FailRecord /\ LocalFaults
+    /\ nd[n].pc \in {"marker", "run", "post"}
+    /\ nd' = [nd EXCEPT ![n].pc = "failing", ![n].nop = TRUE]
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
+
+\* The node releases the lease and leaves the workload alone. It is not
+\* failed: the spec stays running, and only a spec change, which the model
+\* does not have, would clear the record.
+Park(n) ==
+    /\ nd[n].pc = "parking"
+    /\ lease' = IF Owns(n) THEN NoLease ELSE lease
+    /\ nd' = [nd EXCEPT ![n] = [NodeInit EXCEPT !.up = nd[n].up, !.pc = "parked"]]
+    /\ UNCHANGED <<out, snap, net, ctr, spec, bud, ghosts>>
 
 \* The spec follows the record, so this write needs no fence.
 Derive(n) ==
@@ -553,7 +592,7 @@ LocalDeadline(n) ==
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
 StopLocal(n) ==
-    /\ nd[n].pc # "idle" /\ ~nd[n].ok
+    /\ nd[n].pc \notin {"idle", "parked"} /\ ~nd[n].ok
     /\ nd' = Left(n)
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -596,7 +635,7 @@ Deliver(m) ==
                    THEN [nd EXCEPT ![m.n].rep = IF applied THEN "ok" ELSE "refused"]
                    ELSE nd
           /\ staleFail' = \/ staleFail
-                          \/ /\ applied /\ m.s = "out" /\ m.recs[1].k = "fail"
+                          \/ /\ applied /\ m.s = "out" /\ m.recs[1].k \in {"fail", "nop"}
                              /\ \E x \in started : x.e > m.recs[1].e
     /\ net' = net \ {m}
     /\ UNCHANGED <<lease, ctr, spec, bud, poisoned>>
@@ -670,11 +709,12 @@ NodeStep(n) ==
     \/ Step(n) \/ OSend(n) \/ OAck(n) \/ Reconcile(n)
     \/ Continue(n) \/ SnapSend(n) \/ SSend(n) \/ SAck(n) \/ SRefused(n) \/ SLost(n)
     \/ Sup(n) \/ ConfirmFail(n) \/ WriteFail(n)
-    \/ FailSend(n) \/ FailAck(n) \/ FailRetry(n) \/ Derive(n)
+    \/ FailSend(n) \/ FailAck(n) \/ FailRetry(n) \/ Derive(n) \/ Park(n)
     \/ Renew(n) \/ StopLocal(n) \/ Restart(n)
 
 NodeFault(n) ==
-    \/ Crash(n) \/ LocalDeadline(n) \/ ClockFault(n) \/ LocalFault(n) \/ Timeout(n)
+    \/ Crash(n) \/ LocalDeadline(n) \/ ClockFault(n) \/ LocalFault(n) \/ NeedsOperator(n)
+    \/ Timeout(n)
 
 Next ==
     \/ \E n \in Nodes : NodeStep(n) \/ NodeFault(n)
@@ -719,12 +759,15 @@ NoInterleave ==
 \* No stale node fails the workload. Without FailRecord: no node writes
 \* `failed` while the lease is not its own. With it: `failed` follows a
 \* failure record, that record landed before any later owner began, and
-\* nothing but a generation start lands after it.
+\* nothing but a generation start lands after it. The same holds for a
+\* needs-operator record, so it is written once and every later claimer
+\* leaves the workload alone.
 NoStaleFailure ==
     /\ ~staleFail
     /\ FailRecord =>
          /\ spec = "failed" => Failed(out)
-         /\ \A p, q \in 1..Len(out) : (p < q /\ out[p].k = "fail") => out[q].k = "gen"
+         /\ \A p, q \in 1..Len(out) :
+               (p < q /\ out[p].k \in {"fail", "nop"}) => out[q].k = "gen"
 
 NoPoison == ~poisoned
 
@@ -745,11 +788,12 @@ SnapshotsSplit ==
         /\ \A p \in 1..Len(out) : out[p].k = "out" =>
               ((p - 1 < snap[q].x) <=> (out[p].i <= snap[q].i))
 
-\* A free, running workload is claimed.
+\* A free, running workload is claimed, unless it is left to an operator.
 FreeIsClaimed ==
-    (lease.owner = NoNode /\ spec = "running") ~> (lease.owner # NoNode \/ spec # "running")
+    (lease.owner = NoNode /\ spec = "running")
+        ~> (lease.owner # NoNode \/ spec # "running" \/ NeedsOp(out))
 
-\* Every output is written, or the workload failed.
-EventuallyDone == <>(Len(OutsOn) = Len(Expected) \/ spec # "running")
+\* Every output is written, or the workload failed or is left to an operator.
+EventuallyDone == <>(Len(OutsOn) = Len(Expected) \/ spec # "running" \/ NeedsOp(out))
 
 =============================================================================

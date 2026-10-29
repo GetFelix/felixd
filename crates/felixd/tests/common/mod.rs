@@ -14,6 +14,7 @@ use felix_client::ConditionalWrite;
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::felix::Felix;
 use felixd_agent::settings::Settings;
+use felixd_core::class::OperatorReason;
 use felixd_core::lease::Lease;
 use felixd_core::names;
 use felixd_core::output;
@@ -223,6 +224,43 @@ impl TestFelix {
         records
     }
 
+    /// The records on the output stream saying that a spec record needs an
+    /// operator, as `(spec record, reason)`, and how many other records
+    /// there are besides outputs.
+    pub(crate) async fn needs_operator(&self) -> (Vec<(u64, OperatorReason)>, usize) {
+        let mut found = Vec::new();
+        let mut others = 0;
+        for (_, record) in self.read_all(OUTPUT).await {
+            match output::decode(&record) {
+                Ok(output::Record::NeedsOperator { spec, reason, .. }) => {
+                    found.push((spec, reason))
+                }
+                Ok(record) if record.written().is_some() => {}
+                _ => others += 1,
+            }
+        }
+        (found, others)
+    }
+
+    /// Waits for the output stream to say that the current spec record
+    /// needs an operator, and returns why.
+    pub(crate) async fn needs_operator_recorded(&self) -> OperatorReason {
+        let record = self.spec().await.record.expect("a spec record");
+        eventually(
+            "a needs-operator record",
+            Duration::from_secs(90),
+            || async {
+                self.needs_operator()
+                    .await
+                    .0
+                    .into_iter()
+                    .find(|(spec, _)| *spec == record)
+                    .map(|(_, reason)| reason)
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn spec(&self) -> WorkloadSpec {
         self.spec_of(ID).await
     }
@@ -321,7 +359,8 @@ impl TestFelix {
     pub(crate) async fn failure_of(&self, id: &str) -> String {
         eventually("the workload to fail", Duration::from_secs(30), || async {
             let spec = self.spec_of(id).await;
-            (spec.state == WorkloadState::Failed).then(|| spec.failure.unwrap_or_default())
+            (spec.state == WorkloadState::Failed)
+                .then(|| spec.failure.map(|f| f.detail).unwrap_or_default())
         })
         .await
     }

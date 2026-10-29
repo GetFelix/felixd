@@ -14,6 +14,7 @@ use common::{
     test_felix,
 };
 use felixd_agent::admin::{StreamKind, ensure_stream};
+use felixd_core::class::OperatorReason;
 use felixd_core::output::{self, OutputHeader, Record, Rejected};
 use felixd_core::snapshot::{self, ChunkRef, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::{Limits, WorkloadSpec, WorkloadState};
@@ -375,34 +376,45 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
         record: None,
     })
     .await;
+    // Two nodes: one records it, and the other finds the record and skips it.
     let _agent = t.start_agent();
+    let _other = t.start_agent();
     t.publish_all(INPUT, [vec![1]]).await;
     produced(&t, &names::output_stream("other"), 1).await;
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::ModuleRefused
+    );
     tokio::time::sleep(LEASE_TTL * 2).await;
-    assert!(t.lease(ID).await.is_none(), "the 0.1 workload was claimed");
-    assert!(t.read_all(OUTPUT).await.is_empty(), "something was written");
+    assert!(t.lease(ID).await.is_none(), "the 0.1 workload is held");
+    let record = t.spec().await.record.unwrap();
+    assert_eq!(
+        t.needs_operator().await,
+        (vec![(record, OperatorReason::ModuleRefused)], 0),
+        "not one needs-operator record and nothing else"
+    );
     let spec = t.spec().await;
     assert_eq!(spec.state, WorkloadState::Running);
     assert_eq!(spec.failure, None);
 }
 
-/// The module is not in the cache when the agent starts, so the check before
-/// the claim cannot see it. The agent claims, and finds the 0.1 module only
-/// once it has the lease.
+/// The module is not in the cache. Once that has lasted, the agent records
+/// that the workload needs an operator instead of retrying, and only a spec
+/// change makes it try again.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_contract_01_module_found_after_the_claim_is_left_for_an_operator() {
+async fn a_missing_module_is_recorded_until_the_spec_changes() {
     let Some(t) = test_felix().await else { return };
     // Another workload, so the caches exist.
-    t.submit_as("other", "counter", &[]).await;
-    let old = felixd_testkit::contract_01_component();
-    let hash = module::hash(&old);
+    t.submit_as("other", "window", &[]).await;
+    let counter = felixd_testkit::workload("counter");
+    let hash = module::hash(&counter);
     let kind = StreamKind {
         replication_factor: common::replication_factor(),
     };
     for stream in [INPUT, OUTPUT, SNAPSHOTS] {
         ensure_stream(&t.settings, stream, kind).await.unwrap();
     }
-    t.put_spec(&WorkloadSpec {
+    let spec = WorkloadSpec {
         module: hash.clone(),
         input: INPUT.into(),
         output: OUTPUT.into(),
@@ -412,31 +424,31 @@ async fn a_contract_01_module_found_after_the_claim_is_left_for_an_operator() {
         limits: Limits::default(),
         failure: None,
         record: None,
-    })
-    .await;
+    };
+    t.put_spec(&spec).await;
     let _agent = t.start_agent();
-    eventually("the claim", Duration::from_secs(60), || async {
-        t.lease(ID).await.map(|_| ())
-    })
-    .await;
+    t.publish_all(INPUT, inputs(&["a"])).await;
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::ModuleMissing
+    );
 
+    // The module turning up is not enough: the record stands for that spec.
     t.felix
-        .cache_put(names::MODULES, &hash, Bytes::from(old))
+        .cache_put(names::MODULES, &hash, Bytes::from(counter))
         .await
         .unwrap();
-    eventually("the release", Duration::from_secs(60), || async {
-        t.lease(ID).await.is_none().then_some(())
-    })
-    .await;
     tokio::time::sleep(LEASE_TTL * 2).await;
     assert!(
-        t.lease(ID).await.is_none(),
-        "the workload was claimed again"
+        t.outputs(OUTPUT).await.is_empty(),
+        "it ran without a spec change"
     );
-    assert!(t.outputs(OUTPUT).await.is_empty(), "something was written");
-    let spec = t.spec().await;
-    assert_eq!(spec.state, WorkloadState::Running);
-    assert_eq!(spec.failure, None);
+    let current = t.spec().await;
+    assert_eq!(current.state, WorkloadState::Running);
+    assert_eq!(current.failure, None);
+
+    t.put_spec(&spec).await;
+    produced(&t, OUTPUT, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -506,6 +518,10 @@ async fn a_restore_that_runs_out_of_fuel_is_left_for_an_operator() {
         t.outputs(OUTPUT).await.len(),
         outputs,
         "something was written"
+    );
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::RestoreFuel
     );
     let spec = t.spec().await;
     assert_eq!(spec.state, WorkloadState::Running);

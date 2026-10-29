@@ -18,14 +18,15 @@ TLC_SIMULATE=100000 scripts/check_tla.sh FelixdFull  # random behaviours, not ev
 | `OutputsExact` | The output records, in stream order, are a prefix of the deterministic outputs of the inputs in order: no duplicate, no gap. |
 | `EpochMonotone` | Epochs on `.out` and on `.snap` never decrease (generation-start records excepted). |
 | `NoInterleave` | Once an owner has begun, nothing from an earlier epoch lands after that point on `.out`. An owner begins when its claim record lands, or without the marker, when it reads the tail to resume. |
-| `NoStaleFailure` | `failed` in the spec follows a failure record on `.out`, that record landed before any later owner began, and only generation-start records land after it (the model has one spec version; a resubmit's run lands after it in the code). Without `FailRecord`: no node writes `failed` while the lease is not its own. |
+| `NoStaleFailure` | `failed` in the spec follows a failure record on `.out`, that record landed before any later owner began, and only generation-start records land after it (the model has one spec version; a resubmit's run lands after it in the code). The same holds for a needs-operator record, so it is written once and no claim lands after it. Without `FailRecord`: no node writes `failed` while the lease is not its own. |
 | `NoPoison` | No node finds the streams impossible to resume from. The model is deterministic, so every such finding would fail a healthy workload. |
 | `UniqueEpoch` | No two claims that run, or have records or requests in flight, share an epoch. |
 | `SnapshotsSplit` | For each snapshot (X, T), the output records below offset T are of inputs up to X and the rest are of later inputs. |
 
 Under weak fairness of every node's own steps, of delivery and of expiry, `FelixdLive` checks
 `FreeIsClaimed` (a free, running workload is claimed) and `EventuallyDone` (every output is
-written, or the workload failed). Its local faults cover a failing node that crashes between the
+written, or the workload failed). Both allow for a workload left to an operator: once a
+needs-operator record is on `.out`, no node claims it again. Its local faults cover a failing node that crashes between the
 failure record and the spec write: the next owner finds the record and writes the spec.
 
 ## Configurations
@@ -105,7 +106,9 @@ Paths are from the repository root, as of workload contract 0.2.
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:656-670` |
 | `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:617-619` |
 | `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:726-755`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
-| `FailSend`, `FailAck`, `FailRetry` | `record_failure`: `crates/agent/src/output.rs:43-94`; the record is `encode_failure`: `crates/core/src/output.rs:100-107`. A retry reads the tail again in `record_failure`'s loop, or confirms again in `mark_failed`'s once that loop gives up |
+| `FailSend`, `FailAck`, `FailRetry` | `record_failure` and `record_needs_operator` over `append_last`: `crates/agent/src/output.rs:56-185`; the records are `encode_failure` and `encode_needs_operator`: `crates/core/src/output.rs:262-288`. A retry reads the tail again in `append_last`'s loop, or confirms again in `mark_failed`'s or `record_needs_operator`'s once that loop gives up |
+| `NeedsOperator` | a problem found before the claim, which the node then claims only to record (`before_claim` and `own`: `crates/agent/src/agent.rs:405-570`), or while running, such as a restore out of fuel (`Outcome::NeedsOperator`); recorded by `record_needs_operator`: `crates/agent/src/agent.rs:893-960` |
+| `Park` | the lease released and the task left waiting for a spec change: `own`, `Ended::NeedsOperator`. A needs-operator record found by `check_found` (`crates/agent/src/output.rs:332`) or before the claim (`recorded_needs_operator`: `crates/agent/src/agent.rs:574`) leads here |
 | `Derive` | `write_failed`: `crates/agent/src/agent.rs:814-850`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:645-655` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
 | `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |

@@ -11,7 +11,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::DecodeError;
+use crate::{DecodeError, codec};
+
+/// The `leases` and `epochs` value formats this build writes and reads.
+const LEASE_FORMAT: u32 = 1;
+const EPOCH_FORMAT: u32 = 1;
 
 /// How long a lease lives without renewal unless the agent is told otherwise.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(10);
@@ -55,21 +59,21 @@ impl Lease {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("a lease is always valid JSON")
+        codec::encode_json(LEASE_FORMAT, self)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Lease, DecodeError> {
-        serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
+        codec::decode_json(LEASE_FORMAT, bytes)
     }
 }
 
 /// The value in the `epochs` cache: the last epoch handed out.
 pub fn encode_epoch(epoch: u64) -> Vec<u8> {
-    epoch.to_string().into_bytes()
+    codec::encode_json(EPOCH_FORMAT, &epoch)
 }
 
 pub fn decode_epoch(bytes: &[u8]) -> Result<u64, DecodeError> {
-    serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
+    codec::decode_json(EPOCH_FORMAT, bytes)
 }
 
 /// When a holder renews and when it gives up.

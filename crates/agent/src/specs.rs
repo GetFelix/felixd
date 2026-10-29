@@ -4,6 +4,7 @@
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{CacheCondition, ConditionalWrite};
+use felixd_core::class::OperatorReason;
 use felixd_core::names;
 use felixd_core::output::{self, Record};
 use felixd_core::spec::{SpecRecord, WorkloadSpec, moves_forward};
@@ -59,9 +60,9 @@ pub(crate) async fn read(felix: &Felix, id: &str, offset: u64) -> Result<Workloa
         bail!("no spec record at {at}");
     };
     let record = SpecRecord::decode(&found.payload)
-        .map_err(|e| NeedsOperator(format!("the spec record at {at}: {e}")))?;
+        .map_err(|e| unrecorded(format!("the spec record at {at}: {e}")))?;
     if record.id != id {
-        return Err(NeedsOperator(format!(
+        return Err(unrecorded(format!(
             "the spec record at {at} is workload {}'s",
             record.id
         ))
@@ -74,19 +75,20 @@ pub(crate) async fn read(felix: &Felix, id: &str, offset: u64) -> Result<Workloa
 /// an agent runs only specs in the history. A mismatch is [`NeedsOperator`].
 pub(crate) async fn check_record(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Result<()> {
     let Some(offset) = spec.record else {
-        return Err(NeedsOperator(
-            "its workloads entry names no spec record; submit it again".to_owned(),
-        )
-        .into());
+        return Err(unrecorded("its workloads entry names no spec record; submit it again").into());
     };
     if !spec.matches_record(&read(felix, id, offset).await?) {
-        return Err(NeedsOperator(format!(
+        return Err(unrecorded(format!(
             "its workloads entry differs from its spec record at {}:{offset}",
             names::SPECS
         ))
         .into());
     }
     Ok(())
+}
+
+fn unrecorded(detail: impl Into<String>) -> NeedsOperator {
+    NeedsOperator::new(OperatorReason::SpecUnrecorded, detail)
 }
 
 /// Writes `spec`, the cache value of the record at `spec.record`, into
@@ -169,9 +171,12 @@ pub(crate) async fn refuse_stale_or_foreign(
     if let Some(written) = written_under(felix, id).await?
         && let Some(conflict) = written.conflicts_with_history(spec)
     {
-        return Err(NeedsOperator(format!(
-            "the workload already has output, and {conflict}; submit the change under a new id"
-        ))
+        return Err(NeedsOperator::new(
+            OperatorReason::SpecConflict,
+            format!(
+                "the workload already has output, and {conflict}; submit the change under a new id"
+            ),
+        )
         .into());
     }
     let ours = spec.record.context("the spec names no spec record")?;
@@ -181,9 +186,10 @@ pub(crate) async fn refuse_stale_or_foreign(
         .await?
         .filter(|&floor| floor > ours)
     {
-        return Err(NeedsOperator(format!(
-            "spec record {floor} has already been claimed, and this node has {ours}"
-        ))
+        return Err(NeedsOperator::new(
+            OperatorReason::SpecStale,
+            format!("spec record {floor} has already been claimed, and this node has {ours}"),
+        )
         .into());
     }
     Ok(())

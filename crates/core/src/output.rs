@@ -17,8 +17,12 @@
 //!   the records after it are known to come from that spec, and the highest
 //!   spec record claimed on the stream so far, its own included, so the last
 //!   claim alone says whether a spec is older than one that ran.
-//! - A failure: `spec_version (8) | reason`. The workload failed under that
-//!   version of its spec. It is the last record of that run.
+//! - A failure: `spec_version (8) | class (1) | reason`. The workload
+//!   failed under that version of its spec. It is the last record of that
+//!   run. Kind 2 failures have no class and read as poison.
+//! - Needs operator: `spec (8) | reason code (2) | detail`. No node can run
+//!   the spec record at `spec` until an operator acts. It is the last record
+//!   of that run, and an owner of that spec record that finds it stops.
 //! - A rejection: `input_offset (8) | index (4, always 0) | code (4) |
 //!   detail`. It is that input's only output, and is matched, skipped and
 //!   compared like one.
@@ -26,6 +30,7 @@
 //! Version 3 outputs have no name or key and read as name `out`. Version 2
 //! records are outputs without a kind byte, with the epoch after the index.
 
+use crate::class::{ErrorClass, OperatorReason};
 use crate::codec::{DecodeError, Reader};
 use crate::names::validate_id;
 
@@ -37,6 +42,8 @@ const CLAIM: u8 = 1;
 const FAILURE: u8 = 2;
 const REJECTION: u8 = 3;
 const CLAIM_UNDER: u8 = 4;
+const CLASSED_FAILURE: u8 = 5;
+const NEEDS_OPERATOR: u8 = 6;
 
 /// The name an output gets when the workload gives none, and the one a
 /// downstream workload reads unless its spec says otherwise.
@@ -111,7 +118,16 @@ pub enum Record<'a> {
     Failure {
         epoch: u64,
         spec_version: u64,
+        class: ErrorClass,
         reason: &'a [u8],
+    },
+    /// The owner at `epoch` found that no node can run spec record `spec`
+    /// until an operator acts. It holds no output and is not a failure.
+    NeedsOperator {
+        epoch: u64,
+        spec: u64,
+        reason: OperatorReason,
+        detail: &'a [u8],
     },
 }
 
@@ -120,7 +136,9 @@ impl<'a> Record<'a> {
     pub fn epoch(&self) -> u64 {
         match self {
             Record::Output(written, _) | Record::Rejection(written, _) => written.epoch,
-            Record::Claim { epoch, .. } | Record::Failure { epoch, .. } => *epoch,
+            Record::Claim { epoch, .. }
+            | Record::Failure { epoch, .. }
+            | Record::NeedsOperator { epoch, .. } => *epoch,
         }
     }
 
@@ -128,7 +146,19 @@ impl<'a> Record<'a> {
     pub fn written(&self) -> Option<Written> {
         match self {
             Record::Output(written, _) | Record::Rejection(written, _) => Some(*written),
-            Record::Claim { .. } | Record::Failure { .. } => None,
+            Record::Claim { .. } | Record::Failure { .. } | Record::NeedsOperator { .. } => None,
+        }
+    }
+
+    /// The reason, if this records that spec record `spec` needs an operator.
+    pub fn needs_operator_under(&self, spec: u64) -> Option<OperatorReason> {
+        match self {
+            Record::NeedsOperator {
+                spec: found,
+                reason,
+                ..
+            } if *found == spec => Some(*reason),
+            _ => None,
         }
     }
 
@@ -229,12 +259,30 @@ pub fn encode_claim_under(epoch: u64, spec: u64, floor: u64, node: &str) -> Vec<
 
 /// Builds the record an owner at `epoch` appends when the workload fails
 /// under spec version `spec_version`.
-pub fn encode_failure(epoch: u64, spec_version: u64, reason: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(18 + reason.len());
-    out.extend([VERSION, FAILURE]);
+pub fn encode_failure(epoch: u64, spec_version: u64, class: ErrorClass, reason: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(19 + reason.len());
+    out.extend([VERSION, CLASSED_FAILURE]);
     out.extend(epoch.to_be_bytes());
     out.extend(spec_version.to_be_bytes());
+    out.push(class.code());
     out.extend(reason.as_bytes());
+    out
+}
+
+/// Builds the record an owner at `epoch` appends when spec record `spec`
+/// needs an operator.
+pub fn encode_needs_operator(
+    epoch: u64,
+    spec: u64,
+    reason: OperatorReason,
+    detail: &str,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(20 + detail.len());
+    out.extend([VERSION, NEEDS_OPERATOR]);
+    out.extend(epoch.to_be_bytes());
+    out.extend(spec.to_be_bytes());
+    out.extend(reason.code().to_be_bytes());
+    out.extend(detail.as_bytes());
     out
 }
 
@@ -261,7 +309,10 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     }
     let kind = r.u8()?;
     if !matches!(kind, OUTPUT | CLAIM | FAILURE)
-        && !(matches!(kind, REJECTION | CLAIM_UNDER) && version == VERSION)
+        && !(matches!(
+            kind,
+            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR
+        ) && version == VERSION)
     {
         return Err(DecodeError::UnknownKind(kind));
     }
@@ -282,7 +333,20 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
         FAILURE => Ok(Record::Failure {
             epoch,
             spec_version: r.u64()?,
+            class: ErrorClass::Poison,
             reason: r.rest(),
+        }),
+        CLASSED_FAILURE => Ok(Record::Failure {
+            epoch,
+            spec_version: r.u64()?,
+            class: ErrorClass::from_code(r.u8()?)?,
+            reason: r.rest(),
+        }),
+        NEEDS_OPERATOR => Ok(Record::NeedsOperator {
+            epoch,
+            spec: r.u64()?,
+            reason: OperatorReason::from_code(u16::from_be_bytes(r.array()?))?,
+            detail: r.rest(),
         }),
         REJECTION => {
             let input_offset = r.u64()?;
@@ -338,13 +402,14 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     }
 }
 
-/// Whether `record` is a claim or a failure, which no step produced. The
+/// Whether `record` is a claim, a failure or a needs-operator record, which
+/// no step produced. The
 /// owner's own checks pass over them; rejections are not passed over, since
 /// they stand in for an input's outputs.
 pub fn is_marker(record: &[u8]) -> bool {
     matches!(
         decode(record),
-        Ok(Record::Claim { .. } | Record::Failure { .. })
+        Ok(Record::Claim { .. } | Record::Failure { .. } | Record::NeedsOperator { .. })
     )
 }
 
@@ -403,7 +468,11 @@ pub enum Reconciled {
     /// What is there is not this workload's output.
     Diverged,
     /// A failure record is there, written under `spec_version`.
-    Failed { spec_version: u64, reason: String },
+    Failed {
+        spec_version: u64,
+        class: ErrorClass,
+        reason: String,
+    },
 }
 
 /// Decides what to do about records found at the expected tail. `batch`
@@ -430,18 +499,20 @@ pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconcile
     {
         return Reconciled::Superseded { epoch: later };
     }
-    if let Some((spec_version, reason)) = found.iter().find_map(|(r, _)| match r {
+    if let Some(failed) = found.iter().find_map(|(r, _)| match r {
         Record::Failure {
             spec_version,
+            class,
             reason,
             ..
-        } => Some((*spec_version, String::from_utf8_lossy(reason).into_owned())),
+        } => Some(Reconciled::Failed {
+            spec_version: *spec_version,
+            class: *class,
+            reason: String::from_utf8_lossy(reason).into_owned(),
+        }),
         _ => None,
     }) {
-        return Reconciled::Failed {
-            spec_version,
-            reason,
-        };
+        return failed;
     }
     let outputs: Vec<&[u8]> = found
         .iter()
