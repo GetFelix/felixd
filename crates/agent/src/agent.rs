@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +19,7 @@ use felixd_core::placement::{FirstClaimWins, Placement};
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::{names, output};
 use felixd_runtime::Runtime;
+use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
@@ -105,23 +107,26 @@ pub async fn run(
     let presence = tokio::spawn(announce(node.clone()));
     let mut tasks: HashMap<String, Task> = HashMap::new();
     let mut seen: HashMap<String, watch::Sender<Seen>> = HashMap::new();
+    tokio::pin!(shutdown);
     // The caches may not exist yet on a new cluster; `felixd run` creates them.
-    let mut leases = reopen(&node, names::LEASES, Duration::ZERO).await;
-    let mut watch = reopen(&node, names::WORKLOADS, Duration::ZERO).await;
+    let opened = async {
+        let leases = reopen(&node, names::LEASES, Duration::ZERO).await;
+        (
+            leases,
+            reopen(&node, names::WORKLOADS, Duration::ZERO).await,
+        )
+    };
+    let Some((mut leases, mut watch)) = unless(shutdown.as_mut(), opened).await else {
+        return shut_down(&node, presence, tasks).await;
+    };
     // Set while a new watch is redelivering the current workloads.
     let mut redelivery: Option<Redelivery> = None;
-    tokio::pin!(shutdown);
     loop {
         let item = tokio::select! {
             // A lease change waiting to be read comes before a workload, so a
             // new task starts from the lease as it is.
             biased;
-            () = &mut shutdown => {
-                presence.abort();
-                stop_all(tasks).await;
-                let _ = node.felix.cache_delete(names::NODES, &node.node_id).await;
-                return Ok(());
-            }
+            () = &mut shutdown => return shut_down(&node, presence, tasks).await,
             item = leases.recv() => {
                 match item {
                     Some(CacheWatchItem::Change(change)) => {
@@ -130,7 +135,10 @@ pub async fn run(
                         }
                     }
                     // A new watch redelivers every live lease.
-                    _ => leases = reopen(&node, names::LEASES, RETRY_DELAY).await,
+                    _ => match unless(shutdown.as_mut(), reopen(&node, names::LEASES, RETRY_DELAY)).await {
+                        Some(opened) => leases = opened,
+                        None => return shut_down(&node, presence, tasks).await,
+                    },
                 }
                 continue;
             }
@@ -160,7 +168,15 @@ pub async fn run(
             }
         };
         drop(watch);
-        watch = reopen(&node, names::WORKLOADS, reopen_after).await;
+        match unless(
+            shutdown.as_mut(),
+            reopen(&node, names::WORKLOADS, reopen_after),
+        )
+        .await
+        {
+            Some(opened) => watch = opened,
+            None => return shut_down(&node, presence, tasks).await,
+        }
         redelivery = match watch.retained_count() {
             Some(count) => Some(Redelivery::new(count, watch.resume_offset())),
             None => {
@@ -173,6 +189,32 @@ pub async fn run(
             redelivery = None;
         }
     }
+}
+
+/// Runs `work` unless `shutdown` completes first.
+async fn unless<T>(
+    shutdown: Pin<&mut impl Future<Output = ()>>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = shutdown => None,
+        done = work => Some(done),
+    }
+}
+
+async fn shut_down(
+    node: &Node,
+    presence: JoinHandle<()>,
+    tasks: HashMap<String, Task>,
+) -> Result<()> {
+    presence.abort();
+    stop_all(tasks).await;
+    // Bounded: on a new cluster `nodes` may not exist, and the delete would
+    // wait for it.
+    let delete = node.felix.cache_delete(names::NODES, &node.node_id);
+    let _ = tokio::time::timeout(RELEASE_WITHIN, delete).await;
+    Ok(())
 }
 
 async fn reopen(node: &Node, cache: &str, delay: Duration) -> ClusterCacheWatch {
@@ -415,9 +457,11 @@ impl Node {
                     _ = stop.wait_for(|stop| *stop) => return false,
                 }
             }
-            if !self.placement.has_room(self.held.load(Ordering::SeqCst)) {
+            if let Some(freed) = freed_unless(&self.room, || {
+                self.placement.has_room(self.held.load(Ordering::SeqCst))
+            }) {
                 tokio::select! {
-                    () = self.room.notified() => {}
+                    () = freed => {}
                     () = tokio::time::sleep(self.timing.ttl) => {}
                     _ = stop.wait_for(|stop| *stop) => return false,
                 }
@@ -442,6 +486,14 @@ impl Node {
         self.random.store(x, Ordering::Relaxed);
         (x >> 11) as f64 / (1u64 << 53) as f64
     }
+}
+
+/// Completes when a slot is freed, or `None` if `has_room`. It is registered
+/// before `has_room` is asked, so a slot freed in between is not missed.
+fn freed_unless(room: &Notify, has_room: impl FnOnce() -> bool) -> Option<Pin<Box<Notified<'_>>>> {
+    let mut freed = Box::pin(room.notified());
+    freed.as_mut().enable();
+    (!has_room()).then_some(freed)
 }
 
 fn now_millis() -> u64 {

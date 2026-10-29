@@ -60,8 +60,12 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Read the output first: anything written after this is checked against
-    // inputs that are all on the input stream already.
+    // Snapshots first, so every output a snapshot counts is on the stream when
+    // it is read. Then the output: anything written after this is checked
+    // against inputs that are all on the input stream already.
+    let snap_stream = names::snapshot_stream(id);
+    let snap_tail = felix.tail(&snap_stream).await?;
+    let snapshots = felix.read_range(&snap_stream, 0, snap_tail).await?;
     let output_tail = felix.tail(&spec.output).await?;
     let records = felix.read_range(&spec.output, 0, output_tail).await?;
     let input_tail = felix.tail(&spec.input).await?;
@@ -85,11 +89,17 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .iter()
         .map(|r| (r.offset, r.payload.as_ref()))
         .collect();
+    let mut findings = check::check(&expected, &on_stream, complete);
+    let snapshots: Vec<(u64, &[u8])> = snapshots
+        .iter()
+        .map(|r| (r.offset, r.payload.as_ref()))
+        .collect();
+    findings.extend(check::check_snapshots(&snapshots, &on_stream, output_tail));
     Ok(Report {
         workload: id.to_owned(),
         output: spec.output.clone(),
         records: records.len(),
-        findings: check::check(&expected, &on_stream, complete),
+        findings,
     })
 }
 

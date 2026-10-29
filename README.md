@@ -35,8 +35,9 @@ FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test restart -- --test-threads=1
 ```
 
 The failover test runs three agents and six workloads under a steady
-producer, kills the node holding the most leases every 3 s and starts it
-again, then checks every output stream. `FELIXD_FAILOVER_SECS` sets how long
+producer, kills the live node holding the most leases every 3 s and starts
+it again, every other time with a fault that also crashes it between an
+append and its answer, then checks every output stream. `FELIXD_FAILOVER_SECS` sets how long
 it runs (30 by default; a nightly CI job runs it for 10 minutes):
 
 ```
@@ -65,8 +66,9 @@ The connection settings are the environment variables `felixctl` reads, plus
 `FELIX_NAMESPACE` (default `default`).
 `felixd check` replays each workload's module over its input and compares
 the result with its output stream. It reports gaps, duplicates, records out of
-order, epoch regressions and outputs that differ from the replay, and exits
-with 1 if it finds any. `--id` limits it to one workload; `--complete` also
+order, epoch regressions, outputs that differ from the replay and snapshots
+whose output tail does not match their input offset, and exits with 1 if it
+finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
 should have caught up. It needs only read grants.
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in

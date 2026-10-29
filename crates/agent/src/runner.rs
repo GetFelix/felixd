@@ -297,6 +297,9 @@ impl Steps<'_> {
     }
 
     async fn snapshot(&mut self, input_offset: u64) -> Result<()> {
+        if faults::skip_snapshot() {
+            return Ok(());
+        }
         faults::before_snapshot();
         if !self.fence.holds() {
             return Err(LostLease.into());
@@ -337,7 +340,7 @@ impl Written<'_> {
                 .read_page(self.stream, self.next, self.end)
                 .await?;
             self.page.extend(records);
-            self.next = if after > self.next { after } else { self.end };
+            self.next = after;
         }
         let found = self.page.pop_front();
         let offset = found.as_ref().map_or(self.end, |r| r.offset);

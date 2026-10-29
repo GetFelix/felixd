@@ -287,6 +287,16 @@ wrong, or the broker expires the lease early, fencing (below) still keeps the
 output correct. The lease only decides who should run; it is not what keeps
 the output correct.
 
+Lease exclusivity rests on the clock of the broker leading the `leases`
+shard. That leader decides when a TTL has passed and writes the expiry, and an
+expiry is permanent once written: a leader whose clock jumps forward expires
+leases early, and a later fix to the clock does not bring them back (Felix
+`docs/cache-on-log.md`, the expiry pass under "TTL"). A leader change can move
+the decision to a broker whose clock disagrees. So two agents can each believe
+they hold the same workload for a while. That never makes the output wrong,
+because output safety rests on the `publish_if` fence and the epochs below,
+not on the lease. A wrong clock costs duplicate work and refused writes.
+
 An agent never adopts a lease it finds under its own name. A restarted agent
 waits for its old leases to expire, so two processes configured with the same
 node id can't both believe they hold a workload. On a clean shutdown an agent
@@ -372,11 +382,18 @@ While it is replaying inputs before `k`, the owner takes no snapshot. The
 output stream's tail is ahead of the workload's state then, so a snapshot
 would claim outputs it doesn't cover, and an owner that crashed after writing
 it would resume past them and write them again.
+`a_snapshot_is_not_taken_while_replaying` in `tests/restart.rs` covers it: a
+first owner writes 100 outputs and no snapshot (`skip-snapshots`), a second
+replays them all and crashes after its first snapshot, and a third must
+produce the rest exactly once.
 
 Felix drops records for a slow subscriber by default, and a jump in offsets is
 how that shows. Offsets that hold no event also jump, so when the next input
 offset is past the expected one the owner reads the range in between and runs
-whatever records it finds first. It never steps past a missing record.
+whatever records it finds first. It never steps past a missing record. A
+read stops short at what the broker has committed, which can lag the tail
+just after a leader change, so a page that makes no progress is read again
+and, after 20 s, is an error rather than an empty range.
 
 Some states can't be resumed from on any node, and the design is to refuse
 them rather than guess: a snapshot or output record that doesn't decode, a
@@ -402,21 +419,30 @@ replayed output. It reports:
 - a record out of order: one for an output before one already on the stream;
 - an epoch regression: a record whose epoch is below an earlier record's;
 - a record that differs from the replay, or that the replay did not produce,
-  or that does not decode.
+  or that does not decode;
+- a snapshot whose output tail does not split the output stream at its input
+  offset X: every record below the tail must be an output of an input up to
+  X, and every record from it on an output of a later input. A resume from
+  such a snapshot would skip or repeat outputs.
 
 With `--complete` it also reports outputs missing from the end of the stream.
 Without it those are not a finding, since a running workload may not have
-caught up. The output stream is read before the input, so every record it
-checks was produced from inputs the replay sees. A step that fails ends the
+caught up. The snapshot stream is read first, then the output stream, then
+the input, so every output a snapshot counts is on the stream read and every
+record checked was produced from inputs the replay sees. A step that fails ends the
 replay there, as it ends the workload on every node. Every failover test ends
 with `felixd check --complete`.
 
 The M1 failover test (`crates/felixd/tests/failover.rs`) runs Felix, three
 agents and six workloads on one input with a steady producer. Every 3 s it
-SIGKILLs the agent holding the most leases and starts it again 1.5 s later
-under the same node id, which then waits for its old leases to expire like
-any other node. Pull requests run the loop for 30 s and a nightly job for
-10 minutes. At the end every output stream must equal an uninterrupted run
+SIGKILLs the live agent holding the most leases and starts it again 1.5 s
+later under the same node id, which then waits for its old leases to expire
+like any other node. A lease can still name a node that already died, so
+only a live holder counts as a kill; with none, the loop looks again 250 ms
+later. Every other restart sets `crash-after-append-sent`, so that node also
+aborts by itself between sending an append and acting on its answer, and the
+loop starts it again. Pull requests run the loop for 30 s and a nightly job
+for 10 minutes. At the end every output stream must equal an uninterrupted run
 and pass `felixd check --complete`.
 
 ## Replay

@@ -5,8 +5,9 @@
 
 mod common;
 
-use common::{ID, INPUT, OUTPUT, TestFelix, assert_uninterrupted, test_felix};
+use common::{ID, INPUT, OUTPUT, SNAPSHOTS, TestFelix, assert_uninterrupted, test_felix};
 use felixd_core::output::{self, OutputHeader};
+use felixd_core::snapshot::{self, SnapshotHeader};
 
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
@@ -88,4 +89,18 @@ async fn a_stream_that_stops_short_fails_only_a_complete_check() {
     let (ok, report) = t.check(&["--id", ID]);
     assert!(ok, "{report}");
     assert_finds(&t, "behind: 2 outputs not written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_with_the_wrong_output_tail_fails_the_check() {
+    let Some(t) = test_felix().await else { return };
+    by_hand(&t, (0..5).map(|i| counted(i, 1))).await;
+    // Input 1's outputs end at offset 2, so a tail of 5 would skip three.
+    let wrong = SnapshotHeader {
+        input_offset: 1,
+        output_tail: 5,
+    };
+    t.publish_all(SNAPSHOTS, [snapshot::encode(wrong, &count(2))])
+        .await;
+    assert_finds(&t, "snapshot at offset 0 covers input 1 with output tail 5");
 }

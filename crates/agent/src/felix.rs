@@ -214,17 +214,23 @@ impl Felix {
         while next < end {
             let (page, after) = self.read_page(stream, next, end).await?;
             records.extend(page);
-            if after <= next {
-                break;
-            }
             next = after;
         }
         Ok(records)
     }
 
     /// One page of the records at offsets `from..end`, and the offset the
-    /// next page starts at.
+    /// next page starts at, which is past `from`. `from` must be below `end`.
     pub async fn read_page(
+        &self,
+        stream: &str,
+        from: u64,
+        end: u64,
+    ) -> Result<(Vec<StreamRecord>, u64)> {
+        advancing(stream, from, || self.read_one_page(stream, from, end)).await
+    }
+
+    async fn read_one_page(
         &self,
         stream: &str,
         from: u64,
@@ -282,6 +288,28 @@ impl Felix {
                 felix_client::CacheWatchFilter::Prefix(String::new()),
             )
             .await
+    }
+}
+
+/// Calls `page` until it gets past `from`. A page stops short at what the
+/// broker has committed, which can lag the tail a caller was given, for
+/// example just after a leader change. Returning that short page as the whole
+/// range would make the records past it look absent.
+async fn advancing<T, F, Fut>(stream: &str, from: u64, mut page: F) -> Result<(Vec<T>, u64)>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(Vec<T>, u64)>>,
+{
+    let deadline = tokio::time::Instant::now() + READY_WITHIN;
+    loop {
+        let (records, after) = page().await?;
+        if after > from {
+            return Ok((records, after));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("reading {stream} made no progress past offset {from}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

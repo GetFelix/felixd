@@ -3,6 +3,10 @@
 //!
 //! - `crash-before-snapshot=N`: abort the process just before its Nth snapshot.
 //! - `crash-after-snapshot=N`: abort it just after its Nth snapshot is written.
+//! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
+//!   a later owner has more than `snapshot_every` inputs to replay.
+//! - `crash-after-append-sent=N`: abort once the Nth output append has been
+//!   sent, before its answer is acted on. The write may have landed.
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
 //! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
@@ -29,6 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static APPENDS: AtomicU64 = AtomicU64::new(0);
+static SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(not(feature = "faults"))]
 fn fault(_name: &str) -> Option<u64> {
@@ -69,6 +74,22 @@ pub(crate) fn before_snapshot() {
 pub(crate) fn after_snapshot() {
     if fault("crash-after-snapshot") == Some(SNAPSHOTS.load(Ordering::Relaxed)) {
         crash("crash-after-snapshot");
+    }
+}
+
+/// Whether to leave out this snapshot.
+pub(crate) fn skip_snapshot() -> bool {
+    let skip = fault("skip-snapshots").unwrap_or(0);
+    SKIPPED
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < skip).then_some(n + 1)
+        })
+        .is_ok()
+}
+
+pub(crate) fn after_append_sent() {
+    if fault("crash-after-append-sent") == Some(APPENDS.load(Ordering::Relaxed)) {
+        crash("crash-after-append-sent");
     }
 }
 

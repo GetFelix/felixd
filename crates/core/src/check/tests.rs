@@ -197,3 +197,60 @@ fn findings_read_as_sentences() {
         "duplicate at offset 9: input 4 output 0 is already at offset 4"
     );
 }
+
+fn snap(input_offset: u64, output_tail: u64) -> Vec<u8> {
+    snapshot::encode(
+        SnapshotHeader {
+            input_offset,
+            output_tail,
+        },
+        b"state",
+    )
+}
+
+#[test]
+fn a_snapshot_tail_must_split_the_stream_at_its_input() {
+    // Inputs 0, 1, 3 and 4 have one output each; offset 2 is a gap.
+    let records: Vec<Vec<u8>> = [0, 1, 3, 4]
+        .iter()
+        .map(|&i| record(i, 0, 1, &[0]))
+        .collect();
+    let on_stream: Vec<(u64, &[u8])> = [0, 1, 3, 4]
+        .iter()
+        .zip(&records)
+        .map(|(&o, r)| (o, r.as_slice()))
+        .collect();
+    let good = [snap(1, 2), snap(1, 3), snap(2, 3), snap(4, 5), snap(0, 1)];
+    let bad = [snap(1, 4), snap(3, 3), snap(4, 3), snap(0, 0)];
+    let snapshots: Vec<(u64, &[u8])> = good
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i as u64, s.as_slice()))
+        .collect();
+    assert_eq!(check_snapshots(&snapshots, &on_stream, 5), vec![]);
+    for (i, s) in bad.iter().enumerate() {
+        let found = check_snapshots(&[(i as u64, s.as_slice())], &on_stream, 5);
+        assert!(
+            matches!(found.as_slice(), [Finding::SnapshotTail { .. }]),
+            "snapshot {i}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_tail_past_the_stream_is_a_finding() {
+    let r = record(0, 0, 1, &[0]);
+    let found = check_snapshots(&[(0, &snap(0, 2))], &[(0, &r)], 1);
+    assert_eq!(
+        found,
+        vec![Finding::SnapshotTail {
+            offset: 0,
+            header: SnapshotHeader {
+                input_offset: 0,
+                output_tail: 2
+            },
+            from: 1,
+            to: 1,
+        }]
+    );
+}
