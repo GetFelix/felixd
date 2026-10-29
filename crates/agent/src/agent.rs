@@ -29,6 +29,7 @@ use crate::lease::{self, Confirmer, Fence, Held};
 use crate::output::{Recorded, record_failure};
 use crate::runner::{Modules, NeedsOperator, Outcome, run_workload};
 use crate::settings::Settings;
+use crate::specs;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -410,6 +411,18 @@ async fn own(
     {
         needs_operator(&id, reason, &mut stop).await;
         return;
+    }
+    // Only a spec in the history runs, so check and replay see what ran.
+    while let Err(error) = specs::check_record(&node.felix, &id, &spec).await {
+        if let Some(reason) = error.downcast_ref::<NeedsOperator>() {
+            needs_operator(&id, reason, &mut stop).await;
+            return;
+        }
+        tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the spec record");
+        tokio::select! {
+            () = tokio::time::sleep(RETRY_DELAY) => {}
+            _ = stop.wait_for(|stop| *stop) => return,
+        }
     }
     loop {
         if !node.wait_for_chance(&id, &mut lease, &mut stop).await {

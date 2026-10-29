@@ -333,7 +333,8 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 
 | Resource | Kind | Key or name | Value | Written by |
 |---|---|---|---|---|
-| `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | today `felixd run`, the owner on failure; end state: admission writes specs ([Submitting work](#submitting-work)), the owner writes state |
+| `sys.specs` | stream, 1 shard, `Quorum` | | spec records: workload id and spec. A record's offset is its version, so the stream is every workload's spec history | today `felixd run`; end state: admission ([Submitting work](#submitting-work)) |
+| `workloads` | cache | workload id | the latest spec record's spec and offset, and the state (`running`, `stopped`, `failed`): module hash, input stream, output stream, snapshot interval, fuel and memory limits | today `felixd run`, the owner on failure; end state: admission writes specs, the owner writes state |
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
@@ -349,8 +350,8 @@ owner and `felixd check` pass over them, so only outputs reach `step`.
 Each output record carries a small header: the input offset that produced it,
 its index among that step's outputs, and the lease epoch of the owner that
 wrote it. The output stream also holds claim records, one per takeover, which
-carry only the new owner's epoch, and a failure record when the workload
-fails. Each snapshot carries the input offset it covers and the output tail
+carry the new owner's epoch and the `sys.specs` offset of the spec it runs,
+and a failure record when the workload fails. Each snapshot carries the input offset it covers and the output tail
 at that point.
 
 Today `felixd run` creates the workload's streams through the control plane's
@@ -358,15 +359,23 @@ REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
 create streams. The end state moves that to admission ([Submitting
 work](#submitting-work)).
 
-Running `felixd run` again for an existing id replaces the spec. A running
-workload whose spec changes restarts under the new one: the agent stops the
-task, releases the lease and claims it again, and the next owner resumes from
-the streams. A new module or input stream would not reproduce what the
-streams already hold, and the next resume would find them diverged, so
-`felixd run` refuses that change once the output or snapshot stream has a
-record. New code goes under a new id. A spec written to the cache by other
-means is not checked, and a workload resumed under such a change fails with
-the divergence.
+Running `felixd run` again for an existing id appends a new spec record and
+points `workloads` at it. The cache only moves forward: a write naming an
+older record than the one there is dropped. Agents run a spec only if its
+record says the same thing as the cache value, so everything that ran is in
+the history. A running workload whose spec changes restarts under the new
+one: the agent stops the task, releases the lease and claims it again, and
+the next owner's claim names the new record. A new module or input stream
+would not reproduce what the streams already hold, so `felixd run` refuses
+that change once the output or snapshot stream has a record, and an agent
+refuses to run a spec whose module or input differ from the spec the output
+stream's first claim names. It checks before its claim and again after it,
+when no claim under an older spec can still land first, and leaves the
+workload to an operator. New code goes under a new id.
+
+`felixd check` and `felixd replay --diff` judge each input under the limits of
+the spec whose claim covers it: a claim's spec applies from the input after
+the last output before it.
 
 ## Leases and failure detection
 
@@ -713,12 +722,12 @@ streams too (Felix #1621). `felixd check` has the same gap.
 
 | Principal | May |
 |---|---|
-| Node | Read `workloads`, `modules` and `epochs`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out` and `wl.*.snap` |
-| Operator (`felixd run`) | Read and write `workloads`; write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
+| Node | Read `workloads`, `sys.specs`, `modules` and `epochs`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out` and `wl.*.snap` |
+| Operator (`felixd run`) | Read and write `workloads`; read `sys.specs` and append to it (a conditional write); write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
 | Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `sys.specs`. Nothing else |
 | Admission | Read `sys.intake` and `modules`; write `sys.specs`; hold the stream-creation credential |
 | Operator (`felixd init`) | Write admission's own spec directly. The one direct write left |
-| Viewer (`replay`, `check`; `ps` once built) | Read everything, write nothing |
+| Viewer (`replay`, `check`; `ps` once built) | Read everything, including `sys.specs`, write nothing |
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
 but a compromised node could write garbage. Per-lease tokens close that
@@ -972,6 +981,13 @@ A name is resolved once, when a spec is written, and the result is recorded
   value, so `check` and replay judge each output under the spec that applied.
   `felixd ps` shows the bindings.
 
+Built: spec records on `sys.specs`, claims that name the record they run,
+and `check` and `replay --diff` judging each input under the limits that
+applied ([Data model](#data-model)). The offset a spec takes effect at is
+where its owner's claim lands, not one the submitter states. Not built:
+incarnations, which Felix does not expose to clients yet, dropping `output`
+from the spec, and module changes at an offset (#64).
+
 Plan 9 resolved a name at every `open`, so a rebind silently changed what a
 program read. Felix fixed the same class of bug for forwards in #1324.
 
@@ -1073,7 +1089,9 @@ now:
 
 1. **Spec history is records first** (#72). Versioned spec records take effect
    at a stated input offset ([Names and incarnations](#names-and-incarnations)).
-   Agents act on spec records, not on the latest `workloads` value.
+   Agents act on spec records, not on the latest `workloads` value. Built:
+   `felixd run` appends to `sys.specs` and agents run only what a record
+   says; `workloads` is still how they learn of a change.
 2. **Requests go to an intake stream, `sys.intake`.** A request carries the
    module hash, the spec and the requester, taken from the authenticated
    publisher and never from the payload. Changes, stops and removals of

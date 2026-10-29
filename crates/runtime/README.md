@@ -12,7 +12,8 @@ depend on it. `felixd-testkit` is a dev-dependency, for building the example wor
 - `Runtime::new()` makes an engine. `Runtime::load(bytes, limits)` compiles and instantiates a
   component; `compile` and `instantiate` do the two steps apart, so one `Compiled` serves many
   instances.
-- `Workload` has `step(Input)`, `snapshot()`, `restore(&[&[u8]])` and `inspect()`. A step returns
+- `Workload` has `step(Input)`, `snapshot()`, `restore(&[&[u8]])` and `inspect()`, and
+  `set_limits` for a replay that crosses a spec change. A step returns
   `Stepped::Outputs` or `Stepped::Rejected`.
 - A call that cannot go on returns `WorkloadError::Failed(Failure)`, with a `FailureKind` of
   `OutOfFuel`, `Trap`, `Poison` or `Contract`. After that the workload is never called again.

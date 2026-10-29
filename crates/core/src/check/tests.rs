@@ -458,3 +458,26 @@ fn manifests_are_checked_and_chunks_are_not_snapshots() {
         [Finding::SnapshotTail { offset: 1, .. }]
     ));
 }
+
+#[test]
+fn each_input_runs_under_the_spec_of_the_claim_before_it() {
+    let at = |input: u64, epoch: u64| output::encode(header(input, 0), epoch, b"x");
+    let records = [
+        output::encode_claim(1, ""),
+        at(0, 1),
+        output::encode_claim_under(2, 10, "a"),
+        at(1, 2),
+        at(2, 2),
+        // A claim under the same spec changes nothing.
+        output::encode_claim_under(3, 10, "b"),
+        at(3, 3),
+        // Two changes with no output between: the later one runs from 4.
+        output::encode_claim_under(4, 11, "a"),
+        output::encode_claim_under(5, 12, "b"),
+        at(4, 5),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice)),
+        [(1, 10), (4, 12)]
+    );
+}

@@ -7,12 +7,14 @@ use felixd_core::check::{self, Expected, Finding};
 use felixd_core::output::{self, OutputHeader};
 
 use crate::input::{self, StepInput};
-use felixd_core::spec::WorkloadSpec;
+use felix_client::StreamRecord;
+use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
 use crate::felix::Felix;
 use crate::settings::Settings;
+use crate::specs;
 
 /// What the check found for one workload.
 #[derive(Debug)]
@@ -65,8 +67,15 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let output_tail = felix.tail(&spec.output).await?;
     let records = felix.read_range(&spec.output, 0, output_tail).await?;
     let input_tail = felix.tail(&spec.input).await?;
+    let mut limits = limits_applied(felix, id, &spec, &records)
+        .await?
+        .into_iter()
+        .peekable();
     let mut expected = Vec::new();
     for record in felix.read_range(&spec.input, 0, input_tail).await? {
+        while let Some((_, applied)) = limits.next_if(|(from, _)| *from <= record.offset) {
+            workload.set_limits(applied);
+        }
         // An input that cannot be read or a step that fails ends the workload
         // there, on every node.
         let Ok(read) = StepInput::read(
@@ -110,6 +119,27 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
             .count(),
         findings,
     })
+}
+
+/// The limits each input ran under, as `(first input, limits)`, from the
+/// spec records the claims on the output stream name. Each output is then
+/// judged under the spec that applied when it was written, not the latest.
+/// A claim whose spec has another module or input never ran anything, since
+/// its owner refuses it, and is passed over.
+pub(crate) async fn limits_applied(
+    felix: &Felix,
+    id: &str,
+    spec: &WorkloadSpec,
+    records: &[StreamRecord],
+) -> Result<Vec<(u64, Limits)>> {
+    let mut applied = Vec::new();
+    for (from, offset) in check::specs_applied(records.iter().map(|r| r.payload.as_ref())) {
+        let ran = specs::read(felix, id, offset).await?;
+        if ran.conflicts_with_history(spec).is_none() {
+            applied.push((from, ran.limits));
+        }
+    }
+    Ok(applied)
 }
 
 /// The module `hash` from the `modules` cache.

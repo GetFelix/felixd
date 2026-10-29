@@ -1,4 +1,6 @@
-//! The value in the `workloads` cache: what should run.
+//! Specs: what should run. Each spec is a record on `sys.specs`, and the
+//! `workloads` cache holds the latest one per workload with the offset of
+//! the record it came from, plus the state an owner writes.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,10 @@ pub struct WorkloadSpec {
     /// Why the workload failed. Set with [`WorkloadState::Failed`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// The `sys.specs` offset of the spec record this cache value comes from.
+    /// Only the cache value has it. An agent runs a spec only with its record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<u64>,
 }
 
 /// What a workload may use.
@@ -94,12 +100,101 @@ impl WorkloadSpec {
         }
     }
 
+    /// Whether the cache value `self` says what `record` does. The state may
+    /// have moved on to `failed`, which only the cache holds.
+    pub fn matches_record(&self, record: &WorkloadSpec) -> bool {
+        let mut cached = self.clone();
+        if cached.state == WorkloadState::Failed {
+            cached.state = WorkloadState::Running;
+        }
+        cached.failure = None;
+        cached.record = None;
+        cached == *record
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("a spec is always valid JSON")
     }
 
     pub fn decode(bytes: &[u8]) -> Result<WorkloadSpec, DecodeError> {
         serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
+    }
+}
+
+/// The spec record format this build writes and reads.
+const RECORD_FORMAT: u32 = 1;
+
+/// A record on `sys.specs`: one version of one workload's spec. Its offset on
+/// the stream is its version, so later records supersede earlier ones and the
+/// stream is the spec history. Its state is `running` or `stopped`; `failed`
+/// is an observation and stays in the cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecRecord {
+    pub format: u32,
+    pub id: String,
+    pub spec: WorkloadSpec,
+}
+
+impl SpecRecord {
+    pub fn new(id: &str, spec: WorkloadSpec) -> SpecRecord {
+        SpecRecord {
+            format: RECORD_FORMAT,
+            id: id.to_owned(),
+            spec,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("a spec record is always valid JSON")
+    }
+
+    /// Reads a spec record. One of a format this build does not know is
+    /// refused rather than misread.
+    pub fn decode(bytes: &[u8]) -> Result<SpecRecord, DecodeError> {
+        let record: SpecRecord =
+            serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))?;
+        if record.format != RECORD_FORMAT {
+            return Err(DecodeError::UnknownVersion(
+                u8::try_from(record.format).unwrap_or(u8::MAX),
+            ));
+        }
+        Ok(record)
+    }
+}
+
+/// One workload's spec records in stream order, as `(offset, spec)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct History(Vec<(u64, WorkloadSpec)>);
+
+impl History {
+    /// Folds the records of `sys.specs`, `(offset, bytes)` in stream order,
+    /// into workload `id`'s history. Records of other workloads are passed
+    /// over; a record that does not decode is an error, since it may be one
+    /// of `id`'s.
+    pub fn read<'a>(
+        id: &str,
+        records: impl IntoIterator<Item = (u64, &'a [u8])>,
+    ) -> Result<History, DecodeError> {
+        let mut history = Vec::new();
+        for (offset, bytes) in records {
+            let record = SpecRecord::decode(bytes)?;
+            if record.id == id {
+                history.push((offset, record.spec));
+            }
+        }
+        Ok(History(history))
+    }
+
+    pub fn latest(&self) -> Option<&(u64, WorkloadSpec)> {
+        self.0.last()
+    }
+
+    /// The spec recorded at `offset`.
+    pub fn at(&self, offset: u64) -> Option<&WorkloadSpec> {
+        self.0
+            .iter()
+            .find(|(at, _)| *at == offset)
+            .map(|(_, spec)| spec)
     }
 }
 

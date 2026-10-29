@@ -128,8 +128,8 @@ impl<'a> OutputLog<'a> {
         }
     }
 
-    /// Claims the stream for this owner: appends a claim record with
-    /// `publish_if`, so any later append of a lower epoch is refused, and
+    /// Claims the stream for this owner: appends a claim record naming the
+    /// spec record it runs with `publish_if`, so any later append of a lower epoch is refused, and
     /// returns a log at the tail after it.
     ///
     /// `from` is the tail read with the epoch floor when the lease was
@@ -146,6 +146,7 @@ impl<'a> OutputLog<'a> {
         stream: &'a str,
         fence: &'a Fence,
         spec_version: u64,
+        spec_record: u64,
         from: &mut Option<u64>,
     ) -> Result<OutputLog<'a>> {
         let start = match *from {
@@ -165,7 +166,11 @@ impl<'a> OutputLog<'a> {
                 return Err(LostLease.into());
             }
             faults::before_claim();
-            let claim = vec![output::encode_claim(fence.epoch(), fence.node())];
+            let claim = vec![output::encode_claim_under(
+                fence.epoch(),
+                spec_record,
+                fence.node(),
+            )];
             let sent = send(felix, stream, claim, log.tail, faults::Write::Claim).await;
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == log.tail => {
@@ -202,6 +207,7 @@ impl<'a> OutputLog<'a> {
                     == Record::Claim {
                         epoch: fence.epoch(),
                         node: fence.node().as_bytes(),
+                        spec: Some(spec_record),
                     };
             }
             log.tail = seen_tail;

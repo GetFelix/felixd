@@ -54,20 +54,44 @@ fn the_layout_is_fixed() {
 }
 
 #[test]
+fn a_claim_under_a_spec_names_it() {
+    let record = encode_claim_under(5, 3, "n");
+    assert_eq!(
+        record,
+        [4, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3, b'n']
+    );
+    assert_eq!(
+        decode(&record),
+        Ok(Record::Claim {
+            epoch: 5,
+            node: b"n",
+            spec: Some(3),
+        })
+    );
+    assert!(is_marker(&record));
+    // Version 3 never had it.
+    let mut old = record.clone();
+    old[0] = 3;
+    assert_eq!(decode(&old), Err(DecodeError::UnknownKind(4)));
+}
+
+#[test]
 fn a_claim_round_trips_and_holds_no_output() {
     let record = encode_claim(9, "");
     assert_eq!(
         decode(&record),
         Ok(Record::Claim {
             epoch: 9,
-            node: b""
+            node: b"",
+            spec: None,
         })
     );
     assert_eq!(
         decode(&encode_claim(9, "node-a")),
         Ok(Record::Claim {
             epoch: 9,
-            node: b"node-a"
+            node: b"node-a",
+            spec: None,
         })
     );
     assert_eq!(decode(&record).unwrap().epoch(), 9);
@@ -88,7 +112,8 @@ fn a_version_3_record_reads_as_out_with_no_key() {
         decode(&claim),
         Ok(Record::Claim {
             epoch: 5,
-            node: b"n"
+            node: b"n",
+            spec: None,
         })
     );
     let failure = [3, 2, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, b'r'];
@@ -309,8 +334,8 @@ fn an_unknown_version_or_kind_is_refused() {
     record[0] = 5;
     assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(5)));
     record[0] = 4;
-    record[1] = 4;
-    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(4)));
+    record[1] = 5;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(5)));
 }
 
 #[test]

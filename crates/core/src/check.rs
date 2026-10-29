@@ -376,5 +376,41 @@ impl fmt::Display for Finding {
     }
 }
 
+/// Which spec record each input ran under, from the claims on an output
+/// stream in stream order: `(first input, spec offset)` pairs, ascending.
+/// A claim's spec applies from the input after the last one with an output
+/// before it, since the owner steps everything after that under its spec and
+/// only checks what it steps again below. Inputs before the first claim that
+/// names a spec are not covered. Records that do not decode are passed over;
+/// [`check`] reports them.
+pub fn specs_applied<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<(u64, u64)> {
+    let mut applied: Vec<(u64, u64)> = Vec::new();
+    let mut next_input = 0;
+    for record in records {
+        match output::decode(record) {
+            Ok(Record::Claim {
+                spec: Some(spec), ..
+            }) => {
+                if applied.last().is_some_and(|(_, s)| *s == spec) {
+                    continue;
+                }
+                // Two claims with no output between them: the later one ran
+                // from the same input.
+                if applied.last().is_some_and(|(from, _)| *from == next_input) {
+                    applied.pop();
+                }
+                applied.push((next_input, spec));
+            }
+            Ok(found) => {
+                if let Some(written) = found.written() {
+                    next_input = next_input.max(written.header.input_offset + 1);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    applied
+}
+
 #[cfg(test)]
 mod tests;

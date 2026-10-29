@@ -170,8 +170,10 @@ they are several reads after the claim has won.
   written. The epoch floor reads it like any other record, so later claims stay above it.
 - Stale cache reads of the spec version. The code reads again when it sees a version below the
   record's.
-- Several inputs, pipelines, spec edits, `felixd run`'s history check, `felixd check` itself, and
-  drain.
+- Several inputs, pipelines, spec edits and spec records, `felixd run`'s history check, the
+  agent's refusal of a spec whose module or input differ from the first claim's, `felixd check`
+  itself, and drain. The refusal releases the lease without writing, like the 0.1-module check
+  after a claim, so it adds no new step to the model.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.

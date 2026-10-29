@@ -294,8 +294,8 @@ build has no effect executors.
 
 ## Not in this version
 
-- Module upgrades at a recorded input offset (#64's last item). They need
-  spec history as records (#72) first.
+- Module upgrades at a recorded input offset (#64's last item). Spec history
+  is now records on `sys.specs` (#72); the upgrade itself is not built.
 - Several inputs (#58). `source` already names which input a record came
   from.
 - Typed spec and failure records (#73). The error classes here are the ones

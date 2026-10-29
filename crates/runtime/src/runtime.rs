@@ -121,17 +121,20 @@ impl Runtime {
     }
 
     pub(crate) fn store(&self, limits: Limits) -> Store<StoreLimits> {
-        let store_limits = StoreLimitsBuilder::new()
-            .memory_size(usize::try_from(limits.max_memory_bytes).unwrap_or(usize::MAX))
-            .table_elements(MAX_TABLE_ELEMENTS)
-            .instances(MAX_INSTANCES)
-            .tables(MAX_TABLES)
-            .memories(MAX_MEMORIES)
-            .build();
-        let mut store = Store::new(&self.engine, store_limits);
+        let mut store = Store::new(&self.engine, store_limits(limits));
         store.limiter(|limits| limits);
         store
     }
+}
+
+pub(crate) fn store_limits(limits: Limits) -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(usize::try_from(limits.max_memory_bytes).unwrap_or(usize::MAX))
+        .table_elements(MAX_TABLE_ELEMENTS)
+        .instances(MAX_INSTANCES)
+        .tables(MAX_TABLES)
+        .memories(MAX_MEMORIES)
+        .build()
 }
 
 #[cfg(test)]

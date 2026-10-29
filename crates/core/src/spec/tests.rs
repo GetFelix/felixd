@@ -14,6 +14,7 @@ fn spec() -> WorkloadSpec {
             snapshot_fuel: 5000,
         },
         failure: None,
+        record: None,
     }
 }
 
@@ -86,4 +87,53 @@ fn only_a_new_module_or_input_conflicts_with_written_history() {
     let mut next = spec();
     next.input = "other".into();
     assert!(old.conflicts_with_history(&next).is_some());
+}
+
+#[test]
+fn a_spec_record_round_trips_and_an_unknown_format_is_refused() {
+    let record = SpecRecord::new("temp", spec());
+    assert_eq!(SpecRecord::decode(&record.encode()), Ok(record.clone()));
+    let mut newer = record;
+    newer.format = 2;
+    assert_eq!(
+        SpecRecord::decode(&newer.encode()),
+        Err(DecodeError::UnknownVersion(2))
+    );
+}
+
+#[test]
+fn history_keeps_one_workloads_records_in_order() {
+    let mut second = spec();
+    second.limits.fuel_per_call = 7;
+    let records = [
+        (0, SpecRecord::new("temp", spec()).encode()),
+        (1, SpecRecord::new("other", second.clone()).encode()),
+        (2, SpecRecord::new("temp", second.clone()).encode()),
+    ];
+    let history = History::read("temp", records.iter().map(|(o, r)| (*o, r.as_slice()))).unwrap();
+    assert_eq!(history.latest(), Some(&(2, second.clone())));
+    assert_eq!(history.at(0), Some(&spec()));
+    assert_eq!(history.at(1), None);
+    let bad = [(0, b"{".to_vec())];
+    assert!(History::read("temp", bad.iter().map(|(o, r)| (*o, r.as_slice()))).is_err());
+}
+
+#[test]
+fn a_cache_value_matches_its_record_whatever_its_state() {
+    let record = spec();
+    let mut cached = WorkloadSpec {
+        record: Some(4),
+        ..spec()
+    };
+    assert!(cached.matches_record(&record));
+    cached.state = WorkloadState::Failed;
+    cached.failure = Some("trap".into());
+    assert!(cached.matches_record(&record));
+    cached.limits.fuel_per_call = 1;
+    assert!(!cached.matches_record(&record));
+    let stopped = WorkloadSpec {
+        state: WorkloadState::Stopped,
+        ..spec()
+    };
+    assert!(!stopped.matches_record(&record));
 }

@@ -123,7 +123,7 @@ impl Recorded {
         let mut recorded = Recorded::default();
         for record in records {
             let decoded = output::decode(record)?;
-            if let Record::Claim { epoch, node } = decoded
+            if let Record::Claim { epoch, node, .. } = decoded
                 && !node.is_empty()
             {
                 let node = String::from_utf8_lossy(node).into_owned();
