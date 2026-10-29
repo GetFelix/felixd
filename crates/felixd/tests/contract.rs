@@ -391,6 +391,8 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_contract_01_module_found_after_the_claim_is_left_for_an_operator() {
     let Some(t) = test_felix().await else { return };
+    // Another workload, so the caches exist.
+    t.submit_as("other", "counter", &[]).await;
     let old = felixd_testkit::contract_01_component();
     let hash = module::hash(&old);
     let kind = StreamKind {
