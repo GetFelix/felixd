@@ -671,12 +671,16 @@ and pass `felixd check --complete`.
 
 ## Replay
 
-`felixd replay <workload> --to <offset | time>`:
+`felixd replay --id <workload> --to <offset | time>`:
 
-1. Turns a time into an input offset with `offset_for_time`.
-2. Picks the latest snapshot at or before that offset and restores it in a
-   local runtime.
-3. Range-reads inputs up to the target, runs `step`, and prints `inspect()`.
+1. Turns a time into an input offset with `offset_for_time`: the state as of a
+   time includes every input appended before it. An offset includes that
+   input.
+2. Picks the snapshot with the highest input offset at or before that point
+   and restores it on a fresh instance, under the limits in the spec. Without
+   one it starts from the initial state.
+3. Range-reads the inputs after the snapshot up to the target, runs `step`, and
+   prints `inspect()`.
    With `--diff`, it compares the outputs it produced with the ones on the
    stream, which checks determinism.
 
@@ -684,8 +688,10 @@ The same comparison with a different module (`--module <hash>`) checks an
 upgrade before it goes live: run the new version over recorded inputs and
 see where its outputs differ (#29).
 
-Replay needs no lease and writes nothing, so it can run anywhere with read
-grants.
+Replay needs no lease and writes nothing. It should run anywhere with read
+grants, but it reads the input and snapshot streams' tails, and Felix reports a
+tail only to a conditional write, so for now it needs publish grants on those
+streams too (Felix #1621). `felixd check` has the same gap.
 
 ## Grants
 

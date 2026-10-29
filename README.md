@@ -74,7 +74,14 @@ order, epoch regressions, outputs that differ from the replay and snapshots
 whose output tail does not match their input offset, and exits with 1 if it
 finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
-should have caught up. It needs only read grants.
+should have caught up. It writes nothing.
+`felixd replay --id counter --to 41` rebuilds the workload's state after
+input 41, and `--to 2026-10-29T14:02:00Z` its state after every input appended
+before that time. It restores the nearest snapshot at or before that point on a
+fresh instance, runs the inputs after it and prints what the workload's
+`inspect` returns. It writes nothing, but until Felix can report a stream's
+tail to a reader ([Felix #1621](https://github.com/GetFelix/felix/issues/1621))
+it needs publish grants on the input and snapshot streams, as `felixd check` does.
 `felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
 workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input

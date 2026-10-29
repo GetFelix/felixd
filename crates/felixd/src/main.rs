@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::agent::AgentConfig;
 use felixd_agent::check::check;
+use felixd_agent::replay::{Target, replay};
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
@@ -64,6 +65,20 @@ enum Command {
         /// workloads should have caught up with their input.
         #[arg(long)]
         complete: bool,
+    },
+    /// Rebuild a workload's state as of an input offset or a time and print
+    /// what its `inspect` returns. Writes nothing.
+    Replay {
+        #[command(flatten)]
+        connection: Connection,
+        /// The workload to replay.
+        #[arg(long)]
+        id: String,
+        /// An input offset, for the state after that input, or an RFC 3339
+        /// time such as 2026-10-29T14:02:00Z, for the state after every input
+        /// appended before it.
+        #[arg(long, value_parser = parse_target)]
+        to: Target,
     },
     /// Submit a workload: store its module, create its streams and start it.
     Run {
@@ -151,6 +166,19 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Replay { connection, id, to } => {
+            let replayed = replay(&connection.settings()?, &id, to).await?;
+            let from = match replayed.restored {
+                Some(offset) => format!("the snapshot of input {offset}"),
+                None => "the initial state".to_owned(),
+            };
+            eprintln!(
+                "from {from}, ran {} more of the inputs below {}",
+                replayed.steps, replayed.end
+            );
+            println!("{}", replayed.state);
+            Ok(())
+        }
         Command::Run {
             connection,
             id,
@@ -177,6 +205,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn parse_target(to: &str) -> Result<Target, String> {
+    if let Ok(offset) = to.parse() {
+        return Ok(Target::Offset(offset));
+    }
+    let at = time::OffsetDateTime::parse(to, &time::format_description::well_known::Rfc3339)
+        .map_err(|e| format!("neither an offset nor an RFC 3339 time: {e}"))?;
+    let micros = at.unix_timestamp_nanos() / 1000;
+    u64::try_from(micros)
+        .map(Target::Time)
+        .map_err(|_| "the time is before 1970".to_owned())
 }
 
 fn default_node_id() -> String {
