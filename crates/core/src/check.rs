@@ -12,6 +12,7 @@ use std::fmt;
 
 use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::{self, SnapshotHeader};
+use crate::spec::{Limits, WorkloadSpec};
 
 /// One output or rejection a replay produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,6 +416,44 @@ pub fn specs_applied<'a>(
         }
     }
     applied
+}
+
+/// What a check or replay of an output stream runs: the spec it was written
+/// under, which is the first claim's when that names one and `cached`, the
+/// `workloads` value, otherwise; and the limits each input ran under, as
+/// `(first input, limits)`. `claimed` holds the spec record of every spec
+/// the claims name ([`specs_claimed`]). A claim whose spec has another module
+/// or input than the first claim's was refused by its owner and is passed
+/// over, so a refused later spec never decides the module or the limits.
+pub fn judged_under<'a, R>(
+    cached: &WorkloadSpec,
+    claimed: &HashMap<u64, WorkloadSpec>,
+    records: R,
+) -> (WorkloadSpec, Vec<(u64, Limits)>)
+where
+    R: IntoIterator<Item = &'a [u8]> + Clone,
+{
+    let first = records
+        .clone()
+        .into_iter()
+        .find_map(|r| output::decode(r).ok());
+    let lineage = match first {
+        Some(Record::Claim {
+            spec: Some(spec), ..
+        }) => claimed.get(&spec).cloned(),
+        _ => None,
+    }
+    .unwrap_or_else(|| cached.clone());
+    let ran = |spec: u64| {
+        claimed
+            .get(&spec)
+            .is_some_and(|s| s.conflicts_with_history(&lineage).is_none())
+    };
+    let limits = specs_applied(records, ran)
+        .into_iter()
+        .map(|(from, spec)| (from, claimed[&spec].limits))
+        .collect();
+    (lineage, limits)
 }
 
 /// Every spec the claims on an output stream name, in stream order, once each.

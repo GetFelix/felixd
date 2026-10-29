@@ -54,11 +54,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = specs::lineage(felix, id, WorkloadSpec::decode(&spec)?).await?;
-    let bytes = module_bytes(felix, &spec.module).await?;
-    let mut workload = runtime
-        .load(&bytes, spec.limits)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cached = WorkloadSpec::decode(&spec)?;
 
     // Snapshots first, so every output a snapshot counts is on the stream when
     // it is read. Then the output: anything written after this is checked
@@ -66,13 +62,17 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let snapshots = felix.read_range(&snap_stream, 0, snap_tail).await?;
-    let output_tail = felix.tail(&spec.output).await?;
-    let records = felix.read_range(&spec.output, 0, output_tail).await?;
+    let output_tail = felix.tail(&cached.output).await?;
+    let records = felix.read_range(&cached.output, 0, output_tail).await?;
+    // The module, input and limits the stream was written under, not those
+    // of a later spec its owner refused.
+    let (spec, limits) = judged(felix, id, &cached, &records).await?;
+    let mut limits = limits.into_iter().peekable();
+    let bytes = module_bytes(felix, &spec.module).await?;
+    let mut workload = runtime
+        .load(&bytes, spec.limits)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let input_tail = felix.tail(&spec.input).await?;
-    let mut limits = limits_applied(felix, id, &spec, &records)
-        .await?
-        .into_iter()
-        .peekable();
     let mut expected = Vec::new();
     for record in felix.read_range(&spec.input, 0, input_tail).await? {
         while let Some((_, applied)) = limits.next_if(|(from, _)| *from <= record.offset) {
@@ -123,32 +123,21 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     })
 }
 
-/// The limits each input ran under, as `(first input, limits)`, from the
-/// spec records the claims on the output stream name. Each output is then
-/// judged under the spec that applied when it was written, not the latest.
-/// `lineage` is the spec the stream was written under ([`specs::lineage`]):
-/// a claim whose spec has another module or input never ran anything, since
-/// its owner refused it, and is passed over.
-pub(crate) async fn limits_applied(
+/// The spec workload `id`'s output stream was written under and the limits
+/// each input ran under, from the spec records its claims name
+/// ([`check::judged_under`]). `cached` is the `workloads` value.
+pub(crate) async fn judged(
     felix: &Felix,
     id: &str,
-    lineage: &WorkloadSpec,
+    cached: &WorkloadSpec,
     records: &[StreamRecord],
-) -> Result<Vec<(u64, Limits)>> {
-    let payloads = || records.iter().map(|r| r.payload.as_ref());
-    let mut ran = HashMap::new();
-    for offset in check::specs_claimed(payloads()) {
-        let spec = specs::read(felix, id, offset).await?;
-        if spec.conflicts_with_history(lineage).is_none() {
-            ran.insert(offset, spec.limits);
-        }
+) -> Result<(WorkloadSpec, Vec<(u64, Limits)>)> {
+    let payloads = records.iter().map(|r| r.payload.as_ref());
+    let mut claimed = HashMap::new();
+    for offset in check::specs_claimed(payloads.clone()) {
+        claimed.insert(offset, specs::read(felix, id, offset).await?);
     }
-    Ok(
-        check::specs_applied(payloads(), |offset| ran.contains_key(&offset))
-            .into_iter()
-            .map(|(from, offset)| (from, ran[&offset]))
-            .collect(),
-    )
+    Ok(check::judged_under(cached, &claimed, payloads))
 }
 
 /// The module `hash` from the `modules` cache.

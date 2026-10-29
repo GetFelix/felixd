@@ -10,7 +10,7 @@ use felixd_core::snapshot::SnapshotHeader;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
-use crate::check::{limits_applied, module_bytes};
+use crate::check::{judged, module_bytes};
 use crate::felix::Felix;
 use crate::input::{self, StepInput};
 use crate::settings::Settings;
@@ -115,7 +115,7 @@ pub async fn diff(
         .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
-    let limits = limits_applied(&felix, id, &spec, &records).await?;
+    let (_, limits) = judged(&felix, id, &spec, &records).await?;
     let mut matched = 0;
     let divergence = run_inputs(
         &felix,
@@ -225,7 +225,7 @@ async fn start(
 /// Runs the inputs at offsets `from..end` through `workload`, handing each
 /// step's offset and outputs to `each`, and stops at the first step `each`
 /// returns something for. `limits` are `(first input, limits)` changes, as
-/// [`limits_applied`] gives them.
+/// [`judged`] gives them.
 async fn run_inputs<T>(
     felix: &Felix,
     spec: &WorkloadSpec,

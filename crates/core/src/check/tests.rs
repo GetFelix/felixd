@@ -515,3 +515,38 @@ fn a_claim_under_an_older_spec_than_one_claimed_is_passed_over() {
         [(0, 10), (1, 12)]
     );
 }
+
+/// rA's claim and outputs, then rB, a new module its owner refused after
+/// claiming. Every input is judged under rA, whatever the cache now says.
+#[test]
+fn a_refused_new_module_never_decides_what_a_check_runs() {
+    use crate::spec::{Limits, WorkloadSpec, WorkloadState};
+    let spec = |module: &str, fuel: u64| WorkloadSpec {
+        module: module.into(),
+        input: "in".into(),
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        state: WorkloadState::Running,
+        limits: Limits {
+            fuel_per_call: fuel,
+            ..Limits::default()
+        },
+        failure: None,
+        record: None,
+    };
+    let (a, b) = (spec("aa", 100), spec("bb", 1));
+    let claimed = HashMap::from([(0, a.clone()), (1, b.clone())]);
+    let records = [
+        output::encode_claim_under(1, 0, 0, "x"),
+        output::encode(header(0, 0), 1, b"x"),
+        output::encode_claim_under(2, 1, 1, "y"),
+    ];
+    let cached = WorkloadSpec {
+        record: Some(1),
+        ..b.clone()
+    };
+    let (lineage, limits) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.module, "aa");
+    assert_eq!(limits, [(0, a.limits)]);
+}
