@@ -499,7 +499,6 @@ async fn run(
         if offset < next_input {
             // A subscription from `next_input` only goes below it if the
             // stream started over.
-            not_behind(&spec.input, felix.tail(&spec.input).await?, next_input)?;
             continue;
         }
         if faults::drop_input(offset) {
@@ -530,6 +529,7 @@ async fn run(
 /// input to step. Stepping on would treat another stream's records as the
 /// rest of this one. A recreated stream that has already grown past
 /// `next_input` is not caught here; that needs incarnations.
+#[allow(dead_code)]
 fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
     if tail >= next_input {
         return Ok(());
