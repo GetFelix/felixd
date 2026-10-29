@@ -41,6 +41,8 @@ impl Felix {
         let config = ClientConfig {
             auth_tenant_id: Some(settings.tenant.clone()),
             auth_token: Some(settings.token.clone()),
+            // Time-based snapshot points come from input append times.
+            timestamps: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
         let client = ClusterClient::connect(&settings.brokers, &settings.server_name, config)

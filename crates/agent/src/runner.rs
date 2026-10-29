@@ -199,7 +199,8 @@ fn failed(error: WorkloadError) -> anyhow::Error {
 }
 
 /// Resumes the workload from Felix and runs it: for each input, `step`, append
-/// the outputs, and write a snapshot every `snapshot_every` inputs.
+/// the outputs, and write a snapshot every `snapshot_every` inputs and at the
+/// first input of every `snapshot_every_ms` interval.
 ///
 /// Nothing is written once `fence` stops holding.
 ///
@@ -299,6 +300,11 @@ async fn run(
             .map_err(failed)?;
     }
     tracing::info!(workload = id, from = resume.next_input, "resumed");
+    let skip_claims = names::is_output_stream(&spec.input);
+    let previous_stamp = match spec.snapshot_every_ms {
+        Some(_) => last_input_stamp(felix, &spec.input, resume.next_input, skip_claims).await?,
+        None => None,
+    };
 
     let mut steps = Steps {
         felix,
@@ -310,7 +316,7 @@ async fn run(
         workload,
         resume,
         log,
-        skip_claims: names::is_output_stream(&spec.input),
+        skip_claims,
         written: Written {
             felix,
             stream: &spec.output,
@@ -319,6 +325,7 @@ async fn run(
             page: VecDeque::new(),
         },
         since_snapshot: 0,
+        previous_stamp,
     };
     let mut events = felix.subscribe_from(&spec.input, resume.next_input).await?;
     let mut next_input = resume.next_input;
@@ -339,12 +346,17 @@ async fn run(
             // too, so read the gap back to see which it was.
             for record in felix.read_range(&spec.input, next_input, offset).await? {
                 if record.offset >= next_input {
-                    steps.step(record.offset, record.payload).await?;
+                    steps
+                        .step(record.offset, record.timestamp_micros, record.payload)
+                        .await?;
                     next_input = record.offset + 1;
                 }
             }
         }
-        steps.step(offset, event.payload).await?;
+        // A read stamps every record; an event without a stamp is from a
+        // broker that keeps none, whose reads say 0.
+        let stamp = event.timestamp_micros.unwrap_or(0);
+        steps.step(offset, stamp, event.payload).await?;
         next_input = offset + 1;
     }
 }
@@ -366,13 +378,20 @@ struct Steps<'a> {
     skip_claims: bool,
     written: Written<'a>,
     since_snapshot: u64,
+    /// The append time of the last input stepped, for time-based snapshots.
+    previous_stamp: Option<u64>,
 }
 
 impl Steps<'_> {
-    async fn step(&mut self, offset: u64, input: Bytes) -> Result<()> {
+    async fn step(&mut self, offset: u64, stamp: u64, input: Bytes) -> Result<()> {
         if self.skip_claims && output::is_marker(&input) {
             return Ok(());
         }
+        let interval = self
+            .spec
+            .snapshot_every_ms
+            .is_some_and(|ms| snapshot::starts_interval(ms, self.previous_stamp, stamp));
+        self.previous_stamp = Some(stamp);
         let outputs = blocking(&self.modules.calls, &mut self.workload, move |w| {
             w.step(&input)
         })
@@ -401,7 +420,8 @@ impl Steps<'_> {
         self.log.append(batch).await?;
 
         self.since_snapshot += 1;
-        if self.since_snapshot >= self.spec.snapshot_every && !self.resume.replaying(offset) {
+        let due = interval || self.since_snapshot >= self.spec.snapshot_every;
+        if due && !self.resume.replaying(offset) {
             self.snapshot(offset).await?;
             self.since_snapshot = 0;
         }
@@ -482,6 +502,30 @@ async fn spec_version(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Result<u6
     let current = WorkloadSpec::decode(&found.value).map_err(|e| anyhow::anyhow!("{e}"))?;
     anyhow::ensure!(current == *spec, "the spec has changed");
     Ok(found.version)
+}
+
+/// The append time of the last input below `next`, passing over claims when
+/// the input is another workload's output, so a resumed owner decides time
+/// snapshot points from the same previous input as an uninterrupted one.
+async fn last_input_stamp(
+    felix: &Felix,
+    stream: &str,
+    next: u64,
+    skip_claims: bool,
+) -> Result<Option<u64>> {
+    let mut end = next;
+    let mut window = 16;
+    while end > 0 {
+        let from = end.saturating_sub(window);
+        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+            if !(skip_claims && output::is_marker(&record.payload)) {
+                return Ok(Some(record.timestamp_micros));
+            }
+        }
+        end = from;
+        window = window.saturating_mul(8);
+    }
+    Ok(None)
 }
 
 /// The last output record below `tail` and where it is, passing over claims.

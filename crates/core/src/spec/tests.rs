@@ -6,6 +6,7 @@ fn spec() -> WorkloadSpec {
         input: "sensors".into(),
         output: "wl.temp.out".into(),
         snapshot_every: 50,
+        snapshot_every_ms: None,
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: 1000,

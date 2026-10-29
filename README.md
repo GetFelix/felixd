@@ -75,6 +75,10 @@ whose output tail does not match their input offset, and exits with 1 if it
 finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
 should have caught up. It needs only read grants.
+`felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
+workload every 1000 inputs and at the first input of each minute, by the
+inputs' append times on the broker, whichever comes first, so a slow input
+still gets snapshots and every node takes them at the same inputs.
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new

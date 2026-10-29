@@ -150,7 +150,8 @@ they are several reads after the claim has won.
   drift and node clock skew are inside that margin: no node compares its clock with another's.
 - **Determinism** is assumed: an input's outputs are a fixed function of its offset. Payloads are
   the `(input offset, index)` pair.
-- **Snapshots** are taken whenever an owner chooses, which covers every `snapshot_every`.
+- **Snapshots** are taken whenever an owner chooses, which covers `snapshot_every` and
+  `snapshot_every_ms`.
 - **Cache calls** are atomic and answered. Only stream appends are delayed, reordered, or left
   unanswered.
 

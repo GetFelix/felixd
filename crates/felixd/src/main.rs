@@ -78,6 +78,10 @@ enum Command {
         /// Write a snapshot after this many inputs.
         #[arg(long, default_value_t = felixd_core::spec::DEFAULT_SNAPSHOT_EVERY)]
         snapshot_every: u64,
+        /// Also write a snapshot at the first input of every interval this
+        /// many milliseconds long, by the inputs' append times.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        snapshot_every_ms: Option<u64>,
         /// Fuel given to each call into the workload. It is stored in the
         /// spec, so every node runs the workload under the same limit.
         #[arg(long, default_value_t = Limits::default().fuel_per_call)]
@@ -152,6 +156,7 @@ async fn main() -> Result<()> {
             id,
             input,
             snapshot_every,
+            snapshot_every_ms,
             fuel,
             max_memory,
             replication_factor,
@@ -161,6 +166,7 @@ async fn main() -> Result<()> {
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
             let mut submission = Submission::new(&id, bytes, &input);
             submission.snapshot_every = snapshot_every;
+            submission.snapshot_every_ms = snapshot_every_ms;
             submission.limits = Limits {
                 fuel_per_call: fuel,
                 max_memory_bytes: max_memory,
