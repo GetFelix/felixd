@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Model-check specs/Felixd.tla under each configuration beside it, and hold
-# each to the outcome registered below.
+# Model-check a module in specs/ under each configuration registered for it
+# below, and hold each to its outcome. `TLA_MODULE` picks the module:
+# Felixd (the default) or FelixdSpecs.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -8,11 +9,13 @@
 # that quietly became a pass would be a model that stopped saying anything.
 #
 # `scripts/check_tla.sh Felixd FelixdNoMarker` checks only those; a name not
-# registered below must pass. `TLC_WORKERS=4` caps TLC's worker threads.
+# registered below must pass. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
+# checks the spec history model. `TLC_WORKERS=4` caps TLC's worker threads.
 #
 # `TLC_SIMULATE=N` walks N random behaviours of up to `TLC_DEPTH` (default
 # 100) steps instead of checking every state. The nightly job runs
-# FelixdFull this way, as it is too large to check exhaustively.
+# FelixdFull and FelixdSpecsFull this way, as they are too large to check
+# exhaustively.
 #
 # Needs Java 11+ on PATH. The TLA+ tools are fetched once, pinned by release
 # and checksum, into target/tla/.
@@ -26,7 +29,7 @@ TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/${TLA_VERSION}/tla
 JAR="target/tla/tla2tools-${TLA_VERSION}.jar"
 SPEC_DIR="specs"
 
-expectations=(
+felixd_expectations=(
   "Felixd pass"
   "FelixdGen pass"
   "FelixdThree pass"
@@ -46,6 +49,28 @@ expectations=(
   "FelixdPartial pass"
   "FelixdPartialNoIndex violates NoPoison"
 )
+
+felixd_specs_expectations=(
+  "FelixdSpecs pass"
+  "FelixdSpecsStale pass"
+  "FelixdSpecsNoFloorCarry violates RanMonotone"
+  "FelixdSpecsNoRetryFloor violates FloorMonotone"
+  "FelixdSpecsNoNopFloor violates NoRunBelowFloor"
+  "FelixdSpecsNopFirst violates OutputLineage"
+  "FelixdSpecsNoHistory violates OutputLineage"
+  "FelixdSpecsNoPostCheck violates RanMonotone"
+  "FelixdSpecsCheckNopFirst violates CheckMatchesRun"
+  "FelixdSpecsCheckNoNopFloor violates CheckMatchesRun"
+  "FelixdSpecsCheckNoRefusal violates CheckMatchesRun"
+  "FelixdSpecsCheckNoLineage violates CheckMatchesRun"
+)
+
+MODULE="${TLA_MODULE:-Felixd}"
+case "$MODULE" in
+  Felixd) expectations=("${felixd_expectations[@]}") ;;
+  FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
+  *) echo "unknown TLA_MODULE: $MODULE" >&2; exit 1 ;;
+esac
 
 if [ ! -f "$JAR" ]; then
   mkdir -p "$(dirname "$JAR")"
@@ -86,7 +111,7 @@ for entry in "${selected[@]}"; do
   status=0
   output="$(cd "$SPEC_DIR" && java -XX:+UseParallelGC -jar "../$JAR" -metadir "$scratch" \
     ${mode[@]+"${mode[@]}"} -deadlock -workers "${TLC_WORKERS:-auto}" -checkpoint 0 \
-    -config "$cfg.cfg" Felixd.tla 2>&1)" || status=$?
+    -config "$cfg.cfg" "$MODULE.tla" 2>&1)" || status=$?
   rm -rf "$scratch"
   echo "$output" | grep -E "states generated|distinct states|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
   case "$expect" in

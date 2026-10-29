@@ -1,8 +1,8 @@
 name: TLA nightly
 
-# FelixdFull is too large to check every state, so this walks random
-# behaviours of it instead. The pull request suite checks the smaller
-# configurations exhaustively.
+# FelixdFull and FelixdSpecsFull are too large to check every state, so this
+# walks random behaviours of them instead. The pull request suite checks the
+# smaller configurations exhaustively.
 on:
   schedule:
     - cron: "43 8 * * *"
@@ -26,3 +26,5 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: scripts/check_tla.sh FelixdFull
+      - if: ${{ !cancelled() }}
+        run: TLA_MODULE=FelixdSpecs scripts/check_tla.sh FelixdSpecsFull
