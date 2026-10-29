@@ -333,11 +333,11 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 
 | Resource | Kind | Key or name | Value | Written by |
 |---|---|---|---|---|
-| `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | `felixd run`, the owner on failure |
+| `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | today `felixd run`, the owner on failure; end state: admission writes specs ([Submitting work](#submitting-work)), the owner writes state |
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
-| `modules` | cache | sha256 of the module | the module bytes | `felixd run` |
+| `modules` | cache | sha256 of the module | the module bytes | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
 
@@ -353,9 +353,10 @@ carry only the new owner's epoch, and a failure record when the workload
 fails. Each snapshot carries the input offset it covers and the output tail
 at that point.
 
-`felixd run` creates the workload's streams through the control plane's REST
-API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
-create streams.
+Today `felixd run` creates the workload's streams through the control plane's
+REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
+create streams. The end state moves that to admission ([Submitting
+work](#submitting-work)).
 
 Running `felixd run` again for an existing id replaces the spec. A running
 workload whose spec changes restarts under the new one: the agent stops the
@@ -713,7 +714,10 @@ streams too (Felix #1621). `felixd check` has the same gap.
 | Principal | May |
 |---|---|
 | Node | Read `workloads`, `modules` and `epochs`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out` and `wl.*.snap` |
-| Operator (`felixd run`) | Read and write `workloads`; write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane |
+| Operator (`felixd run`) | Read and write `workloads`; write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `sys.specs`. Nothing else |
+| Admission | Read `sys.intake` and `modules`; write `sys.specs`; hold the stream-creation credential |
+| Operator (`felixd init`) | Write admission's own spec directly. The one direct write left |
 | Viewer (`replay`, `check`; `ps` once built) | Read everything, write nothing |
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
@@ -892,7 +896,8 @@ Rules for the scheduler and the records it writes (#100):
   spec version and assignment offset they act on, so `ps` can show "running
   spec 7, assignment 912" and a lagging node is visible.
 - **One writer kind per system stream**, enforced by grants. Readers keep
-  refusing unknown versions.
+  refusing unknown versions. `sys.specs` is written only by admission
+  ([Submitting work](#submitting-work)).
 
 The scheduler reads a recorded stream of node facts (discovered, measured and
 operator-asserted, with asserted winning), not the `nodes` cache, so its view
@@ -1057,6 +1062,45 @@ Sources: Cox, Grosse, Pike, Presotto and Quinlan, "Security in Plan 9" (2002);
 the 9front dp9ik design notes and `authsrv(6)`; the SPIFFE specification;
 Gerber, PhD thesis (ETH, 2018), ch. 4; Baumann, "Fish in a Barrel" (2021).
 
+## Submitting work
+
+Decided. Today `felixd run` uploads the module, creates the streams with the
+control plane token and writes the spec into `workloads` last, so anyone who
+can submit work holds admin rights. Who may change system state is the part
+hardest to retrofit, and admission is where placement constraints, guarded
+operator actions (#101) and staged rollouts have to live, so the path is fixed
+now:
+
+1. **Spec history is records first** (#72). Versioned spec records take effect
+   at a stated input offset ([Names and incarnations](#names-and-incarnations)).
+   Agents act on spec records, not on the latest `workloads` value.
+2. **Requests go to an intake stream, `sys.intake`.** A request carries the
+   module hash, the spec and the requester, taken from the authenticated
+   publisher and never from the payload. Changes, stops and removals of
+   workloads are requests on the same stream.
+3. **Admission is an ordinary deterministic felixd workload**, like the
+   scheduler (#60). It reads `sys.intake`, checks the module is present and
+   within size and quota, and checks limits, grants, quotas and names. It
+   writes an accepted spec record or a rejection record with a reason code to
+   `sys.specs`, each naming the request it answers, so the submitter reads the
+   outcome back. Admission is the only writer of `sys.specs`, enforced by
+   grants ([Placement](#placement)). Because it replays, a policy change can be
+   checked against past requests.
+4. **Admission holds the stream-creation credential**, bound in its spec
+   ([Credentials](#credentials), #97). Agents never hold control-plane rights.
+5. **Modules stay in the `modules` cache**, uploaded by hash. The store is
+   content-addressed, so a submitter cannot overwrite another's module, and
+   binaries stay off the log. Admission verifies presence and size.
+6. **`felixd run` is a thin client:** it uploads the module, publishes the
+   request, waits for the accepted or rejected record and prints it.
+7. **Bootstrap.** `felixd init` writes admission's own spec directly with
+   operator credentials. That is the only direct write left and it is the
+   [bootstrap boundary](#native-programs-and-the-bootstrap-boundary) for
+   workload submission.
+
+Open: the quota model (per tenant, per submitter, or per namespace, and what
+it counts: workloads, module bytes, fuel and memory limits).
+
 ## Native programs and the bootstrap boundary
 
 Deterministic Wasm is not the only tier (#75). Programs that can't be made
@@ -1071,7 +1115,9 @@ run.
 
 Some things are not felixd workloads, because felixd depends on them: the Felix
 brokers and control plane, felixd itself, each node's credentials and the base
-image they come in. They are installed and upgraded with the image. felixd
+image they come in. Admission's own spec, written by `felixd init`, is the one
+workload that is not submitted through admission ([Submitting
+work](#submitting-work)). They are installed and upgraded with the image. felixd
 release binaries are built reproducibly and signed (#23).
 
 When a node can't reach Felix, it stops stepping every workload, native ones
@@ -1138,7 +1184,11 @@ Sources: Quinlan and Dorward, "Venti: a new approach to archival storage"
 
 ## Later
 
-Not designed yet. Each has an issue and a rough shape.
+Submission through intake and admission is decided and is built in the order
+of the issues under [Submitting work](#submitting-work): spec history (#72),
+intake and admission (#114), the thin `felixd run` (#115), `felixd init` (#116)
+and the grants wiring (#117). The items below are not designed yet. Each has an
+issue and a rough shape.
 
 - **Guarded operator actions and a small operator surface** (#101). Operator
   actions become typed records with a precondition and a dry-run, and are
