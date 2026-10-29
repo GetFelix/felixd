@@ -18,11 +18,12 @@ trap 'rm -rf "$work"' EXIT
 mkdir "$work/src"
 git -C "$repo" archive HEAD | tar -x -C "$work/src"
 
-# Embedded paths are the only machine-specific input left: the source tree,
+# Embedded paths are the only machine-specific input left: the build tree
+# (source and target dir; build scripts embed the latter through OUT_DIR),
 # the cargo registry and the toolchain's own sources.
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
-export RUSTFLAGS="--remap-path-prefix=$work/src=/build \
+export RUSTFLAGS="--remap-path-prefix=$work=/build \
 --remap-path-prefix=$cargo_home=/cargo \
 --remap-path-prefix=$rustup_home=/rustup"
 export CARGO_INCREMENTAL=0
