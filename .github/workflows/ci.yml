@@ -98,7 +98,13 @@ jobs:
         if: matrix.engine == 'podman'
         run: |
           podman --version
-          docker-compose version || docker compose version
+          # podman compose looks for a standalone docker-compose; the runner
+          # only has Docker's plugin build of it.
+          plugin=$(ls /usr/libexec/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose 2>/dev/null | head -n 1)
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$plugin" "$HOME/.local/bin/docker-compose"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/docker-compose" version
           systemctl --user enable --now podman.socket
           echo "DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock" >> "$GITHUB_ENV"
       - run: scripts/compose-failover.sh
