@@ -411,7 +411,8 @@ async fn a_snapshot_that_runs_out_of_fuel_is_skipped_and_the_workload_goes_on() 
     let before = snapshot_layout(&t).await;
     t.publish_all(INPUT, inputs(&["chunks:20000", "b", "c"]))
         .await;
-    produced(&t, OUTPUT, 4).await;
+    // "chunks" outputs nothing, so a, b and c make three.
+    produced(&t, OUTPUT, 3).await;
     assert_eq!(snapshot_layout(&t).await, before, "a snapshot was written");
     let spec = t.spec().await;
     assert_eq!(spec.state, WorkloadState::Running);
