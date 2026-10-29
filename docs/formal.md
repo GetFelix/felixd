@@ -42,14 +42,14 @@ since TLC stops at the first violation a worker finds.
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `Felixd` | pass | two inputs, two claims, a crash, a clock fault, a snapshot | 3,623,293 | 49 s |
-| `FelixdGen` | pass | one input, two claims, a generation-start record, a clock fault, a snapshot | 4,610,250 | 57 s |
-| `FelixdThree` | pass | one input, three claims, a clock fault, a snapshot | 7,177,211 | 88 s |
-| `FelixdIdle` | pass | an input with no output, then one with two | 1,146,649 | 15 s |
-| `FelixdRecreate` | pass | `epochs` recreated once, while every live epoch is on a record | 1,080,382 | 13 s |
+| `Felixd` | pass | two inputs, two claims, a crash, a clock fault, a snapshot | 3,636,093 | 50 s |
+| `FelixdGen` | pass | one input, two claims, a generation-start record, a clock fault, a snapshot | 4,628,610 | 57 s |
+| `FelixdThree` | pass | one input, three claims, a clock fault, a snapshot | 7,194,107 | 91 s |
+| `FelixdIdle` | pass | an input with no output, then one with two | 1,153,049 | 15 s |
+| `FelixdRecreate` | pass | `epochs` recreated once, while every live epoch is on a record | 1,084,222 | 14 s |
 | `FelixdFailWindow` | pass | one input, two claims, a clock fault anywhere in the failure path | 142,402 | 3 s |
 | `FelixdLive` | pass | no timing faults, local faults; liveness | 153,378 | 5 s |
-| `FelixdPartial` | pass | an input with no output, then a batch of two that may land in part, a crash, a clock fault | 5,367,584 | 77 s |
+| `FelixdPartial` | pass | an input with no output, then a batch of two that may land in part, a crash, a clock fault | 5,391,648 | 75 s |
 | `FelixdNoMarker` | `NoInterleave` | the claim record off | about 5,000 | under 1 s |
 | `FelixdNoFloor` | `EpochMonotone` | the epoch floor off | about 64,000 | under 1 s |
 | `FelixdNoConfirm` | `NoStaleFailure` | the `Confirmer` and the failure record off | about 2,000 | under 1 s |
@@ -105,14 +105,14 @@ Paths are from the repository root, as of the failure record (#70).
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:634-648` |
 | `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:596-598` |
 | `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:704-733`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
-| `FailSend`, `FailAck`, `FailRetry` | `record_failure`: `crates/agent/src/output.rs:43-94`; the record is `encode_failure`: `crates/core/src/output.rs:100-107` |
+| `FailSend`, `FailAck`, `FailRetry` | `record_failure`: `crates/agent/src/output.rs:43-94`; the record is `encode_failure`: `crates/core/src/output.rs:100-107`. A retry reads the tail again in `record_failure`'s loop, or confirms again in `mark_failed`'s once that loop gives up |
 | `Derive` | `write_failed`: `crates/agent/src/agent.rs:770-828`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:623-633` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
 | `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |
 | `LocalDeadline`, `StopLocal` | `Fence::holds` and the 2/3 TTL stop: `crates/agent/src/lease.rs:125-159`, `crates/core/src/lease.rs:87-93` |
 | `ClockFault` | a suspend (the monotonic clock stops) or the `leases` leader's clock jumping: design.md, Leases and failure detection |
 | `Expire` | the broker's TTL expiry (Felix `docs/cache-on-log.md`, TTL) |
-| `Deliver`, `Timeout` | `publish_if` landing at any later time, and an answer that never comes |
+| `Deliver`, `Timeout` | `publish_if` landing at any later time, and an answer that never comes; the `drop-*` and `lose-*-answer` test faults: `crates/agent/src/faults.rs` |
 | `DeliverPrefix` | a `Quorum` leader change that keeps part of a batch and answers with an error (Felix `docs/atomic-commit.md`, What atomic covers); the `append-prefix` test fault: `crates/agent/src/faults.rs` |
 | `GenStart` | Felix's generation-start record on a new shard leader |
 | `Crash`, `Restart` | an agent killed and started again under the same node id |
