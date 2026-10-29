@@ -7,6 +7,13 @@ fn out(input_offset: u64, index: u32) -> OutputHeader {
     }
 }
 
+fn at(offset: u64, input_offset: u64, index: u32) -> LastOutput {
+    LastOutput {
+        offset,
+        header: out(input_offset, index),
+    }
+}
+
 fn snap(input_offset: u64, output_tail: u64) -> SnapshotHeader {
     SnapshotHeader {
         input_offset,
@@ -31,7 +38,7 @@ fn a_new_workload_starts_from_input_zero() {
 fn no_snapshot_but_outputs_replays_from_zero_and_skips_them() {
     let resume = fold(Found {
         snapshot: None,
-        last_output: Some(out(7, 0)),
+        last_output: Some(at(7, 7, 0)),
         output_tail: 8,
     })
     .unwrap();
@@ -46,7 +53,7 @@ fn no_snapshot_but_outputs_replays_from_zero_and_skips_them() {
 fn a_snapshot_with_no_later_output_resumes_after_it_and_skips_nothing() {
     let resume = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(95, 0)),
+        last_output: Some(at(39, 95, 0)),
         output_tail: 40,
     })
     .unwrap();
@@ -71,7 +78,7 @@ fn a_snapshot_with_an_empty_output_stream_skips_nothing() {
 fn outputs_past_the_snapshot_are_skipped_up_to_the_last_one() {
     let resume = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(104, 1)),
+        last_output: Some(at(42, 104, 1)),
         output_tail: 43,
     })
     .unwrap();
@@ -90,7 +97,7 @@ fn steps_with_no_output_are_skipped_by_position_not_by_count() {
     // Inputs 101 to 103 produced nothing; 100 and 104 did.
     let resume = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(104, 0)),
+        last_output: Some(at(41, 104, 0)),
         output_tail: 42,
     })
     .unwrap();
@@ -105,7 +112,7 @@ fn a_batch_cut_short_resumes_at_its_first_missing_output() {
     // Input 12 produced three outputs and only the first two landed.
     let resume = fold(Found {
         snapshot: None,
-        last_output: Some(out(12, 1)),
+        last_output: Some(at(4, 12, 1)),
         output_tail: 5,
     })
     .unwrap();
@@ -117,7 +124,7 @@ fn a_batch_cut_short_resumes_at_its_first_missing_output() {
 fn a_stream_shorter_than_the_snapshot_expects_is_refused() {
     let err = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(90, 0)),
+        last_output: Some(at(38, 90, 0)),
         output_tail: 39,
     })
     .unwrap_err();
@@ -134,7 +141,7 @@ fn a_stream_shorter_than_the_snapshot_expects_is_refused() {
 fn an_output_for_an_input_the_snapshot_covers_is_refused() {
     let err = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(98, 0)),
+        last_output: Some(at(40, 98, 0)),
         output_tail: 41,
     })
     .unwrap_err();
@@ -147,29 +154,61 @@ fn an_output_for_an_input_the_snapshot_covers_is_refused() {
     );
 }
 
+// A new shard leader appends a generation-start record, which takes an
+// offset but is not an output, so the tail can be past the last output.
+
 #[test]
-fn records_with_no_last_header_are_refused() {
-    let err = fold(Found {
+fn a_stream_of_only_generation_starts_starts_from_input_zero() {
+    let resume = fold(Found {
         snapshot: None,
         last_output: None,
         output_tail: 3,
     })
-    .unwrap_err();
-    assert_eq!(err, ResumeError::MissingLastOutput);
+    .unwrap();
+    assert!(!resume.restore);
+    assert_eq!(resume.next_input, 0);
+    assert!(!resume.already_written(0, 0));
+}
+
+#[test]
+fn a_generation_start_at_the_snapshot_tail_is_not_a_later_output() {
+    let resume = fold(Found {
+        snapshot: Some(snap(99, 40)),
+        last_output: Some(at(39, 95, 0)),
+        output_tail: 42,
+    })
+    .unwrap();
+    assert!(resume.restore);
+    assert_eq!(resume.next_input, 100);
+    assert_eq!(resume.output_from, 40);
+    assert!(!resume.already_written(100, 0));
+    assert!(!resume.replaying(100));
+}
+
+#[test]
+fn outputs_after_a_generation_start_are_still_skipped() {
+    let resume = fold(Found {
+        snapshot: Some(snap(99, 40)),
+        last_output: Some(at(41, 100, 0)),
+        output_tail: 43,
+    })
+    .unwrap();
+    assert!(resume.already_written(100, 0));
+    assert!(!resume.already_written(101, 0));
 }
 
 #[test]
 fn skipped_outputs_start_at_the_snapshot_tail() {
     let resume = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(104, 1)),
+        last_output: Some(at(42, 104, 1)),
         output_tail: 43,
     })
     .unwrap();
     assert_eq!(resume.output_from, 40);
     let fresh = fold(Found {
         snapshot: None,
-        last_output: Some(out(7, 0)),
+        last_output: Some(at(7, 7, 0)),
         output_tail: 8,
     })
     .unwrap();
@@ -180,7 +219,7 @@ fn skipped_outputs_start_at_the_snapshot_tail() {
 fn the_owner_is_replaying_until_it_reaches_the_last_written_input() {
     let resume = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(104, 1)),
+        last_output: Some(at(42, 104, 1)),
         output_tail: 43,
     })
     .unwrap();
@@ -195,7 +234,7 @@ fn the_owner_is_replaying_until_it_reaches_the_last_written_input() {
 fn nothing_to_skip_is_not_replaying() {
     let resume = fold(Found {
         snapshot: Some(snap(99, 40)),
-        last_output: Some(out(95, 0)),
+        last_output: Some(at(39, 95, 0)),
         output_tail: 40,
     })
     .unwrap();

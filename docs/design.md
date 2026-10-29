@@ -388,7 +388,7 @@ A new owner:
 
 1. Reads the latest record on `wl.<id>.snap` and calls `restore`. With no
    snapshot it starts from the workload's initial state at input offset 0.
-2. Reads the output tail. Its last record names the input offset `k` that
+2. Reads the last output record. It names the input offset `k` that
    produced it.
 3. Subscribes to the input with `subscribe_from(snapshot offset + 1)`. For
    inputs up to `k` it runs `step` and drops the outputs, which are already on
@@ -413,6 +413,18 @@ whatever records it finds first. It never steps past a missing record. A
 read stops short at what the broker has committed, which can lag the tail
 just after a leader change, so a page that makes no progress is read again
 and, after 20 s, is an error rather than an empty range.
+
+A stream's tail is not where its last output is. When a Felix broker starts
+leading a shard at a new generation (a promotion after a broker is lost, either
+end of a shard move), it appends a generation-start record. The record takes
+an offset and is never read back, so `.out` and `.snap` can end in offsets
+that hold no record. The fold compares the last output's offset with the
+snapshot's output tail rather than the stream's tail, and a stream with no
+output records is one with no outputs, whatever its tail. A conditional write
+still expects the raw tail, so a refused write that finds no records in
+between just retries at the new tail. `generation_starts_after_failover` in
+`tests/cluster.rs` kills the broker that leads `.out` on a three-broker
+cluster and checks the output with `felixd check`.
 
 Some states can't be resumed from on any node, and the design is to refuse
 them rather than guess: a snapshot or output record that doesn't decode, a

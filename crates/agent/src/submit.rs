@@ -72,7 +72,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     if let Some(old) = felix.cache_get(names::WORKLOADS, &submission.id).await?
         && let Ok(old) = WorkloadSpec::decode(&old)
         && let Some(conflict) = old.conflicts_with_history(&spec)
-        && (felix.tail(&spec.output).await? > 0 || felix.tail(&snap_stream).await? > 0)
+        && (has_records(&felix, &spec.output).await? || has_records(&felix, &snap_stream).await?)
     {
         bail!(
             "workload {} already has output, and {conflict}; submit the change under a new id",
@@ -84,4 +84,11 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         .cache_put(names::WORKLOADS, &submission.id, spec)
         .await?;
     Ok(hash)
+}
+
+/// Whether `stream` holds any record. Its tail alone does not say: a new
+/// shard leader's generation-start record takes an offset but is not one.
+async fn has_records(felix: &Felix, stream: &str) -> Result<bool> {
+    let tail = felix.tail(stream).await?;
+    Ok(felix.last_record(stream, tail).await?.is_some())
 }

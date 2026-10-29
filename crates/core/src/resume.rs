@@ -1,7 +1,10 @@
 //! The resume fold: where a new owner picks a workload up.
 //!
-//! The owner reads the latest snapshot header and the last record of the
-//! output stream and passes both here. The result says which input offset to
+//! The owner reads the latest snapshot header and the last output record of
+//! the output stream and passes both here. Felix also writes records that are
+//! not events, such as the generation-start record a new shard leader appends,
+//! so the stream's tail can be past its last output. The fold therefore
+//! compares the last output's offset, never the tail, with the snapshot. The result says which input offset to
 //! subscribe from and which outputs the stream already holds. The owner still
 //! runs `step` for those inputs, checks each output it skips with
 //! [`check_skipped`] against the record in its place, and takes no snapshot
@@ -18,10 +21,17 @@ use crate::snapshot::SnapshotHeader;
 pub struct Found {
     /// The latest snapshot, if the workload has one.
     pub snapshot: Option<SnapshotHeader>,
-    /// The header of the last record on the output stream, if it has any.
-    pub last_output: Option<OutputHeader>,
-    /// The output stream's next offset.
+    /// The last output record on the output stream, if it has any.
+    pub last_output: Option<LastOutput>,
+    /// The output stream's next offset, counting records that are not events.
     pub output_tail: u64,
+}
+
+/// The last output record on the output stream and where it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LastOutput {
+    pub offset: u64,
+    pub header: OutputHeader,
 }
 
 /// How to resume.
@@ -47,8 +57,6 @@ pub enum ResumeError {
     /// snapshot already covers, which a correct owner never writes.
     #[error("output stream holds input {found}'s output past a snapshot covering input {covered}")]
     OutputBeforeSnapshot { covered: u64, found: u64 },
-    #[error("output stream has records but no last output header was given")]
-    MissingLastOutput,
     /// Running the workload again did not produce what the stream holds, so
     /// the workload is not deterministic or the stream was written by
     /// something else.
@@ -104,22 +112,20 @@ pub fn fold(found: Found) -> Result<Resume, ResumeError> {
             tail: found.output_tail,
         });
     }
-    let has_later_outputs = found.output_tail > snapshot_tail;
     let skip_through = match found.last_output {
-        None if found.output_tail > 0 => return Err(ResumeError::MissingLastOutput),
         None => None,
-        Some(last) if has_later_outputs => {
+        Some(last) if last.offset >= snapshot_tail => {
             if let Some(s) = found.snapshot
-                && last.input_offset <= s.input_offset
+                && last.header.input_offset <= s.input_offset
             {
                 return Err(ResumeError::OutputBeforeSnapshot {
                     covered: s.input_offset,
-                    found: last.input_offset,
+                    found: last.header.input_offset,
                 });
             }
-            Some(last)
+            Some(last.header)
         }
-        // The snapshot already includes everything on the stream.
+        // The snapshot already includes every output on the stream.
         Some(_) => None,
     };
     Ok(Resume {

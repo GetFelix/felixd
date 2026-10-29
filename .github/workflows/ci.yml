@@ -49,3 +49,30 @@ jobs:
       - name: Felix logs
         if: failure()
         run: docker compose -f tests/felix/compose.yaml logs --no-color
+
+  # Three brokers and three-replica Quorum streams, so failover and Felix's
+  # generation-start records are exercised.
+  cluster:
+    runs-on: ubuntu-latest
+    env:
+      FELIXD_REQUIRE_FELIX: "1"
+      FELIXD_CLUSTER: tests/felix/cluster.yaml
+      FELIX_BROKERS: 127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300
+      FELIX_AUTH_TENANT: dev
+      FELIX_AUTH_TOKEN_FILE: /tmp/felix/client.jwt
+      FELIX_CA_FILE: /tmp/felix/broker-cert.pem
+      FELIX_CONTROLPLANE_URL: http://127.0.0.1:8443
+      FELIX_CONTROLPLANE_TOKEN_FILE: /tmp/felix/controlplane.jwt
+      FELIX_OPERATOR_TOKEN_FILE: /tmp/felix/operator.jwt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Felix
+        run: |
+          docker compose -f tests/felix/cluster.yaml up -d --wait
+          docker compose -f tests/felix/cluster.yaml wait felix-fleet
+          tests/felix/credentials.sh /tmp/felix cluster
+      - run: FELIXD_CLUSTER=$PWD/$FELIXD_CLUSTER cargo test -p felixd --test cluster --locked -- --test-threads=1
+      - name: Felix logs
+        if: failure()
+        run: docker compose -f tests/felix/cluster.yaml logs --no-color
