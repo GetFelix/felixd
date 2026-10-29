@@ -314,18 +314,7 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
             Addressed::unnamed(payload),
         ));
     }
-    if version != VERSION && version != UNNAMED {
-        return Err(DecodeError::UnknownVersion(version));
-    }
-    let kind = r.u8()?;
-    if !matches!(kind, OUTPUT | CLAIM | FAILURE)
-        && !(matches!(
-            kind,
-            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR
-        ) && version == VERSION)
-    {
-        return Err(DecodeError::UnknownKind(kind));
-    }
+    let kind = kind_after(version, &mut r)?;
     let epoch = r.u64()?;
     match kind {
         CLAIM => Ok(Record::Claim {
@@ -412,24 +401,59 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     }
 }
 
+/// The kind byte after `version`, refusing a version or kind this build
+/// does not know.
+fn kind_after(version: u8, r: &mut Reader<'_>) -> Result<u8, DecodeError> {
+    if version != VERSION && version != UNNAMED {
+        return Err(DecodeError::UnknownVersion(version));
+    }
+    let kind = r.u8()?;
+    if !matches!(kind, OUTPUT | CLAIM | FAILURE)
+        && !(matches!(
+            kind,
+            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR
+        ) && version == VERSION)
+    {
+        return Err(DecodeError::UnknownKind(kind));
+    }
+    Ok(kind)
+}
+
+/// A record's kind from its version and kind bytes alone, so a reader can
+/// tell a marker without reading a body that may hold a class or reason
+/// added after this build.
+fn kind_of(record: &[u8]) -> Result<u8, DecodeError> {
+    let mut r = Reader::new(record);
+    let version = r.u8()?;
+    if version == OUTPUTS_ONLY {
+        return Ok(OUTPUT);
+    }
+    kind_after(version, &mut r)
+}
+
 /// Whether `record` is a claim, a failure or a needs-operator record, which
-/// no step produced. The
+/// no step produced, judged by its version and kind bytes only. The
 /// owner's own checks pass over them; rejections are not passed over, since
 /// they stand in for an input's outputs.
 pub fn is_marker(record: &[u8]) -> bool {
     matches!(
-        decode(record),
-        Ok(Record::Claim { .. } | Record::Failure { .. } | Record::NeedsOperator { .. })
+        kind_of(record),
+        Ok(CLAIM | CLAIM_UNDER | FAILURE | CLASSED_FAILURE | NEEDS_OPERATOR)
     )
 }
 
 /// The output in `record` if it is addressed to `name`, for a workload whose
 /// input is another workload's output stream. Claims, failures, rejections
-/// and outputs of other names are `None`.
+/// and outputs of other names are `None`. Only an output's body is read, so
+/// a marker holding a class or reason this build does not know is still
+/// passed over; a version or kind it does not know is an error.
 pub fn addressed_to<'a>(
     record: &'a [u8],
     name: &str,
 ) -> Result<Option<Addressed<'a>>, DecodeError> {
+    if kind_of(record)? != OUTPUT {
+        return Ok(None);
+    }
     Ok(decode(record)?
         .output()
         .map(|(_, addressed)| addressed)
@@ -437,9 +461,9 @@ pub fn addressed_to<'a>(
 }
 
 /// Whether a workload reading another's output stream for outputs named
-/// `name` passes over `record`. A record that does not decode is not passed
-/// over, so the step sees it and the reader does not silently drop records
-/// of a newer format.
+/// `name` passes over `record`. A record of an unknown version or kind, or an
+/// output that does not decode, is not passed over, so the reader does not
+/// silently drop records of a newer format.
 pub fn passed_over(record: &[u8], name: &str) -> bool {
     matches!(addressed_to(record, name), Ok(None))
 }

@@ -167,13 +167,17 @@ pub(crate) async fn judged(
     Ok(check::judged_under(cached, &claimed, payloads))
 }
 
-/// The input workload `id`'s output stream was written under.
+/// The input workload `id`'s output stream was written under, from the same
+/// spec [`check_one`] judges it under.
 async fn input_of(felix: &Felix, id: &str) -> Result<String> {
     let cached = felix
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = specs::lineage(felix, id, WorkloadSpec::decode(&cached)?).await?;
+    let cached = WorkloadSpec::decode(&cached)?;
+    let tail = felix.tail(&cached.output).await?;
+    let records = felix.read_range(&cached.output, 0, tail).await?;
+    let (spec, _) = judged(felix, id, &cached, &records).await?;
     Ok(spec.input)
 }
 

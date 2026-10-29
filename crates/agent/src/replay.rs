@@ -248,8 +248,7 @@ async fn run_inputs<T>(
                 record.offset,
                 record.timestamp_micros,
                 &record.payload,
-            )
-            .map_err(|e| anyhow!(e))?;
+            )?;
             let Some(step) = read else {
                 continue;
             };

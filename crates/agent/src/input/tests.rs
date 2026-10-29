@@ -4,6 +4,7 @@ use felixd_core::output::{self, Addressed, OutputHeader, Rejected};
 use felixd_core::spec::{Limits, WorkloadSpec, WorkloadState};
 
 use super::StepInput;
+use crate::runner::{NeedsOperator, Poison};
 
 fn spec(input: &str) -> WorkloadSpec {
     WorkloadSpec {
@@ -109,13 +110,47 @@ fn an_older_output_record_reads_as_out() {
     assert_eq!(read("wl.up.out", 0, v2), Some((None, b"old".to_vec())));
 }
 
+/// A newer build can add a failure class or a needs-operator reason. A
+/// downstream on an older build passes over such a record by its kind
+/// instead of failing its own workload.
 #[test]
-fn a_record_a_downstream_cannot_decode_is_an_error() {
-    let record = Bytes::from_static(b"\x09junk");
-    let error = StepInput::read(&spec("wl.up.out"), 4, 0, &record)
+fn a_marker_with_a_code_this_build_does_not_know_is_passed_over() {
+    let mut failure = output::encode_failure(2, 9, ErrorClass::Poison, "trap");
+    failure[18] = 99;
+    let mut needs = output::encode_needs_operator(2, 5, OperatorReason::SpecConflict, "input");
+    needs[18..20].copy_from_slice(&99u16.to_be_bytes());
+    for record in [failure, needs] {
+        assert!(output::decode(&record).is_err());
+        assert_eq!(read("wl.up.out", 5, record.clone()), None, "{record:?}");
+    }
+}
+
+/// A version or kind this build does not know is the build's fault, not the
+/// workload's, so it needs an operator to upgrade the node.
+#[test]
+fn a_record_of_an_unknown_version_or_kind_needs_an_operator() {
+    let mut kind = output::encode_claim(2, "node-a");
+    kind[1] = 9;
+    for record in [b"\x09junk".to_vec(), kind] {
+        let error = StepInput::read(&spec("wl.up.out"), 4, 0, &Bytes::from(record))
+            .err()
+            .expect("an unknown record stops the reader");
+        let problem = error
+            .downcast_ref::<NeedsOperator>()
+            .unwrap_or_else(|| panic!("not needs-operator: {error:#}"));
+        assert_eq!(problem.reason, OperatorReason::InputUnreadable);
+        assert!(problem.detail.contains("input 4 on wl.up.out"), "{problem}");
+    }
+}
+
+#[test]
+fn an_output_that_does_not_decode_is_poison() {
+    let mut record = output::encode(header(1, 0), 1, b"p");
+    record.truncate(15);
+    let error = StepInput::read(&spec("wl.up.out"), 4, 0, &Bytes::from(record))
         .err()
-        .expect("an undecodable record fails the reader");
-    assert!(error.contains("input 4 on wl.up.out"), "{error}");
+        .expect("a truncated output fails the reader");
+    assert!(error.is::<Poison>(), "{error:#}");
 }
 
 #[test]

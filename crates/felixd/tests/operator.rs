@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ID, INPUT, LEASE_TTL, OUTPUT, TestFelix, eventually, test_felix};
-use felixd_agent::admin::{StreamKind, ensure_stream};
+use felixd_agent::admin::{StreamKind, delete_stream, ensure_stream};
 use felixd_core::class::{ErrorClass, OperatorReason};
 use felixd_core::names;
 use felixd_core::output::{self, Record};
@@ -248,4 +248,55 @@ async fn a_failure_found_while_recording_fails_the_spec() {
     let found = t.failure().await;
     assert!(found.contains("from the test"), "{found}");
     assert_eq!(t.needs_operator().await.0, []);
+}
+
+/// The upstream's stream is deleted and created again while the downstream
+/// is down. The new stream ends before the inputs the downstream already
+/// stepped, so it needs an operator instead of stepping the new stream's
+/// records as if they continued the old one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recreated_upstream_shorter_than_what_was_read_needs_an_operator() {
+    let Some(t) = test_felix().await else { return };
+    let up = "wl.up.out";
+    let kind = StreamKind {
+        replication_factor: common::replication_factor(),
+    };
+    ensure_stream(&t.settings, up, kind).await.unwrap();
+    let outputs = |from: u64, n: u64| {
+        (from..from + n)
+            .map(|i| {
+                output::encode(
+                    output::OutputHeader {
+                        input_offset: i,
+                        index: 0,
+                    },
+                    1,
+                    &count(i),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    t.publish_if(up, outputs(0, 4), 0).await;
+    let module = felixd_testkit::workload("counter");
+    assert!(t.run(ID, &module, up, &[]).success());
+    let mut agent = t.start_agent();
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 4).then_some(())
+    })
+    .await;
+    agent.kill();
+
+    delete_stream(&t.settings, up).await.unwrap();
+    ensure_stream(&t.settings, up, kind).await.unwrap();
+    t.publish_if(up, outputs(0, 1), 0).await;
+    let _agent = t.start_agent();
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::InputBehind
+    );
+    assert_eq!(
+        t.outputs(OUTPUT).await.len(),
+        4,
+        "it stepped the new stream"
+    );
 }

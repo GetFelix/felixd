@@ -63,7 +63,7 @@ continues with:
 | Bytes | Field |
 |---|---|
 | 8 | the `sys.specs` offset of the spec record |
-| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel |
+| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel, 7 input record unreadable by this build, 8 input stream behind the workload |
 | rest | detail for people, UTF-8 |
 
 A holder appends it the way it appends a failure, behind everything of earlier epochs, and then
@@ -92,11 +92,13 @@ A rejection is that input's only output. The resume fold, the skipped-output che
 stream with a rejection where a replay produces an output, or the other way round, diverges. They
 pass over claims, failures and needs-operator records. A workload whose input is another workload's output stream reads only
 the outputs addressed to one name, `out`, and passes over these, rejections and outputs of
-other names (`output::addressed_to`). Its step gets the output's key and payload, not the record. A
-record there that does not decode fails the reader, since it cannot tell what the record holds.
-That includes kinds 5 and 6 read by a build from before them: an older felixd whose workload reads
-another workload's output stream fails its own workload as poison once a failure or needs-operator
-record lands there. Upgrade every node before a workload can write them.
+other names (`output::addressed_to`). Its step gets the output's key and payload, not the record. It
+decides by the version and kind bytes and reads the body of outputs only, so a failure or
+needs-operator record with a class or reason this build does not know is still passed over. A
+version or kind it does not know is refused, never skipped: the reader cannot tell whether it holds
+an input, so the workload is recorded as needing an operator (reason 7), and upgrading the node
+fixes it. That includes kinds 5 and 6 read by a build from before them, so upgrade every node before
+a workload can write them. An output that does not decode is poison.
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,

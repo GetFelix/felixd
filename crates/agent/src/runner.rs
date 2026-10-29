@@ -426,6 +426,11 @@ async fn run(
         output_tail,
     })
     .map_err(poison)?;
+    not_behind(
+        &spec.input,
+        felix.tail(&spec.input).await?,
+        resume.next_input,
+    )?;
     if let Some(snapshot) = snapshot.as_ref().filter(|_| resume.restore) {
         let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
             .await
@@ -491,7 +496,13 @@ async fn run(
         let offset = event
             .offset
             .ok_or_else(|| poison("the input stream is not durable, so it has no offsets"))?;
-        if offset < next_input || faults::drop_input(offset) {
+        if offset < next_input {
+            // A subscription from `next_input` only goes below it if the
+            // stream started over.
+            not_behind(&spec.input, felix.tail(&spec.input).await?, next_input)?;
+            continue;
+        }
+        if faults::drop_input(offset) {
             continue;
         }
         if offset > next_input {
@@ -513,6 +524,24 @@ async fn run(
         steps.step(offset, stamp, event.payload).await?;
         next_input = offset + 1;
     }
+}
+
+/// Refuses an input stream whose `tail` is below `next_input`, the next
+/// input to step. Stepping on would treat another stream's records as the
+/// rest of this one. A recreated stream that has already grown past
+/// `next_input` is not caught here; that needs incarnations.
+fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
+    if tail >= next_input {
+        return Ok(());
+    }
+    Err(NeedsOperator::new(
+        OperatorReason::InputBehind,
+        format!(
+            "{stream} ends at {tail} but the workload has stepped inputs up to {next_input}, \
+             so it was deleted and created again or lost records"
+        ),
+    )
+    .into())
 }
 
 /// Runs inputs through the workload in order, writing what they produce.
@@ -539,8 +568,7 @@ struct Steps<'a> {
 
 impl Steps<'_> {
     async fn step(&mut self, offset: u64, stamp: u64, record: Bytes) -> Result<()> {
-        let Some(input) = StepInput::read(self.spec, offset, stamp, &record).map_err(poison)?
-        else {
+        let Some(input) = StepInput::read(self.spec, offset, stamp, &record)? else {
             return Ok(());
         };
         let interval = self

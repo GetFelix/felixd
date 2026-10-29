@@ -341,6 +341,33 @@ fn a_reader_of_another_stream_gets_only_outputs_of_its_name() {
     assert!(!passed_over(b"\x09", "out"));
 }
 
+/// A rolling upgrade can add a class or reason. A reader of the stream
+/// passes over such a marker by its kind, without reading the code.
+#[test]
+fn a_reader_of_another_stream_passes_over_a_marker_with_an_unknown_code() {
+    let mut failure = encode_failure(1, 1, ErrorClass::Poison, "trap");
+    failure[18] = 99;
+    let mut needs = encode_needs_operator(1, 5, OperatorReason::SpecConflict, "input");
+    needs[18..20].copy_from_slice(&99u16.to_be_bytes());
+    for record in [failure, needs] {
+        assert!(decode(&record).is_err(), "{record:?}");
+        assert_eq!(addressed_to(&record, "out"), Ok(None), "{record:?}");
+        assert!(passed_over(&record, "out"), "{record:?}");
+        assert!(is_marker(&record), "{record:?}");
+    }
+}
+
+#[test]
+fn a_reader_of_another_stream_refuses_an_unknown_version_or_kind() {
+    let mut kind = encode_claim(1, "node");
+    kind[1] = 9;
+    for record in [vec![9, 0], kind] {
+        assert!(addressed_to(&record, "out").is_err(), "{record:?}");
+        assert!(!passed_over(&record, "out"), "{record:?}");
+        assert!(!is_marker(&record), "{record:?}");
+    }
+}
+
 #[test]
 fn an_unknown_version_or_kind_is_refused() {
     let mut record = encode(h(1, 0), 1, b"");

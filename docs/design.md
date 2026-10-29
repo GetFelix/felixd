@@ -423,7 +423,12 @@ Spec history applies to a downstream like any workload: its input is the
 upstream's stream name, so pointing it at another upstream once it has output
 is refused by `felixd run` and left to an operator by an agent. Recreating an
 upstream under the same id is the incarnation problem ([Names and
-incarnations](#names-and-incarnations)), not solved yet.
+incarnations](#names-and-incarnations)), solved only in part: a node that
+finds its input ending below the next input it would step, when it resumes
+or when its subscription goes back below it, records needs-operator. A
+recreated input that has already grown past that offset is not detected and
+is read as if it continued the old one, until Felix exposes incarnations to
+clients (#133).
 
 `felixd check` judges each stage against its input as it stands, and checks
 stages upstream first. Each stage's input is then read after the stage before
@@ -1054,7 +1059,7 @@ Built: spec records on `sys.specs`, claims that name the record they run,
 and `check` and `replay --diff` judging each input under the limits that
 applied ([Data model](#data-model)). The offset a spec takes effect at is
 where its owner's claim lands, not one the submitter states. Not built:
-incarnations, which Felix does not expose to clients yet, dropping `output`
+incarnations, which Felix does not expose to clients yet (#133), dropping `output`
 from the spec, and module changes at an offset (#64).
 
 Plan 9 resolved a name at every `open`, so a rebind silently changed what a
