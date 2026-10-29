@@ -1,7 +1,7 @@
 # The workload contract, version 0.2
 
 This is the interface between felixd and a workload, and what each side
-promises. It replaces the 0.1 world in `wit/workload.wit`. It settles the
+promises. `wit/workload.wit` holds the WIT below; it replaced the 0.1 world. It settles the
 outline in [design.md, The workload contract, version 0.2](design.md#the-workload-contract-version-02)
 (#64) and leaves room for effects (#71) and typed records (#73) without
 another breaking change.
@@ -37,7 +37,7 @@ interface step {
   /// was written. Never looked up again, so replay sees the same values.
   record source {
     /// The input stream's name.
-    stream: string,
+    %stream: string,
     /// The Felix incarnation the name resolved to. 0 until specs record
     /// incarnations (#72).
     incarnation: u64,

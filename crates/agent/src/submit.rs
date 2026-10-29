@@ -1,9 +1,10 @@
 //! `felixd run`: store a module and start a workload.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, Limits, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
+use felixd_runtime::Runtime;
 
 use crate::admin::{self, StreamKind};
 use crate::felix::Felix;
@@ -37,11 +38,16 @@ impl Submission {
     }
 }
 
-/// Creates the caches and the workload's streams, uploads the module and
-/// writes the spec last, so an agent that sees the spec finds everything else.
-/// Returns the module's hash.
+/// Checks the module is a component no node would refuse, then creates the
+/// caches and the workload's streams, uploads the module and writes the spec
+/// last, so an agent that sees the spec finds everything else. Returns the
+/// module's hash.
 pub async fn submit(settings: &Settings, submission: Submission) -> Result<String> {
     names::validate_id(&submission.id)?;
+    Runtime::new()
+        .map_err(|e| anyhow!("{e}"))?
+        .compile(&submission.module)
+        .map_err(|e| anyhow!("{e}"))?;
     if submission.snapshot_every == 0 {
         bail!("snapshot_every must be at least 1");
     }

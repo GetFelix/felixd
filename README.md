@@ -13,7 +13,9 @@ A node agent that runs programs across a cluster with
 > failover test that keeps killing lease holders runs on every pull request
 > and ends with `felixd check`. `felixd replay`
 > rebuilds a workload as of any input offset or time, and `--diff` checks a
-> replay, or a new module, against the recorded outputs. Pipelines and
+> replay, or a new module, against the recorded outputs. Workloads implement
+> [contract 0.2](docs/contract.md): named and keyed outputs, rejections and
+> chunked snapshots. Pipelines and
 > operations (milestone 4) are next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
@@ -95,12 +97,22 @@ grants on the streams it reads, as `felixd check` does.
 workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input
 still gets snapshots and every node takes them at the same inputs.
-`felixd run --fuel --max-memory` sets the workload's limits. They are stored in
+A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
+(`wit/workload.wit`). Each step gets the input's stream, offset, append time,
+key and payload, and returns outputs, each with a name and an optional key, or
+rejects the input. A rejection is recorded on the output stream and the
+workload carries on. Snapshots are written in chunks, and a chunk the last
+snapshot already holds is not written again. `felixd run` refuses a component
+built against contract 0.1, and an agent that finds one in a spec leaves it
+alone and logs it, rather than failing it.
+`felixd run --fuel --max-memory --snapshot-fuel` sets the workload's limits:
+fuel per step, memory, and fuel for a whole snapshot or restore. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new
 module or input is refused once the workload has written anything; use a new
 id for new code. A workload that traps, runs
-out of fuel or finds its streams in a state it can't resume from is marked
+out of fuel, returns `poison`, breaks the contract (an invalid output name, an
+effect request, a chunk over 4 MiB) or finds its streams in a state it can't resume from is marked
 `failed` in its spec, with the reason. The failure is first a record on its
 output stream, fenced by epoch like an output, so a node that was frozen
 while another took over can't fail it.

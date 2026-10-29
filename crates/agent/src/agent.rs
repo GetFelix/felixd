@@ -27,7 +27,7 @@ use crate::faults;
 use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held};
 use crate::output::{Recorded, record_failure};
-use crate::runner::{Modules, Outcome, run_workload};
+use crate::runner::{Modules, NeedsOperator, Outcome, run_workload};
 use crate::settings::Settings;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -403,6 +403,14 @@ async fn own(
     mut lease: watch::Receiver<Seen>,
     mut stop: watch::Receiver<bool>,
 ) {
+    // A module this build refuses is left to an operator before anything is
+    // claimed, so no node takes the lease or fails the workload for it.
+    if let Err(error) = node.modules.compiled(&node.felix, &spec.module).await
+        && let Some(reason) = error.downcast_ref::<NeedsOperator>()
+    {
+        needs_operator(&id, reason, &mut stop).await;
+        return;
+    }
     loop {
         if !node.wait_for_chance(&id, &mut lease, &mut stop).await {
             return;
@@ -423,6 +431,11 @@ async fn own(
                         lease::release(&node.felix, &held).await;
                         return;
                     }
+                    Ended::NeedsOperator(reason) => {
+                        lease::release(&node.felix, &held).await;
+                        needs_operator(&id, &reason, &mut stop).await;
+                        return;
+                    }
                     Ended::Lost => {}
                 }
             }
@@ -438,6 +451,13 @@ async fn own(
             _ = stop.wait_for(|stop| *stop) => return,
         }
     }
+}
+
+/// Logs that the workload needs an operator and waits for its spec to
+/// change or go, which restarts or stops the task.
+async fn needs_operator(id: &str, reason: &NeedsOperator, stop: &mut watch::Receiver<bool>) {
+    tracing::error!(workload = %id, %reason, "the workload needs an operator, not running it");
+    let _ = stop.wait_for(|stop| *stop).await;
 }
 
 /// One of this node's `max_workloads` places, given back when dropped.
@@ -561,6 +581,7 @@ enum Ended {
     Failed,
     Stopped,
     Lost,
+    NeedsOperator(NeedsOperator),
 }
 
 /// Runs the workload, and records its failure if it fails, while renewing the
@@ -620,6 +641,7 @@ async fn run_held(
         let reason = match outcome {
             Outcome::Failed(message) => message,
             Outcome::Lost => return Ended::Lost,
+            Outcome::NeedsOperator(reason) => return Ended::NeedsOperator(NeedsOperator(reason)),
             Outcome::FailedOnStream {
                 spec_version,
                 reason,

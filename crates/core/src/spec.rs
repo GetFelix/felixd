@@ -42,15 +42,27 @@ pub struct Limits {
     pub fuel_per_call: u64,
     /// The most linear memory the workload may grow to, in bytes.
     pub max_memory_bytes: u64,
+    /// Fuel for a whole snapshot, `snapshot` and every `snapshot-chunk`
+    /// call, and for a whole restore. Running out of it fails the workload.
+    #[serde(default = "default_snapshot_fuel")]
+    pub snapshot_fuel: u64,
 }
+
+/// The default fuel for one call into a workload.
+pub const DEFAULT_FUEL_PER_CALL: u64 = 50_000_000;
 
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            fuel_per_call: 50_000_000,
+            fuel_per_call: DEFAULT_FUEL_PER_CALL,
             max_memory_bytes: 64 << 20,
+            snapshot_fuel: default_snapshot_fuel(),
         }
     }
+}
+
+fn default_snapshot_fuel() -> u64 {
+    10 * DEFAULT_FUEL_PER_CALL
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

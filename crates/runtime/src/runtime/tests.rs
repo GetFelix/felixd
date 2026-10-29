@@ -49,7 +49,21 @@ fn bytes_that_are_not_a_component_are_rejected() {
 #[test]
 fn a_component_without_the_workload_exports_is_rejected() {
     let err = load_err("(component)");
-    assert!(matches!(err, LoadError::Instantiate(_)), "{err}");
+    assert!(matches!(err, LoadError::NotAWorkload(_)), "{err}");
+}
+
+#[test]
+fn a_contract_01_component_is_refused_by_name() {
+    let runtime = Runtime::new().unwrap();
+    let err = runtime
+        .compile(&felixd_testkit::contract_01_component())
+        .err()
+        .expect("a 0.1 component is refused");
+    assert!(matches!(err, LoadError::Contract01), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "the component is built against felixd:workload@0.1.0, rebuild it against 0.2"
+    );
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
 
+use crate::check::Produced;
 use crate::codec::DecodeError;
 use crate::module;
 use crate::output::{self, OutputHeader, Record};
@@ -56,7 +57,40 @@ pub struct Recorded {
 #[derive(Debug)]
 struct Kept {
     epoch: u64,
-    digest: String,
+    summary: Summary,
+}
+
+/// What a diff compares of an output or a rejection: its address and the
+/// digest of its bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Summary {
+    Output {
+        name: String,
+        key: Option<Vec<u8>>,
+        /// The sha256 of the payload.
+        sha256: String,
+    },
+    Rejection {
+        code: u32,
+        /// The sha256 of the detail.
+        sha256: String,
+    },
+}
+
+impl From<&Produced> for Summary {
+    fn from(produced: &Produced) -> Summary {
+        match produced {
+            Produced::Output { name, key, payload } => Summary::Output {
+                name: name.clone(),
+                key: key.clone(),
+                sha256: digest(payload),
+            },
+            Produced::Rejection { code, detail } => Summary::Rejection {
+                code: *code,
+                sha256: digest(detail),
+            },
+        }
+    }
 }
 
 /// The first place a replay and the stream disagree.
@@ -65,10 +99,10 @@ pub struct Divergence {
     pub header: OutputHeader,
     /// The recorded output's writer, when there is one.
     pub writer: Option<Writer>,
-    /// The sha256 of the recorded payload, when there is one.
-    pub recorded: Option<String>,
-    /// The sha256 of the replayed payload, when the replay produced one.
-    pub replayed: Option<String>,
+    /// The recorded output or rejection, when there is one.
+    pub recorded: Option<Summary>,
+    /// What the replay produced there, when it produced something.
+    pub replayed: Option<Summary>,
 }
 
 /// Who wrote a record: its epoch, and the node its epoch's claim names.
@@ -88,21 +122,22 @@ impl Recorded {
     ) -> Result<Recorded, DecodeError> {
         let mut recorded = Recorded::default();
         for record in records {
-            match output::decode(record)? {
-                Record::Output(written, addressed) => {
-                    if inputs.contains(&written.header.input_offset) {
-                        recorded.outputs.entry(written.header).or_insert(Kept {
-                            epoch: written.epoch,
-                            digest: digest(addressed.payload),
-                        });
-                    }
-                }
-                Record::Claim { epoch, node } if !node.is_empty() => {
-                    let node = String::from_utf8_lossy(node).into_owned();
-                    recorded.nodes.insert(epoch, node);
-                }
-                // A replay produces no rejections until the runtime can.
-                Record::Rejection(..) | Record::Claim { .. } | Record::Failure { .. } => {}
+            let decoded = output::decode(record)?;
+            if let Record::Claim { epoch, node } = decoded
+                && !node.is_empty()
+            {
+                let node = String::from_utf8_lossy(node).into_owned();
+                recorded.nodes.insert(epoch, node);
+            }
+            let Some(produced) = Produced::of(&decoded) else {
+                continue;
+            };
+            let written = decoded.written().expect("an output or a rejection");
+            if inputs.contains(&written.header.input_offset) {
+                recorded.outputs.entry(written.header).or_insert(Kept {
+                    epoch: written.epoch,
+                    summary: Summary::from(&produced),
+                });
             }
         }
         Ok(recorded)
@@ -117,17 +152,17 @@ impl Recorded {
             .map_or(0, |h| h.input_offset + 1)
     }
 
-    /// Compares the outputs a replay produced for the input at `input_offset`
-    /// with the recorded ones.
-    pub fn compare(&self, input_offset: u64, outputs: &[Vec<u8>]) -> Option<Divergence> {
-        for (index, payload) in outputs.iter().enumerate() {
+    /// Compares what a replay produced for the input at `input_offset`, its
+    /// outputs or its one rejection, with what is recorded.
+    pub fn compare(&self, input_offset: u64, outputs: &[Produced]) -> Option<Divergence> {
+        for (index, produced) in outputs.iter().enumerate() {
             let header = OutputHeader {
                 input_offset,
                 index: u32::try_from(index).ok()?,
             };
-            let replayed = digest(payload);
+            let replayed = Summary::from(produced);
             match self.outputs.get(&header) {
-                Some(kept) if kept.digest == replayed => {}
+                Some(kept) if kept.summary == replayed => {}
                 kept => return Some(self.divergence(header, kept, Some(replayed))),
             }
         }
@@ -143,7 +178,7 @@ impl Recorded {
         &self,
         header: OutputHeader,
         kept: Option<&Kept>,
-        replayed: Option<String>,
+        replayed: Option<Summary>,
     ) -> Divergence {
         Divergence {
             header,
@@ -151,15 +186,41 @@ impl Recorded {
                 epoch: k.epoch,
                 node: self.nodes.get(&k.epoch).cloned(),
             }),
-            recorded: kept.map(|k| k.digest.clone()),
+            recorded: kept.map(|k| k.summary.clone()),
             replayed,
         }
     }
 }
 
-/// How outputs are compared: the sha256 of the payload, in lowercase hex.
+/// How payloads are compared: their sha256, in lowercase hex.
 pub fn digest(payload: &[u8]) -> String {
     module::hash(payload)
+}
+
+impl fmt::Display for Summary {
+    /// An output under the default name with no key shows as its digest
+    /// alone.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Summary::Output { name, key, sha256 } => {
+                if name != output::DEFAULT_NAME || key.is_some() {
+                    write!(f, "name {name}, ")?;
+                    match key {
+                        Some(key) => write!(f, "key {}, ", hex(key))?,
+                        None => f.write_str("no key, ")?,
+                    }
+                }
+                write!(f, "sha256 {sha256}")
+            }
+            Summary::Rejection { code, sha256 } => {
+                write!(f, "a rejection with code {code} and detail sha256 {sha256}")
+            }
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl fmt::Display for Divergence {
@@ -174,14 +235,14 @@ impl fmt::Display for Divergence {
                 let node = writer.node.as_deref().unwrap_or("unknown");
                 write!(
                     f,
-                    "recorded by node {node} at epoch {} with sha256 {recorded}",
+                    "recorded by node {node} at epoch {} with {recorded}",
                     writer.epoch
                 )?;
             }
             _ => f.write_str("not on the stream")?,
         }
         match &self.replayed {
-            Some(replayed) => write!(f, ", replayed with sha256 {replayed}"),
+            Some(replayed) => write!(f, ", replayed with {replayed}"),
             None => f.write_str(", and the replay produced none"),
         }
     }

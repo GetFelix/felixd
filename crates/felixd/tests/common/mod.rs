@@ -18,7 +18,7 @@ use felixd_core::names;
 use felixd_core::output;
 use felixd_core::spec::Limits;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
-use felixd_runtime::Runtime;
+use felixd_runtime::{Input, Runtime, Stepped, Workload};
 
 /// The id every test gives its one workload, and its streams.
 pub(crate) const ID: &str = "wl";
@@ -56,7 +56,11 @@ pub(crate) async fn test_felix() -> Option<TestFelix> {
         brokers: brokers.split(',').map(|b| b.parse().unwrap()).collect(),
         server_name: "localhost".into(),
         tenant: var("FELIX_AUTH_TENANT"),
-        namespace: format!("t{nanos:x}"),
+        // The clock alone can repeat across tests that start together.
+        namespace: format!(
+            "t{nanos:x}{:x}",
+            NEXT_NAMESPACE.fetch_add(1, Ordering::Relaxed)
+        ),
         token: read("FELIX_AUTH_TOKEN_FILE"),
         ca_file: Some(PathBuf::from(var("FELIX_CA_FILE"))),
         controlplane_url: var("FELIX_CONTROLPLANE_URL"),
@@ -140,25 +144,28 @@ impl TestFelix {
 
     /// As [`Self::submit`], as workload `id`.
     pub(crate) async fn submit_as(&self, id: &str, workload: &str, args: &[&str]) -> Vec<u8> {
-        let module = felixd_testkit::workload(workload);
-        let dir = std::env::temp_dir().join(format!("felixd-{}", self.settings.namespace));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{workload}.wasm"));
-        std::fs::write(&path, &module).unwrap();
-        let replicas = replication_factor();
         let kind = StreamKind {
-            replication_factor: replicas,
+            replication_factor: replication_factor(),
         };
         ensure_stream(&self.settings, INPUT, kind).await.unwrap();
-        let status = self
-            .felixd(&["run", "--id", id, "--input", INPUT])
-            .args(["--replication-factor", &replicas.to_string()])
+        let module = felixd_testkit::workload(workload);
+        assert!(self.run(id, &module, INPUT, args).success());
+        module
+    }
+
+    /// Runs `felixd run <args>` for `module` as workload `id` reading
+    /// `input`, which must exist.
+    pub(crate) fn run(&self, id: &str, module: &[u8], input: &str, args: &[&str]) -> ExitStatus {
+        let dir = std::env::temp_dir().join(format!("felixd-{}", self.settings.namespace));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.wasm", felixd_core::module::hash(module)));
+        std::fs::write(&path, module).unwrap();
+        self.felixd(&["run", "--id", id, "--input", input])
+            .args(["--replication-factor", &replication_factor().to_string()])
             .args(args)
             .arg(&path)
             .status()
-            .unwrap();
-        assert!(status.success());
-        module
+            .unwrap()
     }
 
     pub(crate) async fn publish_all(
@@ -202,7 +209,11 @@ impl TestFelix {
     }
 
     pub(crate) async fn spec(&self) -> WorkloadSpec {
-        let value = self.felix.cache_get(names::WORKLOADS, ID).await.unwrap();
+        self.spec_of(ID).await
+    }
+
+    pub(crate) async fn spec_of(&self, id: &str) -> WorkloadSpec {
+        let value = self.felix.cache_get(names::WORKLOADS, id).await.unwrap();
         WorkloadSpec::decode(&value.expect("the workload has a spec")).unwrap()
     }
 
@@ -256,8 +267,13 @@ impl TestFelix {
 
     /// Waits for the workload to be marked failed and returns why.
     pub(crate) async fn failure(&self) -> String {
+        self.failure_of(ID).await
+    }
+
+    /// As [`Self::failure`], for workload `id`.
+    pub(crate) async fn failure_of(&self, id: &str) -> String {
         eventually("the workload to fail", Duration::from_secs(30), || async {
-            let spec = self.spec().await;
+            let spec = self.spec_of(id).await;
             (spec.state == WorkloadState::Failed).then(|| spec.failure.unwrap_or_default())
         })
         .await
@@ -278,6 +294,7 @@ pub(crate) fn replication_factor() -> u32 {
 pub(crate) const LEASE_TTL: Duration = Duration::from_secs(2);
 
 static NEXT_NODE: AtomicU32 = AtomicU32::new(0);
+static NEXT_NAMESPACE: AtomicU32 = AtomicU32::new(0);
 
 /// A running `felixd agent`, killed when dropped so a failing test does not
 /// leave it behind.
@@ -363,21 +380,61 @@ where
     }
 }
 
-/// What the output stream should hold: every output of every input, run
-/// through the same module without interruption.
-pub(crate) fn expected(module: &[u8], inputs: &[(u64, Vec<u8>)]) -> Vec<Vec<u8>> {
+/// The input at `offset` on [`INPUT`], as the agent hands it to a step.
+pub(crate) fn input(offset: u64, timestamp_micros: u64, payload: &[u8]) -> Input<'_> {
+    Input {
+        stream: INPUT,
+        incarnation: 0,
+        offset,
+        timestamp_micros,
+        key: None,
+        payload,
+    }
+}
+
+/// Steps `workload` through `payloads` at offsets from 0, for a workload
+/// that reads neither offsets nor times.
+pub(crate) fn step_all(workload: &mut Workload, payloads: impl IntoIterator<Item = Vec<u8>>) {
+    for (offset, payload) in (0..).zip(payloads) {
+        workload.step(input(offset, 0, &payload)).unwrap();
+    }
+}
+
+/// What the output stream should hold: every output or rejection of every
+/// input on [`INPUT`], run through the same module without interruption.
+pub(crate) fn expected(module: &[u8], inputs: &[felix_client::StreamRecord]) -> Vec<Vec<u8>> {
     let mut workload = Runtime::new()
         .unwrap()
         .load(module, Limits::default())
         .unwrap();
     let mut records = Vec::new();
-    for (offset, payload) in inputs {
-        for (index, out) in workload.step(payload).unwrap().iter().enumerate() {
-            let header = output::OutputHeader {
-                input_offset: *offset,
-                index: index as u32,
-            };
-            records.push(output::encode(header, 0, out));
+    for record in inputs {
+        let offset = record.offset;
+        let stepped = workload
+            .step(input(offset, record.timestamp_micros, &record.payload))
+            .unwrap();
+        match stepped {
+            Stepped::Outputs(outputs) => {
+                for (index, out) in outputs.iter().enumerate() {
+                    let header = output::OutputHeader {
+                        input_offset: offset,
+                        index: index as u32,
+                    };
+                    let addressed = output::Addressed {
+                        name: &out.name,
+                        key: out.key.as_deref(),
+                        payload: &out.payload,
+                    };
+                    records.push(output::encode_addressed(header, 0, addressed).unwrap());
+                }
+            }
+            Stepped::Rejected { code, detail } => {
+                let rejected = output::Rejected {
+                    code,
+                    detail: detail.as_bytes(),
+                };
+                records.push(output::encode_rejection(offset, 0, rejected));
+            }
         }
     }
     records
@@ -396,7 +453,8 @@ pub(crate) async fn assert_uninterrupted_on(
     inputs: u64,
     output: &str,
 ) {
-    let inputs_found = t.read_all(INPUT).await;
+    let tail = t.felix.tail(INPUT).await.unwrap();
+    let inputs_found = t.felix.read_range(INPUT, 0, tail).await.unwrap();
     assert_eq!(inputs_found.len() as u64, inputs);
     let want = expected(module, &inputs_found);
     eventually("all output", Duration::from_secs(60), || async {

@@ -35,8 +35,28 @@ pub enum LoadError {
     /// A workload gets nothing from the host, not even a clock or randomness.
     #[error("the component imports {}, but workloads may import nothing", .0.join(", "))]
     Imports(Vec<String>),
+    /// The component is a workload of the 0.1 contract, which this build
+    /// does not run. It needs a rebuild, not a retry.
+    #[error("the component is built against felixd:workload@0.1.0, rebuild it against 0.2")]
+    Contract01,
+    #[error("the component does not export {STEP} and {STATE}; it exports {}", found(.0))]
+    NotAWorkload(Vec<String>),
     #[error("the component does not implement the workload world: {0}")]
     Instantiate(String),
+}
+
+/// The interfaces a 0.2 workload exports.
+pub(crate) const STEP: &str = "felixd:workload/step@0.2.0";
+pub(crate) const STATE: &str = "felixd:workload/state@0.2.0";
+/// The top-level functions a 0.1 workload exports.
+const CONTRACT_01: [&str; 4] = ["step", "snapshot", "restore", "inspect"];
+
+fn found(exports: &[String]) -> String {
+    if exports.is_empty() {
+        "nothing".to_owned()
+    } else {
+        exports.join(", ")
+    }
 }
 
 impl Runtime {
@@ -59,8 +79,8 @@ impl Runtime {
         self.instantiate(&self.compile(bytes)?, limits)
     }
 
-    /// Compiles `bytes` as a component and checks it imports nothing. This is
-    /// the slow part of [`Runtime::load`].
+    /// Compiles `bytes` as a component and checks it imports nothing and
+    /// exports the 0.2 interfaces. This is the slow part of [`Runtime::load`].
     pub fn compile(&self, bytes: &[u8]) -> Result<Compiled, LoadError> {
         let component =
             Component::new(&self.engine, bytes).map_err(|e| LoadError::Invalid(e.to_string()))?;
@@ -72,7 +92,19 @@ impl Runtime {
         if !imports.is_empty() {
             return Err(LoadError::Imports(imports));
         }
-        Ok(Compiled(component))
+        let exports: Vec<String> = component
+            .component_type()
+            .exports(&self.engine)
+            .map(|(name, _)| name.to_string())
+            .collect();
+        let has = |name: &str| exports.iter().any(|e| e == name);
+        if has(STEP) && has(STATE) {
+            Ok(Compiled(component))
+        } else if CONTRACT_01.iter().all(|name| has(name)) {
+            Err(LoadError::Contract01)
+        } else {
+            Err(LoadError::NotAWorkload(exports))
+        }
     }
 
     /// Instantiates a compiled component under `limits`, in its initial

@@ -277,18 +277,13 @@ can lose its disk and rejoin.
 
 ## The workload contract
 
-A workload is a Wasm component that implements one WIT world:
-
-```wit
-world workload {
-  // Handle one input record. Returns the output records it produced.
-  export step: func(input: list<u8>) -> list<list<u8>>;
-  export snapshot: func() -> list<u8>;
-  export restore: func(state: list<u8>);
-  // Current state as JSON, for replay and inspection.
-  export inspect: func() -> string;
-}
-```
+A workload is a Wasm component that implements the WIT world in
+`wit/workload.wit`, workload contract 0.2. [contract.md](contract.md) gives the
+interface and what each side guarantees. In short, `step` gets one input
+record with its stream, offset, append time and key, and returns outputs
+addressed by name and key, or rejects the input, or poisons the workload. The
+state is snapshotted and restored in chunks, and `inspect` returns it as JSON.
+A component of the 0.1 contract is refused.
 
 The component gets no WASI imports: no clock, no randomness, no files, no
 network. Anything it needs from the world, including the current time, arrives
@@ -302,8 +297,10 @@ Each call into the workload runs with a fuel limit and a memory cap. Both are
 in the workload's spec, set by `felixd run --fuel --max-memory`, so every node
 runs it under the same limits and fails it at the same step. The Wasm stack
 size and the bounds on tables, table elements, instances and memories are
-fixed in felixd itself. A workload that runs out of fuel or traps, in `step`,
-`snapshot` or `restore`, is stopped and marked failed. It isn't retried,
+fixed in felixd itself. A whole snapshot or restore, every chunk call
+together, runs under its own `snapshot_fuel`. A workload that runs out of fuel
+or traps, in `step`, `snapshot` or `restore`, returns `poison`, or returns
+something the contract forbids, is stopped and marked failed. It isn't retried,
 because a deterministic failure would fail again on any node.
 
 A call can run for as long as its fuel allows, so `step`, `snapshot` and

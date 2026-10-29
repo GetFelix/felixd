@@ -85,28 +85,28 @@ it so a node that has lost its lease does not try.
 
 ## How actions map to the code
 
-Paths are from the repository root, as of the failure record (#70).
+Paths are from the repository root, as of workload contract 0.2.
 
 | Action | Code |
 |---|---|
-| `Claim` | `cache_put_if` on absent with the TTL: `crates/agent/src/lease.rs:180-193`; the agent's retry loop: `crates/agent/src/agent.rs:399-441` |
-| `TakeEpoch` | the floor, `written_epoch` over the last records of `.out` and `.snap`: `crates/agent/src/agent.rs:537-558`; the counter read and `next_epoch`: `crates/agent/src/lease.rs:212-220`, `crates/core/src/lease.rs:53-55` |
+| `Claim` | `cache_put_if` on absent with the TTL: `crates/agent/src/lease.rs:180-193`; the agent's retry loop: `crates/agent/src/agent.rs:414-454` |
+| `TakeEpoch` | the floor, `written_epoch` over the last records of `.out` and `.snap`: `crates/agent/src/agent.rs:557-578`; the counter read and `next_epoch`: `crates/agent/src/lease.rs:212-220`, `crates/core/src/lease.rs:53-55` |
 | `PutEpoch` | `put_epoch_if` at the version read: `crates/agent/src/lease.rs:221-226`; a refusal releases the claim: `crates/agent/src/lease.rs:194-198` |
 | `PutLease` | the lease rewritten with the epoch at the claim's version: `crates/agent/src/lease.rs:227-248` |
-| `Marker`, `MarkerAck`, `MarkerRetry` | `OutputLog::claim` with the tail read with the floor, and `check_found` on the last record and the records past the tail: `crates/agent/src/output.rs:126-230`, `crates/agent/src/agent.rs:411-420`; the record is `encode_claim`: `crates/core/src/output.rs:91-96` |
+| `Marker`, `MarkerAck`, `MarkerRetry` | `OutputLog::claim` with the tail read with the floor, and `check_found` on the last record and the records past the tail: `crates/agent/src/output.rs:126-230`, `crates/agent/src/agent.rs:423-428`; the record is `encode_claim`: `crates/core/src/output.rs:91-96` |
 | `Probe` | `OutputLog::claim` once the claim has landed: the tail and `check_found` on the last record: `crates/agent/src/output.rs:133-142` |
-| `ReadSnap` | the last snapshot and the superseded check: `crates/agent/src/runner.rs:259-275` |
-| `ReadOut` | the last output passing over claims, the superseded check and `resume::fold`: `crates/agent/src/runner.rs:277-295`, `crates/agent/src/runner.rs:488-508`, `crates/core/src/resume.rs:104-137` |
-| `Step` | `Steps::step`, with `already_written` and `Written::check`: `crates/agent/src/runner.rs:372-403`, `crates/core/src/resume.rs:70-77`, `crates/agent/src/runner.rs:522-539` |
+| `ReadSnap` | the last snapshot, passing over chunk records, and the superseded check on the last record of any kind: `crates/agent/src/runner.rs:295-304`, `crates/agent/src/snapshots.rs:55-83` |
+| `ReadOut` | the last output passing over claims, the superseded check and `resume::fold`: `crates/agent/src/runner.rs:305-323`, `crates/agent/src/runner.rs:618-638`, `crates/core/src/resume.rs:104-137` |
+| `Step` | `Steps::step`, with `already_written` and `Written::check`: `crates/agent/src/runner.rs:420-457`, `crates/core/src/resume.rs:70-77`, `crates/agent/src/runner.rs:651-670`. A rejection is the step's one output, at index 0 |
 | `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:244-280` |
 | `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:282-329`, `crates/core/src/output.rs:236-283` |
-| `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:404-409`, `crates/core/src/resume.rs:82-85` |
-| `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:411-472` |
-| `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:634-648` |
-| `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:596-598` |
-| `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:704-733`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
+| `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
+| `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
+| `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:656-670` |
+| `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:617-619` |
+| `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:726-755`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
 | `FailSend`, `FailAck`, `FailRetry` | `record_failure`: `crates/agent/src/output.rs:43-94`; the record is `encode_failure`: `crates/core/src/output.rs:100-107`. A retry reads the tail again in `record_failure`'s loop, or confirms again in `mark_failed`'s once that loop gives up |
-| `Derive` | `write_failed`: `crates/agent/src/agent.rs:770-828`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:623-633` |
+| `Derive` | `write_failed`: `crates/agent/src/agent.rs:814-850`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:645-655` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
 | `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |
 | `LocalDeadline`, `StopLocal` | `Fence::holds` and the 2/3 TTL stop: `crates/agent/src/lease.rs:125-159`, `crates/core/src/lease.rs:87-93` |
@@ -149,7 +149,10 @@ they are several reads after the claim has won.
   `ClockFault` has put them out of step. An applied renewal puts them back in step. Clock rate
   drift and node clock skew are inside that margin: no node compares its clock with another's.
 - **Determinism** is assumed: an input's outputs are a fixed function of its offset. Payloads are
-  the `(input offset, index)` pair.
+  the `(input offset, index)` pair. A rejection is an output, and an output's name and key are part
+  of its payload.
+- **Snapshot chunks** are not modelled. A snapshot is its manifest record; the chunk records written
+  before it are read only through a manifest that names them.
 - **Snapshots** are taken whenever an owner chooses, which covers `snapshot_every` and
   `snapshot_every_ms`.
 - **Cache calls** are atomic and answered. Only stream appends are delayed, reordered, or left

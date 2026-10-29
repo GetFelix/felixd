@@ -92,14 +92,8 @@ async fn time_snapshots_land_at_the_same_inputs_on_two_nodes() {
                 .read_all(&stream)
                 .await
                 .iter()
-                .map(|(_, r)| {
-                    snapshot::decode(r)
-                        .unwrap()
-                        .taken()
-                        .unwrap()
-                        .header
-                        .input_offset
-                })
+                .filter_map(|(_, r)| snapshot::decode(r).unwrap().taken())
+                .map(|taken| taken.header.input_offset)
                 .collect();
             (got == want).then_some(())
         })

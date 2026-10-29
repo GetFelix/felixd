@@ -131,7 +131,12 @@ async fn a_crash_between_append_and_snapshot_resumes_from_the_last_snapshot() {
     assert!(!agent.exited(Duration::from_secs(60)).await.success());
     // Input 29's output is written and its snapshot is not.
     assert_eq!(t.outputs(OUTPUT).await.len(), 30);
-    assert_eq!(t.felix.tail(SNAPSHOTS).await.unwrap(), 2);
+    let snapshots = t.read_all(SNAPSHOTS).await;
+    let manifests = snapshots
+        .iter()
+        .filter(|(_, r)| felixd_core::snapshot::decode(r).unwrap().taken().is_some())
+        .count();
+    assert_eq!(manifests, 2, "{} records", snapshots.len());
 
     let mut agent = t.start_agent();
     t.publish_all(INPUT, (60..80).map(count)).await;

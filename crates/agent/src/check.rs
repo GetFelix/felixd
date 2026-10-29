@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail};
 use felix_client::CacheWatchItem;
 use felixd_core::check::{self, Expected, Finding};
 use felixd_core::output::{self, OutputHeader};
+
+use crate::input::{self, StepInput};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
@@ -63,22 +65,30 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let output_tail = felix.tail(&spec.output).await?;
     let records = felix.read_range(&spec.output, 0, output_tail).await?;
     let input_tail = felix.tail(&spec.input).await?;
-    let skip_claims = names::is_output_stream(&spec.input);
     let mut expected = Vec::new();
-    for input in felix.read_range(&spec.input, 0, input_tail).await? {
-        if skip_claims && output::passed_over(&input.payload, output::DEFAULT_NAME) {
-            continue;
-        }
-        // A step that fails ends the workload there, on every node.
-        let Ok(outputs) = workload.step(&input.payload) else {
+    for record in felix.read_range(&spec.input, 0, input_tail).await? {
+        // An input that cannot be read or a step that fails ends the workload
+        // there, on every node.
+        let Ok(read) = StepInput::read(
+            &spec,
+            record.offset,
+            record.timestamp_micros,
+            &record.payload,
+        ) else {
             break;
         };
-        for (index, payload) in outputs.into_iter().enumerate() {
+        let Some(step) = read else {
+            continue;
+        };
+        let Ok(stepped) = workload.step(step.as_input()) else {
+            break;
+        };
+        for (index, produced) in input::produced(stepped).into_iter().enumerate() {
             let header = OutputHeader {
-                input_offset: input.offset,
+                input_offset: record.offset,
                 index: u32::try_from(index)?,
             };
-            expected.push(Expected::output(header, payload));
+            expected.push(Expected { header, produced });
         }
     }
     let on_stream: Vec<(u64, &[u8])> = records

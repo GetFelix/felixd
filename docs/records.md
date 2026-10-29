@@ -27,8 +27,8 @@ An output continues with:
 | key length | the key, if the flag is 1 |
 | rest | the payload the workload returned |
 
-This build writes every output under the name `out` with no key. Named and keyed outputs come with
-workload contract 0.2 ([contract.md](contract.md)).
+The name and key are the ones the workload's `step` returned ([contract.md](contract.md)). An
+output whose name is not valid fails the workload instead of being written.
 
 A claim continues with the new owner's node id, in UTF-8, to the end of the record, so a reader can
 tell which node wrote each epoch. Claims written before that end after the epoch, and a reader takes
@@ -44,7 +44,7 @@ A holder appends it when the workload fails, before it writes `failed` into the 
 last record of that run: an owner of the same spec version that finds it writes `failed` into the
 spec and stops.
 
-A rejection says the workload rejected an input and carried on. It continues with:
+A rejection says the workload's `step` returned `reject` for an input and carried on. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -58,7 +58,8 @@ A rejection is that input's only output. The resume fold, the skipped-output che
 stream with a rejection where a replay produces an output, or the other way round, diverges. They
 pass over claims and failures. A workload whose input is another workload's output stream reads only
 the outputs addressed to one name, `out`, and passes over claims, failures, rejections and outputs of
-other names (`output::addressed_to`).
+other names (`output::addressed_to`). Its step gets the output's key and payload, not the record. A
+record there that does not decode fails the reader, since it cannot tell what the record holds.
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
@@ -92,8 +93,15 @@ A version 2 record is a whole snapshot and reads as one chunk:
 | 8 | the writer's lease epoch |
 | rest | what the workload's `snapshot` returned |
 
-A version 1 record has no epoch field and reads as epoch 0. This build still writes version 2
-snapshots, and restores and replays only version 2 and 1.
+A version 1 record has no epoch field and reads as epoch 0. This build writes version 3 snapshots
+and restores and replays all three.
+
+An owner writes a snapshot's new chunks with `publish_if` at the snapshot stream's tail, as many to a
+write as fit in 8 MiB, and the manifest last, in the same write as the last chunks when it fits.
+Each write checks the records it finds past the tail as before, so the fence and the superseded check
+are unchanged. Chunks that land without their manifest, after a crash or a partial batch, are never
+read. A new owner reads back from the tail for the last manifest or version 2 record, passing over
+chunks, reads the chunks it names and checks each hash; a mismatch fails the workload.
 
 ## Caches
 
@@ -101,8 +109,9 @@ Values in `workloads` and `leases` are JSON. They are to become versioned typed 
 ([design.md, System records and errors](design.md#system-records-and-errors)).
 
 - A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000),
-  `snapshot_every_ms` (absent unless set), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000)
-  and `max_memory_bytes` (default 64 MiB). A spec without `limits` gets the defaults. A failed spec
+  `snapshot_every_ms` (absent unless set), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000),
+  `max_memory_bytes` (default 64 MiB) and `snapshot_fuel` (default 500,000,000, for a whole
+  snapshot or restore). A spec without `limits` gets the defaults. A failed spec
   also has `failure`.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a decimal number.
 
