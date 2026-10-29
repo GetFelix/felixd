@@ -286,9 +286,6 @@ pub(crate) async fn run_workload(
             reason: found.reason.clone(),
         });
     }
-    if let Some(NeedsOperator(reason)) = error.downcast_ref::<NeedsOperator>() {
-        return Ok(Outcome::NeedsOperator(reason.clone()));
-    }
     if error.is::<Poison>() {
         Ok(Outcome::Failed(format!("{error:#}")))
     } else if error.is::<LostLease>() {
