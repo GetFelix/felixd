@@ -188,7 +188,18 @@ docker compose -f deploy/compose.yaml down -v
 `window.wasm` is in the same directory. `FELIX_VERSION` picks the Felix image
 tag. The compose file publishes no ports, so the CLI runs in the stack.
 `scripts/compose-failover.sh` runs this sequence and CI runs it on every
-pull request.
+pull request, under Docker and under rootless Podman.
+
+With Podman, install the docker-compose provider and start the Podman API
+socket, then run the same commands with `podman` in place of `docker` (use
+`podman kill` for the failover step):
+
+```
+systemctl --user enable --now podman.socket
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+export PODMAN_COMPOSE_PROVIDER=docker-compose
+ENGINE=podman scripts/compose-failover.sh
+```
 
 ## What we are trying to achieve
 

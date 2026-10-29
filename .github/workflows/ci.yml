@@ -79,16 +79,38 @@ jobs:
 
   # The deploy/compose.yaml stack: three brokers, a control plane and three
   # felixd containers. Kills the node holding a workload and checks that
-  # another takes it over without gaps or repeats.
+  # another takes it over without gaps or repeats. Runs under Docker and under
+  # rootless Podman (podman compose with the docker-compose provider).
   compose:
+    name: compose (${{ matrix.engine }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    env:
+      ENGINE: ${{ matrix.engine }}
+      PODMAN_COMPOSE_PROVIDER: docker-compose
     steps:
       - uses: actions/checkout@v4
+      - name: Podman API socket
+        if: matrix.engine == 'podman'
+        run: |
+          podman --version
+          # podman compose looks for a standalone docker-compose; the runner
+          # only has Docker's plugin build of it.
+          plugin=$(ls /usr/libexec/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose 2>/dev/null | head -n 1)
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$plugin" "$HOME/.local/bin/docker-compose"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/docker-compose" version
+          systemctl --user enable --now podman.socket
+          echo "DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock" >> "$GITHUB_ENV"
       - run: scripts/compose-failover.sh
       - name: Logs
         if: failure()
-        run: docker compose -f deploy/compose.yaml --profile producer --profile cli logs --no-color
+        run: $ENGINE compose -f deploy/compose.yaml --profile producer --profile cli logs --no-color
 
   # specs/Felixd.tla under every configuration in scripts/check_tla.sh: the
   # passing ones must pass and each twin must find its violation.
