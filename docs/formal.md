@@ -91,25 +91,25 @@ Paths are from the repository root, as of workload contract 0.2.
 | Action | Code |
 |---|---|
 | `Claim` | `cache_put_if` on absent with the TTL: `crates/agent/src/lease.rs:180-193`; the agent's retry loop: `crates/agent/src/agent.rs:405-500` |
-| `TakeEpoch` | the floor, `written_epoch` over the last records of `.out` and `.snap`: `crates/agent/src/agent.rs:699-719`; the counter read and `next_epoch`: `crates/agent/src/lease.rs:212-220`, `crates/core/src/lease.rs:53-55` |
+| `TakeEpoch` | the floor, `written_epoch` over the last records of `.out` and `.snap`: `crates/agent/src/agent.rs:698-719`; the counter read and `next_epoch`: `crates/agent/src/lease.rs:212-220`, `crates/core/src/lease.rs:53-55` |
 | `PutEpoch` | `put_epoch_if` at the version read: `crates/agent/src/lease.rs:221-226`; a refusal releases the claim: `crates/agent/src/lease.rs:194-198` |
 | `PutLease` | the lease rewritten with the epoch at the claim's version: `crates/agent/src/lease.rs:227-248` |
-| `Marker`, `MarkerAck`, `MarkerRetry` | `OutputLog::claim` with the tail read with the floor, and `check_found` on the last record and the records past the tail: `crates/agent/src/output.rs:126-230`, `crates/agent/src/agent.rs:462-470`; the record is `encode_claim`: `crates/core/src/output.rs:91-96` |
-| `Probe` | `OutputLog::claim` once the claim has landed: the tail and `check_found` on the last record: `crates/agent/src/output.rs:133-142` |
+| `Marker`, `MarkerAck`, `MarkerRetry` | `OutputLog::claim` with the tail read with the floor, and `check_found` on the last record and the records past the tail: `crates/agent/src/output.rs:249-379`, `crates/agent/src/agent.rs:464-472`; the record is `encode_claim_under`: `crates/core/src/output.rs:260-270` |
+| `Probe` | `OutputLog::claim` once the claim has landed: the tail and `check_found` on the last record: `crates/agent/src/output.rs:256-265` |
 | `ReadSnap` | the last snapshot, passing over chunk records, and the superseded check on the last record of any kind: `crates/agent/src/runner.rs:295-304`, `crates/agent/src/snapshots.rs:55-83` |
 | `ReadOut` | the last output passing over claims, the superseded check and `resume::fold`: `crates/agent/src/runner.rs:305-323`, `crates/agent/src/runner.rs:618-638`, `crates/core/src/resume.rs:104-137` |
 | `Step` | `Steps::step`, with `already_written` and `Written::check`: `crates/agent/src/runner.rs:420-457`, `crates/core/src/resume.rs:70-77`, `crates/agent/src/runner.rs:651-670`. A rejection is the step's one output, at index 0 |
-| `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:244-280` |
-| `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:282-329`, `crates/core/src/output.rs:236-283` |
+| `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:393-436` |
+| `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:496-545` |
 | `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
-| `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:812-830` |
-| `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:766-768` |
-| `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:966-1000`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
-| `FailSend`, `FailAck`, `FailRetry` | `record_failure` and `record_needs_operator` over `append_last`: `crates/agent/src/output.rs:56-185`; the records are `encode_failure` and `encode_needs_operator`: `crates/core/src/output.rs:262-288`. A retry reads the tail again in `append_last`'s loop, or confirms again in `mark_failed`'s or `record_needs_operator`'s once that loop gives up |
-| `NeedsOperator` | a problem found before the claim, which the node then claims only to record (`before_claim` and `own`: `crates/agent/src/agent.rs:405-570`), or once the claim is on the stream, when the spec is checked again or a restore runs out of fuel (`Outcome::NeedsOperator`); recorded by `record_needs_operator`: `crates/agent/src/agent.rs:893-960` |
-| `Park` | the lease released and the task left waiting for a spec change: `own`, `Ended::NeedsOperator`. A needs-operator record found by `check_found` (`crates/agent/src/output.rs:332`) or before the claim (`recorded_needs_operator`: `crates/agent/src/agent.rs:574`) leads here |
-| `Derive` | `write_failed`: `crates/agent/src/agent.rs:1050-1086`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:801-811` |
+| `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:814-832` |
+| `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:765-767` |
+| `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:969-1023`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
+| `FailSend`, `FailAck`, `FailRetry` | `record_failure` and `record_needs_operator` over `append_last`: `crates/agent/src/output.rs:56-197`; the records are `encode_failure` and `encode_needs_operator`: `crates/core/src/output.rs:272-297`. A retry reads the tail again in `append_last`'s loop, or confirms again in `mark_failed`'s or `record_needs_operator`'s once that loop gives up |
+| `NeedsOperator` | a problem found before the claim, which the node then claims only to record (`before_claim` and `own`: `crates/agent/src/agent.rs:405-571`), or once the claim is on the stream, when the spec is checked again or a restore runs out of fuel (`Outcome::NeedsOperator`); recorded by `record_needs_operator`: `crates/agent/src/agent.rs:895-960` |
+| `Park` | the lease released and the task left waiting for a spec change: `own`, `Ended::NeedsOperator`. A needs-operator record found by `check_found` (`crates/agent/src/output.rs:345`) or before the claim (`recorded_needs_operator`: `crates/agent/src/agent.rs:573`) leads here |
+| `Derive` | `write_failed`: `crates/agent/src/agent.rs:1053-1089`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:803-813` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
 | `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |
 | `LocalDeadline`, `StopLocal` | `Fence::holds` and the 2/3 TTL stop: `crates/agent/src/lease.rs:125-159`, `crates/core/src/lease.rs:87-93` |

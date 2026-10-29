@@ -1043,7 +1043,11 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   module still missing after 30 s, a module this build refuses, a spec that
   is not in the history or conflicts with the output, and a restore out of
   fuel are recorded. A stale spec is not, since only the node holding it sees
-  it. `felixd ps` is to show it
+  it. The record raises the spec floor like a claim and is passed over when
+  finding the first claim, so it neither hides the history nor lets a stale
+  node claim after it. A spec record still read as past the tail of
+  `sys.specs` after 30 s is recorded, so a lagging spec-history read stops the
+  workload cluster-wide until the spec is submitted again. `felixd ps` is to show it
   ([#17](https://github.com/GetFelix/felixd/issues/17)).
 - A workload stuck on a transient error past a bound releases its lease and is
   recorded `degraded` with its class and reason, so it is visible instead of

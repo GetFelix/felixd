@@ -162,6 +162,16 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// The spec record a needs-operator record names. Such a record may be
+    /// written with no claim before it, so code that looks for the first
+    /// claim passes over it, and the highest spec claimed counts it.
+    pub fn needs_operator_spec(&self) -> Option<u64> {
+        match self {
+            Record::NeedsOperator { spec, .. } => Some(*spec),
+            _ => None,
+        }
+    }
+
     /// The output, unless this is another kind of record.
     pub fn output(self) -> Option<(Written, Addressed<'a>)> {
         match self {

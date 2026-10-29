@@ -30,10 +30,10 @@
 //! - `freeze-before-claim=N`: stop the process with `SIGSTOP` just before its
 //!   Nth claim append, after the lease was checked. It carries on at `SIGCONT`.
 //! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
-//!   workload's spec and confirming the lease to record the failure, as a slow
-//!   broker would.
-//! - `freeze-before-failure-record=1`: stop the process with `SIGSTOP` at the
-//!   same point. It carries on at `SIGCONT`.
+//!   workload's spec and confirming the lease to record the failure, or that
+//!   it needs an operator, as a slow broker would.
+//! - `freeze-before-failure-record=N`: stop the process with `SIGSTOP` at the
+//!   same point, the Nth time it is reached. It carries on at `SIGCONT`.
 //! - `freeze-before-failure-append=1`: stop the process with `SIGSTOP` after
 //!   the lease was confirmed and the output tail read, just before the failure
 //!   record is appended. It carries on at `SIGCONT`.
@@ -61,6 +61,7 @@ static APPENDS: AtomicU64 = AtomicU64::new(0);
 static SKIPPED: AtomicU64 = AtomicU64::new(0);
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
+static FAILURE_RECORDS: AtomicU64 = AtomicU64::new(0);
 
 /// A conditional write the answer faults count.
 #[derive(Clone, Copy, Debug)]
@@ -207,7 +208,8 @@ pub(crate) async fn before_failure_record() {
     if let Some(ms) = fault("delay-failure-record") {
         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
-    if fault("freeze-before-failure-record") == Some(1) {
+    let n = FAILURE_RECORDS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-failure-record") == Some(n) {
         freeze();
     }
 }

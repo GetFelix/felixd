@@ -436,24 +436,23 @@ async fn own(
         }
         // Before the lease claim, so a spec every node refuses does not
         // take an epoch on each of them. The runner looks again after its
-        // claim is on the stream.
-        if pending.is_none() {
-            match specs::refuse_stale_or_foreign(&node.felix, &id, &spec).await {
-                Ok(()) => {}
-                Err(error) => {
-                    if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
-                        if !recordable(&spec, problem) {
-                            needs_operator(&id, problem, &mut stop).await;
-                            return;
-                        }
-                        pending = Some(problem.clone());
-                    } else {
-                        tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
-                        if !pause(&mut stop).await {
-                            return;
-                        }
-                        continue;
+        // claim is on the stream. A node with a problem to record looks too:
+        // a stale one must not record over a later spec.
+        match specs::refuse_stale_or_foreign(&node.felix, &id, &spec).await {
+            Ok(()) => {}
+            Err(error) => {
+                if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
+                    if !recordable(&spec, problem) {
+                        needs_operator(&id, problem, &mut stop).await;
+                        return;
                     }
+                    pending.get_or_insert_with(|| problem.clone());
+                } else {
+                    tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                    if !pause(&mut stop).await {
+                        return;
+                    }
+                    continue;
                 }
             }
         }
@@ -795,6 +794,9 @@ async fn run_held(
                 problem,
                 recorded: true,
             } => return Ended::NeedsOperator(problem),
+            Outcome::NeedsOperator { problem, .. } if !recordable(spec, &problem) => {
+                return Ended::NeedsOperator(problem);
+            }
             Outcome::NeedsOperator { problem, .. } => {
                 return record_needs_operator(node, id, spec, &problem, &fence, &confirmer).await;
             }
@@ -916,6 +918,7 @@ async fn record_needs_operator(
                 continue;
             }
         };
+        faults::before_failure_record().await;
         if !confirmer.confirm().await || !fence.holds() {
             tracing::warn!(workload = %id, "the lease is lost, not recording that it needs an operator");
             return Ended::Lost;

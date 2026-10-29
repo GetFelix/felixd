@@ -275,5 +275,10 @@ async fn a_refused_claim_carries_the_floor_so_the_next_stale_node_refuses() {
         .filter(|(_, r)| matches!(output::decode(r), Ok(Record::Claim { .. })))
         .count();
     assert_eq!(claims, 2, "the second stale node claimed");
+    assert_eq!(
+        t.needs_operator().await.0,
+        [],
+        "a stale spec was recorded as needing an operator"
+    );
     assert!(first.alive(), "the first stale node exited");
 }

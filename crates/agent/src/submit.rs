@@ -94,7 +94,9 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         None => None,
         Some(previous) => match specs::written_under(&felix, &submission.id).await? {
             Some(written) => Some(written),
-            None if has_records(&felix, &spec.output).await?
+            None if specs::first_run_record(&felix, &spec.output)
+                .await?
+                .is_some()
                 || has_records(&felix, &snap_stream).await? =>
             {
                 Some(previous)

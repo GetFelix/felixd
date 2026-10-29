@@ -7,8 +7,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ID, INPUT, LEASE_TTL, OUTPUT, eventually, test_felix};
-use felixd_core::class::OperatorReason;
+use common::{ID, INPUT, LEASE_TTL, OUTPUT, TestFelix, eventually, test_felix};
+use felixd_agent::admin::{StreamKind, ensure_stream};
+use felixd_core::class::{ErrorClass, OperatorReason};
 use felixd_core::names;
 use felixd_core::output::{self, Record};
 use felixd_core::spec::WorkloadState;
@@ -84,4 +85,167 @@ async fn an_owner_finds_the_record_past_the_tail_and_stops() {
         );
     }
     assert_eq!(t.spec().await.state, WorkloadState::Running);
+}
+
+/// Workload `other`'s spec record, put in [`ID`]'s `workloads` entry, so
+/// that every node finds a problem to record before it claims.
+async fn unrecorded_spec(t: &TestFelix) {
+    t.submit_as("other", "counter", &[]).await;
+    let other = t.spec_of("other").await.record;
+    t.submit("counter", &[]).await;
+    let mut spec = t.spec().await;
+    spec.record = other;
+    t.put_cache_spec(&spec).await;
+}
+
+/// The epoch of the last record on the output stream, and its tail.
+async fn last_epoch(t: &TestFelix) -> (u64, u64) {
+    let records = t.read_all(OUTPUT).await;
+    let epoch = records
+        .last()
+        .map_or(0, |(_, r)| output::decode(r).unwrap().epoch());
+    (epoch, t.felix.tail(OUTPUT).await.unwrap())
+}
+
+/// The first record is a needs-operator record for r1, written before any
+/// claim. r2 then runs. r3 changes the input, which r2's output was not
+/// written from, so the owner refuses it: the history starts at r2's claim,
+/// not at the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_before_the_first_claim_does_not_hide_the_history() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let spec = t.spec().await;
+    t.publish_if(OUTPUT, vec![needs_operator(0, spec.record.unwrap())], 0)
+        .await;
+    t.put_spec(&spec).await;
+    let _agent = t.start_agent();
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 3).then_some(())
+    })
+    .await;
+
+    let moved = "in-2";
+    let kind = StreamKind {
+        replication_factor: common::replication_factor(),
+    };
+    ensure_stream(&t.settings, moved, kind).await.unwrap();
+    let mut changed = t.spec().await;
+    changed.input = moved.into();
+    t.put_spec(&changed).await;
+    t.publish_all(moved, (0..5).map(count)).await;
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::SpecConflict
+    );
+    assert_eq!(t.outputs(OUTPUT).await.len(), 3, "the changed input ran");
+}
+
+/// r0 ran, and a node recorded that r2 needs an operator without claiming.
+/// A node that still sees r0 must refuse instead of claiming and running r0
+/// over the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_node_does_not_claim_over_a_later_specs_record() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let mut first = t.start_agent();
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 3).then_some(())
+    })
+    .await;
+    first.kill();
+    let stale = t.spec().await;
+    t.put_spec(&stale).await;
+    let later = t.spec().await.record.unwrap();
+    let (epoch, tail) = last_epoch(&t).await;
+    t.publish_if(OUTPUT, vec![needs_operator(epoch, later)], tail)
+        .await;
+    t.put_cache_spec(&stale).await;
+
+    let _second = t.start_agent();
+    t.publish_all(INPUT, (3..6).map(count)).await;
+    tokio::time::sleep(LEASE_TTL * 4).await;
+    assert_eq!(t.outputs(OUTPUT).await.len(), 3, "the stale spec ran");
+    let after: Vec<_> = t
+        .read_all(OUTPUT)
+        .await
+        .into_iter()
+        .filter(|&(offset, _)| offset > tail)
+        .collect();
+    assert!(after.is_empty(), "something was written after the record");
+}
+
+/// A node with a problem to record still checks that its spec is not
+/// stale: a later spec record has been claimed, so it records nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_node_with_a_problem_does_not_record_it() {
+    let Some(t) = test_felix().await else { return };
+    t.submit_as("other", "counter", &[]).await;
+    let older = t.spec_of("other").await.record;
+    t.submit("counter", &[]).await;
+    let mut spec = t.spec().await;
+    let newer = spec.record.unwrap();
+    assert!(older < Some(newer));
+    t.publish_if(
+        OUTPUT,
+        vec![output::encode_claim_under(0, newer, newer, "newer")],
+        0,
+    )
+    .await;
+    spec.record = older;
+    t.put_cache_spec(&spec).await;
+    let _agent = t.start_agent();
+    tokio::time::sleep(LEASE_TTL * 3).await;
+    assert_eq!(t.needs_operator().await.0, [], "the stale node recorded");
+}
+
+/// The holder is frozen before it confirms its lease to record that the
+/// workload needs an operator, and its lease ends meanwhile. Its local
+/// deadline, from a long TTL, still says it holds. The renewal right before
+/// the append is refused, so it writes nothing at the old epoch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holder_renews_before_it_records_that_a_workload_needs_an_operator() {
+    let Some(t) = test_felix().await else { return };
+    unrecorded_spec(&t).await;
+    let frozen = t.start_node_with_ttl(
+        "holder",
+        "freeze-before-failure-record=1",
+        Duration::from_secs(30),
+    );
+    eventually("the freeze", Duration::from_secs(60), || async {
+        frozen.stopped().then_some(())
+    })
+    .await;
+    let (stale, version) = t.lease(ID).await.expect("the frozen node's lease");
+    t.felix
+        .cache_delete_if(names::LEASES, ID, version)
+        .await
+        .unwrap();
+    frozen.resume();
+    t.needs_operator_recorded().await;
+    for (_, found) in t.read_all(OUTPUT).await {
+        assert_ne!(
+            output::decode(&found).unwrap().epoch(),
+            stale.epoch,
+            "it recorded at the epoch it no longer held"
+        );
+    }
+}
+
+/// A failure under the current spec version is last on the stream when a
+/// holder comes to record that the workload needs an operator. It writes
+/// `failed` into the spec instead, as a failure found anywhere else does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_found_while_recording_fails_the_spec() {
+    let Some(t) = test_felix().await else { return };
+    unrecorded_spec(&t).await;
+    let version = t.spec_version().await;
+    let failure = output::encode_failure(0, version, ErrorClass::Poison, "from the test");
+    t.publish_if(OUTPUT, vec![failure], 0).await;
+    let _agent = t.start_agent();
+    let found = t.failure().await;
+    assert!(found.contains("from the test"), "{found}");
+    assert_eq!(t.needs_operator().await.0, []);
 }

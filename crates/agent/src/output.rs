@@ -105,7 +105,28 @@ pub(crate) async fn record_needs_operator(
     problem: &NeedsOperator,
 ) -> Result<Recorded> {
     let record = output::encode_needs_operator(epoch, spec, problem.reason, &problem.detail);
-    let already = |found: &Record<'_>| match found {
+    append_last(
+        felix,
+        stream,
+        fence,
+        epoch,
+        record,
+        Recorded::NeedsOperator,
+        |found| needs_operator_found(found, (spec_version, spec), problem.reason),
+    )
+    .await
+}
+
+/// What [`record_needs_operator`] makes of `found`, the last record: a
+/// failure under `spec_version` or later is the outcome, and a needs-operator
+/// record for spec record `spec` and `reason` means it is already written.
+/// One for another reason is not, so each reason is written once.
+fn needs_operator_found(
+    found: &Record<'_>,
+    (spec_version, spec): (u64, u64),
+    reason: class::OperatorReason,
+) -> Option<Recorded> {
+    match found {
         Record::Failure {
             spec_version: found,
             class,
@@ -118,19 +139,10 @@ pub(crate) async fn record_needs_operator(
                 detail: String::from_utf8_lossy(reason).into_owned(),
             },
         }),
-        found => (found.needs_operator_under(spec) == Some(problem.reason))
-            .then_some(Recorded::NeedsOperator),
-    };
-    append_last(
-        felix,
-        stream,
-        fence,
-        epoch,
-        record,
-        Recorded::NeedsOperator,
-        already,
-    )
-    .await
+        found => {
+            (found.needs_operator_under(spec) == Some(reason)).then_some(Recorded::NeedsOperator)
+        }
+    }
 }
 
 /// Appends `record`, the last of this run, at the tail unless the last record
@@ -306,6 +318,7 @@ impl<'a> OutputLog<'a> {
                 {
                     floor = floor.max(claimed);
                 }
+                floor = floor.max(found.needs_operator_spec().unwrap_or(0));
                 // An earlier attempt that landed may carry an older floor.
                 ours |= matches!(found, Record::Claim { epoch, node, spec, .. }
                     if epoch == fence.epoch()
@@ -475,3 +488,6 @@ impl<'a> OutputLog<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

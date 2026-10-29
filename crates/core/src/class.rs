@@ -64,7 +64,8 @@ pub enum OperatorReason {
     /// The spec's module or input differ from those the output stream was
     /// written under.
     SpecConflict,
-    /// A later spec record has already been claimed. Only a node with a stale
+    /// A later spec record has already been claimed, or recorded as needing
+    /// an operator. Only a node with a stale
     /// view hits this, and its watch restarts it, so it is never recorded.
     SpecStale,
     /// Restoring the snapshot ran out of `snapshot_fuel`.

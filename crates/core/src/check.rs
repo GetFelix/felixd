@@ -415,6 +415,8 @@ pub fn specs_applied<'a>(
                 }
                 applied.push((next_input, spec));
             }
+            // Its writer refused every spec below it, as for a claim's floor.
+            Ok(Record::NeedsOperator { spec, .. }) => floor = floor.max(spec),
             Ok(found) => {
                 if let Some(written) = found.written() {
                     next_input = next_input.max(written.header.input_offset + 1);
@@ -430,7 +432,8 @@ pub fn specs_applied<'a>(
 /// under, which is the first claim's when that names one and `cached`, the
 /// `workloads` value, otherwise; and the limits each input ran under, as
 /// `(first input, limits)`. `claimed` holds the spec record of every spec
-/// the claims name ([`specs_claimed`]). A claim whose spec has another module
+/// the claims name ([`specs_claimed`]). A needs-operator record before the
+/// first claim ran nothing and is passed over. A claim whose spec has another module
 /// or input than the first claim's was refused by its owner and is passed
 /// over, so a refused later spec never decides the module or the limits.
 pub fn judged_under<'a, R>(
@@ -444,7 +447,8 @@ where
     let first = records
         .clone()
         .into_iter()
-        .find_map(|r| output::decode(r).ok());
+        .filter_map(|r| output::decode(r).ok())
+        .find(|r| r.needs_operator_spec().is_none());
     let lineage = match first {
         Some(Record::Claim {
             spec: Some(spec), ..

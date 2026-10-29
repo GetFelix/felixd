@@ -164,7 +164,10 @@ not a failure: the spec stays `running`, and the node writes one
 needs-operator record with the reason to the output stream, fenced the same
 way. Every node then leaves the workload alone until its spec changes or it
 is removed. Cache values and stream records carry a format version, so an
-older felixd refuses a newer record instead of misreading it.
+older felixd refuses a newer record instead of misreading it. For a workload
+that reads another workload's output stream, refusing means failing: an older
+felixd fails it as poison once a failure or needs-operator record lands on
+the stream it reads. Upgrade every node first.
 
 ## Try it on three nodes
 
