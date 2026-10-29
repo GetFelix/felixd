@@ -384,3 +384,75 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
     assert_eq!(spec.state, WorkloadState::Running);
     assert_eq!(spec.failure, None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_that_runs_out_of_fuel_is_skipped_and_the_workload_goes_on() {
+    let Some(t) = test_felix().await else { return };
+    // Each step fits in the fuel; a snapshot of 20,000 chunks does not.
+    let module = t
+        .submit(
+            "faulty",
+            &[
+                "--snapshot-every",
+                "1",
+                "--fuel",
+                "2000000",
+                "--snapshot-fuel",
+                "2000000",
+            ],
+        )
+        .await;
+    let mut first = t.start_agent();
+    t.publish_all(INPUT, inputs(&["a"])).await;
+    eventually("the first snapshot", Duration::from_secs(60), || async {
+        snapshot_layout(&t).await.contains('M').then_some(())
+    })
+    .await;
+    let before = snapshot_layout(&t).await;
+    t.publish_all(INPUT, inputs(&["chunks:20000", "b", "c"]))
+        .await;
+    produced(&t, OUTPUT, 4).await;
+    assert_eq!(snapshot_layout(&t).await, before, "a snapshot was written");
+    let spec = t.spec().await;
+    assert_eq!(spec.state, WorkloadState::Running);
+    assert_eq!(spec.failure, None);
+    assert!(t.lease(ID).await.is_some(), "the workload is still held");
+
+    // The next owner restores the older snapshot and replays from it.
+    first.kill();
+    let _second = t.start_agent();
+    t.publish_all(INPUT, inputs(&["d"])).await;
+    assert_uninterrupted(&t, &module, 5).await;
+    assert_eq!(snapshot_layout(&t).await, before);
+    diff_passes(&t, ID);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_that_runs_out_of_fuel_is_left_for_an_operator() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("faulty", &["--snapshot-every", "1"]).await;
+    let mut first = t.start_agent();
+    t.publish_all(INPUT, inputs(&["chunks:20000", "x"])).await;
+    eventually("two snapshots", Duration::from_secs(60), || async {
+        (snapshot_layout(&t).await.matches('M').count() >= 2).then_some(())
+    })
+    .await;
+    first.kill();
+    let outputs = t.outputs(OUTPUT).await.len();
+
+    let mut spec = t.spec().await;
+    spec.limits.snapshot_fuel = 2_000_000;
+    t.put_spec(&spec).await;
+    let _second = t.start_agent();
+    t.publish_all(INPUT, inputs(&["y"])).await;
+    tokio::time::sleep(LEASE_TTL * 2).await;
+    assert!(t.lease(ID).await.is_none(), "the workload was held");
+    assert_eq!(
+        t.outputs(OUTPUT).await.len(),
+        outputs,
+        "something was written"
+    );
+    let spec = t.spec().await;
+    assert_eq!(spec.state, WorkloadState::Running);
+    assert_eq!(spec.failure, None);
+}

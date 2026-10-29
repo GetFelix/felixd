@@ -18,6 +18,7 @@ fn load(limits: Limits) -> Workload {
 fn failure<T: std::fmt::Debug>(result: Result<T, WorkloadError>) -> felixd_runtime::Failure {
     match result {
         Err(WorkloadError::Failed(f)) => f,
+        Err(other) => panic!("expected a failure, got {other}"),
         Ok(out) => panic!("expected a failure, got {out:?}"),
     }
 }
@@ -180,7 +181,10 @@ fn a_snapshot_runs_under_snapshot_fuel_not_step_fuel() {
     };
     let mut wl = load(tight);
     wl.step(input(0, b"chunks:20000")).unwrap();
-    assert_eq!(failure(wl.snapshot()).kind, FailureKind::OutOfFuel);
+    assert!(matches!(
+        wl.snapshot(),
+        Err(WorkloadError::SnapshotOutOfFuel)
+    ));
     assert_eq!(
         failure(load(tight).restore(&refs)).kind,
         FailureKind::OutOfFuel
@@ -196,4 +200,20 @@ fn a_contract_01_workload_is_refused() {
         .expect("refused");
     assert!(matches!(err, LoadError::Contract01), "{err}");
     assert!(err.to_string().contains("felixd:workload@0.1.0"), "{err}");
+}
+
+#[test]
+fn a_snapshot_that_runs_out_of_fuel_does_not_fail_the_workload() {
+    let limits = Limits {
+        fuel_per_call: 2_000_000,
+        snapshot_fuel: 2_000_000,
+        ..Limits::default()
+    };
+    let mut wl = load(limits);
+    wl.step(input(0, b"chunks:20000")).unwrap();
+    assert!(matches!(
+        wl.snapshot(),
+        Err(WorkloadError::SnapshotOutOfFuel)
+    ));
+    assert!(wl.failure().is_none());
 }

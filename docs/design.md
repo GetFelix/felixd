@@ -298,8 +298,11 @@ in the workload's spec, set by `felixd run --fuel --max-memory`, so every node
 runs it under the same limits and fails it at the same step. The Wasm stack
 size and the bounds on tables, table elements, instances and memories are
 fixed in felixd itself. A whole snapshot or restore, every chunk call
-together, runs under its own `snapshot_fuel`. A workload that runs out of fuel
-or traps, in `step`, `snapshot` or `restore`, returns `poison`, or returns
+together, runs under its own `snapshot_fuel`. A snapshot that runs out of it
+is abandoned, not a failure: nothing is written, the previous snapshot stays
+current, and the workload resumes from it. A restore that runs out leaves the
+workload to an operator, who can raise the limit. A workload that runs out of
+fuel in `step` or traps, in `step`, `snapshot` or `restore`, returns `poison`, or returns
 something the contract forbids, is stopped and marked failed. It isn't retried,
 because a deterministic failure would fail again on any node.
 

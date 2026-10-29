@@ -111,7 +111,8 @@ Values in `workloads` and `leases` are JSON. They are to become versioned typed 
 - A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000),
   `snapshot_every_ms` (absent unless set), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000),
   `max_memory_bytes` (default 64 MiB) and `snapshot_fuel` (default 500,000,000, for a whole
-  snapshot or restore). A spec without `limits` gets the defaults. A failed spec
+  snapshot or restore; a snapshot that runs out is skipped, a restore that runs out
+needs an operator). A spec without `limits` gets the defaults. A failed spec
   also has `failure`.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a decimal number.
 

@@ -198,7 +198,9 @@ size). The default is ten times the step default. `inspect` runs under
 Running out of snapshot fuel is not poison. A snapshot that runs out is
 abandoned: nothing is written, the previous snapshot stays current, the host
 counts and logs it, and the workload keeps running and replays from the older
-snapshot if it restarts. A restore that runs out puts the workload in
+snapshot if it restarts. A trap leaves the guest instance unusable, so the
+agent drops it, resumes from the older snapshot and does not retry a snapshot
+until `snapshot_every` more inputs have passed. A restore that runs out puts the workload in
 needs-operator, not failed, so the limit can be raised and the workload
 resumed. Fuel metering is deterministic, so every replica skips the same
 snapshots.

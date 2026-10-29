@@ -85,6 +85,11 @@ pub enum WorkloadError {
     /// deterministic, so running it again elsewhere would fail the same way.
     #[error("workload failed: {}", .0.message)]
     Failed(Failure),
+    /// A snapshot ran out of `limits.snapshot_fuel`. The workload has not
+    /// failed and nothing was taken, but the trap leaves this instance
+    /// unusable: the caller drops it and resumes from the last snapshot.
+    #[error("snapshot ran out of fuel")]
+    SnapshotOutOfFuel,
 }
 
 /// What a call produced, when the guest did not trap.
@@ -136,10 +141,11 @@ impl Workload {
     }
 
     /// The state, as the chunks `snapshot` and `snapshot-chunk` return. The
-    /// calls share one allowance of `limits.snapshot_fuel`.
+    /// calls share one allowance of `limits.snapshot_fuel`. Running out of it
+    /// is [`WorkloadError::SnapshotOutOfFuel`], not a failure of the workload.
     pub fn snapshot(&mut self) -> Result<Vec<Vec<u8>>, WorkloadError> {
         let fuel = self.limits.snapshot_fuel;
-        self.call(fuel, |bindings, store| {
+        let result = self.attempt(fuel, |bindings, store| {
             let state = bindings.felixd_workload_state();
             let count = state.call_snapshot(&mut *store)?;
             if count > MAX_CHUNKS {
@@ -159,7 +165,13 @@ impl Workload {
                 chunks.push(chunk);
             }
             Ok(Ok(chunks))
-        })
+        });
+        match result {
+            Err(failure) if failure.kind == FailureKind::OutOfFuel => {
+                Err(WorkloadError::SnapshotOutOfFuel)
+            }
+            result => result.map_err(|failure| self.fail(failure)),
+        }
     }
 
     /// Restores `chunks`, from [`Workload::snapshot`], into this instance,
@@ -199,13 +211,22 @@ impl Workload {
         fuel: u64,
         f: impl FnOnce(&Bindings, &mut Store<StoreLimits>) -> wasmtime::Result<Called<T>>,
     ) -> Result<T, WorkloadError> {
+        self.attempt(fuel, f).map_err(|failure| self.fail(failure))
+    }
+
+    /// Runs one guest call and returns how it failed without recording it.
+    fn attempt<T>(
+        &mut self,
+        fuel: u64,
+        f: impl FnOnce(&Bindings, &mut Store<StoreLimits>) -> wasmtime::Result<Called<T>>,
+    ) -> Called<T> {
         if let Some(failure) = &self.failure {
-            return Err(WorkloadError::Failed(failure.clone()));
+            return Err(failure.clone());
         }
         self.store.set_fuel(fuel).expect("fuel is enabled");
-        let failure = match f(&self.bindings, &mut self.store) {
-            Ok(Ok(value)) => return Ok(value),
-            Ok(Err(failure)) => failure,
+        match f(&self.bindings, &mut self.store) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(failure)) => Err(failure),
             Err(error) => {
                 let trap = error.downcast_ref::<Trap>();
                 let kind = match trap {
@@ -217,10 +238,9 @@ impl Workload {
                     Some(trap) => trap.to_string(),
                     None => format!("{error:#}"),
                 };
-                Failure { kind, message }
+                Err(Failure { kind, message })
             }
-        };
-        Err(self.fail(failure))
+        }
     }
 }
 

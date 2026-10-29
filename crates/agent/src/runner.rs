@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{MAX_WRITE_BYTES, module, names};
-use felixd_runtime::{Compiled, LoadError, Runtime, Workload, WorkloadError};
+use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
 use tokio::sync::{OnceCell, Semaphore};
 
 use crate::faults;
@@ -219,9 +220,28 @@ pub(crate) fn poison(message: impl fmt::Display) -> anyhow::Error {
 }
 
 fn failed(error: WorkloadError) -> anyhow::Error {
-    let WorkloadError::Failed(failure) = error;
-    poison(failure.message)
+    match error {
+        WorkloadError::Failed(failure) => poison(failure.message),
+        WorkloadError::SnapshotOutOfFuel => poison("a snapshot ran out of fuel"),
+    }
 }
+
+/// A snapshot ran out of `snapshot_fuel` and was abandoned. The wasm instance
+/// cannot be entered again after the trap, so the run ends and resumes from
+/// the last snapshot, which is still the one on the stream.
+#[derive(Debug)]
+struct SnapshotSkipped;
+
+impl fmt::Display for SnapshotSkipped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a snapshot ran out of fuel")
+    }
+}
+
+impl std::error::Error for SnapshotSkipped {}
+
+/// Snapshots abandoned for want of fuel since this process started.
+static SNAPSHOTS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 fn read_error(error: ReadError) -> anyhow::Error {
     match error {
@@ -246,9 +266,16 @@ pub(crate) async fn run_workload(
     fence: &Fence,
     claim_from: &mut Option<u64>,
 ) -> Result<Outcome> {
-    let error = match run(felix, runtime, id, spec, fence, claim_from).await {
-        Ok(never) => match never {},
-        Err(error) => error,
+    // The first input a snapshot may be tried at again after one ran out of
+    // fuel. Without it the run that resumes would retry at its first live
+    // input and replay the whole gap each time.
+    let mut hold = 0;
+    let error = loop {
+        match run(felix, runtime, id, spec, fence, claim_from, &mut hold).await {
+            Ok(never) => match never {},
+            Err(error) if error.is::<SnapshotSkipped>() => continue,
+            Err(error) => break error,
+        }
     };
     if let Some(Superseded(epoch)) = error.downcast_ref::<Superseded>() {
         return Ok(Outcome::Superseded(*epoch));
@@ -278,6 +305,7 @@ async fn run(
     spec: &WorkloadSpec,
     fence: &Fence,
     claim_from: &mut Option<u64>,
+    hold: &mut u64,
 ) -> Result<Infallible> {
     let spec_version = spec_version(felix, id, spec).await?;
     // The claim comes first, so that from here on a stale owner's append is
@@ -330,7 +358,17 @@ async fn run(
             w.restore(&chunks)
         })
         .await?
-        .map_err(failed)?;
+        .map_err(|error| match error {
+            WorkloadError::Failed(Failure {
+                kind: FailureKind::OutOfFuel,
+                ..
+            }) => NeedsOperator(format!(
+                "restoring the snapshot ran out of snapshot_fuel ({}), raise limits.snapshot_fuel",
+                spec.limits.snapshot_fuel
+            ))
+            .into(),
+            error => failed(error),
+        })?;
     }
     tracing::info!(workload = id, from = resume.next_input, "resumed");
     let skip_claims = names::is_output_stream(&spec.input);
@@ -361,6 +399,7 @@ async fn run(
         },
         since_snapshot: 0,
         previous_stamp,
+        hold,
     };
     let mut events = felix.subscribe_from(&spec.input, resume.next_input).await?;
     let mut next_input = resume.next_input;
@@ -414,6 +453,8 @@ struct Steps<'a> {
     since_snapshot: u64,
     /// The append time of the last input stepped, for time-based snapshots.
     previous_stamp: Option<u64>,
+    /// No snapshot is taken at an input below this.
+    hold: &'a mut u64,
 }
 
 impl Steps<'_> {
@@ -458,7 +499,7 @@ impl Steps<'_> {
 
         self.since_snapshot += 1;
         let due = interval || self.since_snapshot >= self.spec.snapshot_every;
-        if due && !self.resume.replaying(offset) {
+        if due && offset >= *self.hold && !self.resume.replaying(offset) {
             self.snapshot(offset).await?;
             self.since_snapshot = 0;
         }
@@ -473,9 +514,25 @@ impl Steps<'_> {
         if !self.fence.holds() {
             return Err(LostLease.into());
         }
-        let chunks = blocking(&self.modules.calls, &mut self.workload, Workload::snapshot)
-            .await?
-            .map_err(failed)?;
+        let chunks =
+            match blocking(&self.modules.calls, &mut self.workload, Workload::snapshot).await? {
+                Ok(chunks) => chunks,
+                Err(WorkloadError::SnapshotOutOfFuel) => {
+                    // Nothing has been written, so the previous snapshot is still
+                    // the latest. Fuel is metered deterministically, so every
+                    // replica skips the same snapshots.
+                    let skipped = SNAPSHOTS_SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        workload = self.snap_stream,
+                        input = input_offset,
+                        skipped,
+                        "a snapshot ran out of snapshot_fuel and was abandoned"
+                    );
+                    *self.hold = input_offset + self.spec.snapshot_every.max(1);
+                    return Err(SnapshotSkipped.into());
+                }
+                Err(error) => return Err(failed(error)),
+            };
         let taken = Taken {
             header: SnapshotHeader {
                 input_offset,

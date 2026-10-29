@@ -43,7 +43,8 @@ pub struct Limits {
     /// The most linear memory the workload may grow to, in bytes.
     pub max_memory_bytes: u64,
     /// Fuel for a whole snapshot, `snapshot` and every `snapshot-chunk`
-    /// call, and for a whole restore. Running out of it fails the workload.
+    /// call, and for a whole restore. A snapshot that runs out is skipped; a
+    /// restore that runs out leaves the workload to an operator.
     #[serde(default = "default_snapshot_fuel")]
     pub snapshot_fuel: u64,
 }

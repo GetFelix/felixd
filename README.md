@@ -106,7 +106,9 @@ snapshot already holds is not written again. `felixd run` refuses a component
 built against contract 0.1, and an agent that finds one in a spec leaves it
 alone and logs it, rather than failing it.
 `felixd run --fuel --max-memory --snapshot-fuel` sets the workload's limits:
-fuel per step, memory, and fuel for a whole snapshot or restore. They are stored in
+fuel per step, memory, and fuel for a whole snapshot or restore. A snapshot that
+runs out of fuel is skipped and the workload resumes from the previous one; a restore that
+runs out is left to an operator, who can raise the limit. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new
 module or input is refused once the workload has written anything; use a new
