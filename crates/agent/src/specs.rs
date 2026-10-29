@@ -195,11 +195,26 @@ pub(crate) async fn refuse_stale_or_foreign(
 /// at the first claim of any kind, so it reads every output since the last
 /// takeover but holds only one page.
 pub(crate) async fn claim_floor(felix: &Felix, stream: &str, end: u64) -> Result<Option<u64>> {
+    claim_floor_in(end, |from, end| async move {
+        let records = felix.read_range(stream, from, end).await?;
+        Ok(records.into_iter().map(|r| r.payload).collect())
+    })
+    .await
+}
+
+/// [`claim_floor`] over `read`, which returns the payloads at `from..end`.
+/// Never asks for more than [`LOOK_RECORDS`] offsets at once.
+async fn claim_floor_in<F, Fut, P>(end: u64, mut read: F) -> Result<Option<u64>>
+where
+    F: FnMut(u64, u64) -> Fut,
+    Fut: Future<Output = Result<Vec<P>>>,
+    P: AsRef<[u8]>,
+{
     let mut end = end;
     while end > 0 {
         let from = end.saturating_sub(LOOK_RECORDS);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
-            if let Ok(Record::Claim { floor, .. }) = output::decode(&record.payload) {
+        for record in read(from, end).await?.iter().rev() {
+            if let Ok(Record::Claim { floor, .. }) = output::decode(record.as_ref()) {
                 return Ok(floor);
             }
         }
@@ -215,3 +230,6 @@ pub(crate) async fn claim_floor(felix: &Felix, stream: &str, end: u64) -> Result
 pub(crate) async fn lineage(felix: &Felix, id: &str, cached: WorkloadSpec) -> Result<WorkloadSpec> {
     Ok(written_under(felix, id).await?.unwrap_or(cached))
 }
+
+#[cfg(test)]
+mod tests;

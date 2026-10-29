@@ -372,7 +372,12 @@ refuses to run a spec whose module or input differ from the spec the output
 stream's first claim names. Claims only move forward too: each claim carries
 the highest spec record claimed so far, like the epoch floor, and an agent
 refuses a spec record below the last claim's floor, which is what a node with
-a stale watch holds. Finding the last claim pages back from the tail a few
+a stale watch holds. A floor is permanent: moving `workloads` back to an
+older record below it is refused, and recovery is a new record above it. A
+claim from an older build carries no floor and resets it to zero, which is
+safe only because every node must run the same felixd build. `felixd check`
+applies the same rule, so it judges a claim the agent refused as not run.
+Finding the last claim pages back from the tail a few
 records at a time. It checks both before its lease claim, so a
 refused spec takes no epoch, and again once its own claim is on the stream,
 when no other claim can still land first. Either way the workload is left to

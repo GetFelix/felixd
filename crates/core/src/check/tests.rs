@@ -516,6 +516,24 @@ fn a_claim_under_an_older_spec_than_one_claimed_is_passed_over() {
     );
 }
 
+#[test]
+fn a_claim_below_a_refused_claims_floor_is_passed_over() {
+    let at = |input: u64, epoch: u64| output::encode(header(input, 0), epoch, b"x");
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        at(0, 1),
+        // Refused after claiming, which still raises the floor to 13.
+        output::encode_claim_under(2, 13, 13, "b"),
+        // Below that floor, so its owner refused it too.
+        output::encode_claim_under(3, 12, 13, "c"),
+        at(1, 3),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |spec| spec != 13),
+        [(0, 10)]
+    );
+}
+
 /// rA's claim and outputs, then rB, a new module its owner refused after
 /// claiming. Every input is judged under rA, whatever the cache now says.
 #[test]
