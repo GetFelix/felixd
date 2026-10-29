@@ -1,10 +1,12 @@
 //! `felixd replay`: rebuilds a workload's state as of an input offset or a
-//! time, from the nearest snapshot and the inputs after it, and writes
-//! nothing.
+//! time, from the nearest snapshot and the inputs after it, or compares the
+//! outputs a replay produces with the ones on the stream. Writes nothing.
 
 use anyhow::{Context, Result, anyhow, bail};
+use felixd_core::replay::{self, Divergence, Recorded};
+use felixd_core::snapshot::{self, SnapshotHeader};
 use felixd_core::spec::WorkloadSpec;
-use felixd_core::{names, output, replay, snapshot};
+use felixd_core::{names, output};
 use felixd_runtime::{Runtime, Workload};
 
 use crate::check::module_bytes;
@@ -34,36 +36,160 @@ pub struct Replayed {
     pub state: String,
 }
 
+/// What a diff compared, and the first divergence it found.
+#[derive(Debug)]
+pub struct Diffed {
+    /// Outputs of inputs in `from..end` were compared.
+    pub from: u64,
+    pub end: u64,
+    /// How many outputs matched.
+    pub matched: u64,
+    pub divergence: Option<Divergence>,
+}
+
 /// Rebuilds workload `id` as of `to` on a fresh instance under the limits in
-/// its spec.
+/// its spec. With `module`, the hash of another module in the `modules`
+/// cache, that module runs instead, from the initial state, since the
+/// snapshots hold the recorded module's state.
 ///
 /// It reads the input and snapshot streams' tails, which Felix only reports to
 /// a conditional write, so it needs publish grants on them although it writes
 /// nothing (Felix #1621).
-pub async fn replay(settings: &Settings, id: &str, to: Target) -> Result<Replayed> {
+pub async fn replay(
+    settings: &Settings,
+    id: &str,
+    to: Target,
+    module: Option<&str>,
+) -> Result<Replayed> {
+    let (felix, spec) = open(settings, id).await?;
+    let input_tail = felix.tail(&spec.input).await?;
+    let end = end_of(&felix, &spec, Some(to), input_tail).await?;
+    let (mut workload, restored) = start(&felix, id, &spec, module, end).await?;
+    let mut steps = 0;
+    run_inputs(
+        &felix,
+        &spec,
+        &mut workload,
+        replay::first_input(restored),
+        end,
+        |_, _| {
+            steps += 1;
+            None::<()>
+        },
+    )
+    .await?;
+    let state = workload.inspect().context("inspect")?;
+    Ok(Replayed {
+        end,
+        restored: restored.map(|h| h.input_offset),
+        steps,
+        state,
+    })
+}
+
+/// Replays workload `id` over inputs `from` up to `to`, or every input, and
+/// compares each output it produces with the one recorded on the output
+/// stream, by header and payload digest. It stops at the first divergence,
+/// and at the last input with a recorded output, which the workload may not
+/// have got past yet. `module` is as for [`replay`].
+pub async fn diff(
+    settings: &Settings,
+    id: &str,
+    from: u64,
+    to: Option<Target>,
+    module: Option<&str>,
+) -> Result<Diffed> {
+    let (felix, spec) = open(settings, id).await?;
+    // The output stream first, so every input a recorded output came from is
+    // on the input stream when its tail is read.
+    let output_tail = felix.tail(&spec.output).await?;
+    let records = felix.read_range(&spec.output, 0, output_tail).await?;
+    let input_tail = felix.tail(&spec.input).await?;
+    let end = end_of(&felix, &spec, to, input_tail).await?;
+    let recorded = Recorded::read(records.iter().map(|r| r.payload.as_ref()), from..end)
+        .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
+    let end = end.min(recorded.end());
+    let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
+    let mut matched = 0;
+    let divergence = run_inputs(
+        &felix,
+        &spec,
+        &mut workload,
+        replay::first_input(restored),
+        end,
+        |offset, outputs| {
+            if offset < from {
+                return None;
+            }
+            let found = recorded.compare(offset, outputs);
+            if found.is_none() {
+                matched += outputs.len() as u64;
+            }
+            found
+        },
+    )
+    .await?;
+    Ok(Diffed {
+        from,
+        end,
+        matched,
+        divergence,
+    })
+}
+
+async fn open(settings: &Settings, id: &str) -> Result<(Felix, WorkloadSpec)> {
     let felix = Felix::connect(settings).await?;
     let spec = felix
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
     let spec = WorkloadSpec::decode(&spec)?;
-    let input_tail = felix.tail(&spec.input).await?;
-    let end = match to {
-        Target::Offset(offset) => {
+    Ok((felix, spec))
+}
+
+/// The input offset a replay to `to` stops below; every input when `None`.
+async fn end_of(
+    felix: &Felix,
+    spec: &WorkloadSpec,
+    to: Option<Target>,
+    input_tail: u64,
+) -> Result<u64> {
+    match to {
+        None => Ok(input_tail),
+        Some(Target::Offset(offset)) => {
             if offset >= input_tail {
                 bail!(
                     "input {offset} is not on {}: its next offset is {input_tail}",
                     spec.input
                 );
             }
-            offset + 1
+            Ok(offset + 1)
         }
-        Target::Time(micros) => replay::end_for_time(
+        Some(Target::Time(micros)) => Ok(replay::end_for_time(
             felix.offset_for_time(&spec.input, micros).await?,
             input_tail,
-        ),
-    };
+        )),
+    }
+}
 
+/// A fresh instance of the workload's module, or of `module`, under the
+/// spec's limits. The recorded module is restored from the nearest snapshot
+/// of inputs below `before`, and the snapshot's header returned.
+async fn start(
+    felix: &Felix,
+    id: &str,
+    spec: &WorkloadSpec,
+    module: Option<&str>,
+    before: u64,
+) -> Result<(Workload, Option<SnapshotHeader>)> {
+    let bytes = module_bytes(felix, module.unwrap_or(&spec.module)).await?;
+    let runtime = Runtime::new().map_err(|e| anyhow!("{e}"))?;
+    let mut workload = runtime
+        .load(&bytes, spec.limits)
+        .map_err(|e| anyhow!("{e}"))?;
+    if module.is_some_and(|m| m != spec.module) {
+        return Ok((workload, None));
+    }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let records = felix.read_range(&snap_stream, 0, snap_tail).await?;
@@ -73,47 +199,28 @@ pub async fn replay(settings: &Settings, id: &str, to: Target) -> Result<Replaye
             .map_err(|e| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset))?;
         snapshots.push((taken.header, state));
     }
-    let nearest = replay::nearest_snapshot(snapshots.iter().map(|(h, _)| *h), end)
-        .map(|index| snapshots[index]);
-
-    let bytes = module_bytes(&felix, &spec.module).await?;
-    let runtime = Runtime::new().map_err(|e| anyhow!("{e}"))?;
-    let mut workload = runtime
-        .load(&bytes, spec.limits)
-        .map_err(|e| anyhow!("{e}"))?;
-    if let Some((header, state)) = nearest {
-        workload
-            .restore(state)
-            .with_context(|| format!("restore the snapshot of input {}", header.input_offset))?;
-    }
-    let steps = run_inputs(
-        &felix,
-        &spec,
-        &mut workload,
-        replay::first_input(nearest.map(|(h, _)| h)),
-        end,
-    )
-    .await?;
-    let state = workload.inspect().context("inspect")?;
-    Ok(Replayed {
-        end,
-        restored: nearest.map(|(h, _)| h.input_offset),
-        steps,
-        state,
-    })
+    let Some(index) = replay::nearest_snapshot(snapshots.iter().map(|(h, _)| *h), before) else {
+        return Ok((workload, None));
+    };
+    let (header, state) = snapshots[index];
+    workload
+        .restore(state)
+        .with_context(|| format!("restore the snapshot of input {}", header.input_offset))?;
+    Ok((workload, Some(header)))
 }
 
-/// Runs the inputs at offsets `from..end` through `workload` and returns how
-/// many it ran.
-async fn run_inputs(
+/// Runs the inputs at offsets `from..end` through `workload`, handing each
+/// step's offset and outputs to `each`, and stops at the first step `each`
+/// returns something for.
+async fn run_inputs<T>(
     felix: &Felix,
     spec: &WorkloadSpec,
     workload: &mut Workload,
     from: u64,
     end: u64,
-) -> Result<u64> {
+    mut each: impl FnMut(u64, &[Vec<u8>]) -> Option<T>,
+) -> Result<Option<T>> {
     let skip_claims = names::is_output_stream(&spec.input);
-    let mut steps = 0;
     let mut next = from;
     while next < end {
         let (page, after) = felix.read_page(&spec.input, next, end).await?;
@@ -121,12 +228,14 @@ async fn run_inputs(
             if skip_claims && output::is_marker(&input.payload) {
                 continue;
             }
-            workload
+            let outputs = workload
                 .step(&input.payload)
                 .with_context(|| format!("input {} fails the workload", input.offset))?;
-            steps += 1;
+            if let Some(found) = each(input.offset, &outputs) {
+                return Ok(Some(found));
+            }
         }
         next = after;
     }
-    Ok(steps)
+    Ok(None)
 }

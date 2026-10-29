@@ -1,8 +1,16 @@
 //! Where a replay starts and where it stops.
 //!
 //! A replay runs the inputs below an end offset. It restores the latest
-//! snapshot that covers only inputs below that end and runs the rest.
+//! snapshot that covers only inputs below that end and runs the rest. A diff
+//! compares what it produces with the outputs on the stream.
 
+use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::Range;
+
+use crate::codec::DecodeError;
+use crate::module;
+use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::SnapshotHeader;
 
 /// The end of a replay to a time, from what `offset_for_time` answered: the
@@ -35,6 +43,147 @@ pub fn nearest_snapshot(
 /// initial state.
 pub fn first_input(snapshot: Option<SnapshotHeader>) -> u64 {
     snapshot.map_or(0, |s| s.input_offset + 1)
+}
+
+/// The outputs an output stream records for a range of inputs, and the nodes
+/// its claims name.
+#[derive(Debug, Default)]
+pub struct Recorded {
+    outputs: BTreeMap<OutputHeader, Kept>,
+    nodes: BTreeMap<u64, String>,
+}
+
+#[derive(Debug)]
+struct Kept {
+    epoch: u64,
+    digest: String,
+}
+
+/// The first place a replay and the stream disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Divergence {
+    pub header: OutputHeader,
+    /// The recorded output's writer, when there is one.
+    pub writer: Option<Writer>,
+    /// The sha256 of the recorded payload, when there is one.
+    pub recorded: Option<String>,
+    /// The sha256 of the replayed payload, when the replay produced one.
+    pub replayed: Option<String>,
+}
+
+/// Who wrote a record: its epoch, and the node its epoch's claim names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Writer {
+    pub epoch: u64,
+    pub node: Option<String>,
+}
+
+impl Recorded {
+    /// Reads the output stream's records, in stream order, keeping outputs of
+    /// inputs in `inputs`. A second record for one output is `felixd check`'s
+    /// business; the first one counts here.
+    pub fn read<'a>(
+        records: impl IntoIterator<Item = &'a [u8]>,
+        inputs: Range<u64>,
+    ) -> Result<Recorded, DecodeError> {
+        let mut recorded = Recorded::default();
+        for record in records {
+            match output::decode(record)? {
+                Record::Output(written, payload) => {
+                    if inputs.contains(&written.header.input_offset) {
+                        recorded.outputs.entry(written.header).or_insert(Kept {
+                            epoch: written.epoch,
+                            digest: digest(payload),
+                        });
+                    }
+                }
+                Record::Claim { epoch, node } if !node.is_empty() => {
+                    let node = String::from_utf8_lossy(node).into_owned();
+                    recorded.nodes.insert(epoch, node);
+                }
+                Record::Claim { .. } | Record::Failure { .. } => {}
+            }
+        }
+        Ok(recorded)
+    }
+
+    /// The input after the last one with a recorded output. The workload may
+    /// not have reached later inputs yet, so a diff stops there.
+    pub fn end(&self) -> u64 {
+        self.outputs
+            .keys()
+            .next_back()
+            .map_or(0, |h| h.input_offset + 1)
+    }
+
+    /// Compares the outputs a replay produced for the input at `input_offset`
+    /// with the recorded ones.
+    pub fn compare(&self, input_offset: u64, outputs: &[Vec<u8>]) -> Option<Divergence> {
+        for (index, payload) in outputs.iter().enumerate() {
+            let header = OutputHeader {
+                input_offset,
+                index: u32::try_from(index).ok()?,
+            };
+            let replayed = digest(payload);
+            match self.outputs.get(&header) {
+                Some(kept) if kept.digest == replayed => {}
+                kept => return Some(self.divergence(header, kept, Some(replayed))),
+            }
+        }
+        let header = OutputHeader {
+            input_offset,
+            index: u32::try_from(outputs.len()).ok()?,
+        };
+        let extra = self.outputs.get(&header)?;
+        Some(self.divergence(header, Some(extra), None))
+    }
+
+    fn divergence(
+        &self,
+        header: OutputHeader,
+        kept: Option<&Kept>,
+        replayed: Option<String>,
+    ) -> Divergence {
+        Divergence {
+            header,
+            writer: kept.map(|k| Writer {
+                epoch: k.epoch,
+                node: self.nodes.get(&k.epoch).cloned(),
+            }),
+            recorded: kept.map(|k| k.digest.clone()),
+            replayed,
+        }
+    }
+}
+
+/// How outputs are compared: the sha256 of the payload, in lowercase hex.
+pub fn digest(payload: &[u8]) -> String {
+    module::hash(payload)
+}
+
+impl fmt::Display for Divergence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let OutputHeader {
+            input_offset,
+            index,
+        } = self.header;
+        write!(f, "input {input_offset} output {index}: ")?;
+        match (&self.writer, &self.recorded) {
+            (Some(writer), Some(recorded)) => {
+                let node = writer.node.as_deref().unwrap_or("unknown");
+                write!(
+                    f,
+                    "recorded by node {node} at epoch {} with sha256 {recorded}",
+                    writer.epoch
+                )?;
+            }
+            _ => f.write_str("not on the stream")?,
+        }
+        match &self.replayed {
+            Some(replayed) => write!(f, ", replayed with sha256 {replayed}"),
+            None => f.write_str(", and the replay produced none"),
+        }
+    }
 }
 
 #[cfg(test)]

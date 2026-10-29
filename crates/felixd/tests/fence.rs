@@ -168,11 +168,11 @@ async fn a_resume_passes_over_claims_between_outputs() {
     }
     let state = workload.snapshot().unwrap();
 
-    let mut stream = vec![output::encode_claim(1)];
+    let mut stream = vec![output::encode_claim(1, "")];
     stream.extend((0..5).map(|i| counted(&at, i, 1)));
-    stream.extend([output::encode_claim(2), output::encode_claim(3)]);
+    stream.extend([output::encode_claim(2, ""), output::encode_claim(3, "")]);
     stream.extend((5..7).map(|i| counted(&at, i, 3)));
-    stream.push(output::encode_claim(4));
+    stream.push(output::encode_claim(4, ""));
     t.publish_all(OUTPUT, stream).await;
     // Covers the first four inputs, whose outputs are the four records after
     // the first claim.
@@ -203,11 +203,11 @@ async fn check_passes_on_a_stream_with_claims() {
     t.submit("counter", &[]).await;
     t.publish_all(INPUT, (0..5).map(count)).await;
     let at = input_offsets(&t).await;
-    let mut stream = vec![output::encode_claim(1)];
+    let mut stream = vec![output::encode_claim(1, "")];
     stream.extend((0..3).map(|i| counted(&at, i, 1)));
-    stream.push(output::encode_claim(2));
+    stream.push(output::encode_claim(2, ""));
     stream.extend((3..5).map(|i| counted(&at, i, 2)));
-    stream.push(output::encode_claim(3));
+    stream.push(output::encode_claim(3, ""));
     t.publish_all(OUTPUT, stream).await;
     let (ok, report) = t.check(&["--id", ID, "--complete"]);
     assert!(ok, "{report}");

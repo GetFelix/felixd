@@ -134,6 +134,7 @@ impl Held {
             tx,
             Fence {
                 epoch: self.epoch,
+                node: self.node.clone(),
                 deadline: rx,
             },
         )
@@ -144,6 +145,7 @@ impl Held {
 #[derive(Clone, Debug)]
 pub(crate) struct Fence {
     epoch: u64,
+    node: String,
     deadline: watch::Receiver<Instant>,
 }
 
@@ -151,6 +153,11 @@ impl Fence {
     /// The lease epoch, stamped on every output record.
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The node holding the lease, named in its claim record.
+    pub(crate) fn node(&self) -> &str {
+        &self.node
     }
 
     /// Whether this node may still write, by its own clock.

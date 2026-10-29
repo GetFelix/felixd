@@ -79,9 +79,15 @@ should have caught up. It writes nothing.
 input 41, and `--to 2026-10-29T14:02:00Z` its state after every input appended
 before that time. It restores the nearest snapshot at or before that point on a
 fresh instance, runs the inputs after it and prints what the workload's
-`inspect` returns. It writes nothing, but until Felix can report a stream's
-tail to a reader ([Felix #1621](https://github.com/GetFelix/felix/issues/1621))
-it needs publish grants on the input and snapshot streams, as `felixd check` does.
+`inspect` returns. `--diff` replays a range (`--from`, `--to`, by default every
+input with a recorded output) and compares each output with the one on the
+stream, reporting the first divergence with the node, epoch, input offset and
+both digests, and exits with 1 if it finds one. `--module <hash>` runs another
+module from the `modules` cache over the recorded inputs instead, so
+`--diff --module` checks an upgrade before it goes live. Replay writes nothing,
+but until Felix can report a stream's tail to a reader
+([Felix #1621](https://github.com/GetFelix/felix/issues/1621)) it needs publish
+grants on the streams it reads, as `felixd check` does.
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new
