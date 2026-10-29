@@ -7,6 +7,10 @@
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-append-sent=N`: abort once the Nth output append has been
 //!   sent, before its answer is acted on. The write may have landed.
+//! - `append-prefix=N`: send only the first half (at least one record) of the
+//!   Nth output append when it holds more than one, and answer it with an
+//!   error, as when a `Quorum` leader keeps part of a batch through a
+//!   failover. With `crash-after-append-sent=N` the process aborts instead.
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
 //! - `freeze-before-snapshot-write=N`: stop the process with `SIGSTOP` once
@@ -111,6 +115,15 @@ pub(crate) fn after_append_sent() {
     if fault("crash-after-append-sent") == Some(APPENDS.load(Ordering::Relaxed)) {
         crash("crash-after-append-sent");
     }
+}
+
+/// The part of `batch` the Nth append sends, when `append-prefix=N` cuts it.
+pub(crate) fn append_prefix(batch: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    if batch.len() < 2 || fault("append-prefix") != Some(APPENDS.load(Ordering::Relaxed)) {
+        return None;
+    }
+    tracing::warn!("injected partial append");
+    Some(batch[..batch.len() / 2].to_vec())
 }
 
 pub(crate) fn drop_input(offset: u64) -> bool {

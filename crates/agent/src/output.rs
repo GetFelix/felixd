@@ -248,10 +248,18 @@ impl<'a> OutputLog<'a> {
                 return Err(LostLease.into());
             }
             faults::before_append();
-            let sent = self
-                .felix
-                .publish_if(self.stream, batch.clone(), self.tail)
-                .await;
+            let sent = match faults::append_prefix(&batch) {
+                Some(prefix) => self
+                    .felix
+                    .publish_if(self.stream, prefix, self.tail)
+                    .await
+                    .and_then(|_| Err(anyhow!("injected: the rest of the batch was lost"))),
+                None => {
+                    self.felix
+                        .publish_if(self.stream, batch.clone(), self.tail)
+                        .await
+                }
+            };
             faults::after_append_sent();
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == self.tail => {

@@ -37,7 +37,7 @@ Each twin turns one mechanism off, or drops one assumption, and must find the na
 Every configuration has two nodes.
 
 Distinct states and times are from TLC 1.7.4 with `-workers 4` on an Apple M-series laptop. The
-whole script takes about four minutes there. A twin's count varies a little between runs,
+whole script takes about six minutes there. A twin's count varies a little between runs,
 since TLC stops at the first violation a worker finds.
 
 | Configuration | Expected | Model | Distinct states | Time |
@@ -49,6 +49,7 @@ since TLC stops at the first violation a worker finds.
 | `FelixdRecreate` | pass | `epochs` recreated once, while every live epoch is on a record | 1,080,382 | 13 s |
 | `FelixdFailWindow` | pass | one input, two claims, a clock fault anywhere in the failure path | 142,402 | 3 s |
 | `FelixdLive` | pass | no timing faults, local faults; liveness | 153,378 | 5 s |
+| `FelixdPartial` | pass | an input with no output, then a batch of two that may land in part, a crash, a clock fault | 5,367,584 | 77 s |
 | `FelixdNoMarker` | `NoInterleave` | the claim record off | about 5,000 | under 1 s |
 | `FelixdNoFloor` | `EpochMonotone` | the epoch floor off | about 64,000 | under 1 s |
 | `FelixdNoConfirm` | `NoStaleFailure` | the `Confirmer` and the failure record off | about 2,000 | under 1 s |
@@ -58,8 +59,9 @@ since TLC stops at the first violation a worker finds.
 | `FelixdRecreateAnytime` | `UniqueEpoch` | `epochs` recreated while an epoch is on no record | about 1,500 | under 1 s |
 | `FelixdTailFold` | `NoPoison` | the fold on event offsets off (#67) | 20 | under 1 s |
 | `FelixdNoLaterEpochWins` | `EpochMonotone` | reconcile's later-epoch rule off | about 20,000 | under 1 s |
+| `FelixdPartialNoIndex` | `NoPoison` | the fold skipping whole inputs, not outputs by index | about 300,000 | 4 s |
 
-`FelixdFull` has everything at once. The `TLA nightly` workflow walks three million random
+`FelixdFull` has everything at once, with a second input whose batch of two may land in part. The `TLA nightly` workflow walks three million random
 behaviours of it with `TLC_SIMULATE`, which takes about five minutes on the laptop above. A
 simulation can miss a violation that exhaustive checking would find, so it backs the passing
 configurations rather than replacing them.
@@ -111,6 +113,7 @@ Paths are from the repository root, as of the failure record (#70).
 | `ClockFault` | a suspend (the monotonic clock stops) or the `leases` leader's clock jumping: design.md, Leases and failure detection |
 | `Expire` | the broker's TTL expiry (Felix `docs/cache-on-log.md`, TTL) |
 | `Deliver`, `Timeout` | `publish_if` landing at any later time, and an answer that never comes |
+| `DeliverPrefix` | a `Quorum` leader change that keeps part of a batch and answers with an error (Felix `docs/atomic-commit.md`, What atomic covers); the `append-prefix` test fault: `crates/agent/src/faults.rs` |
 | `GenStart` | Felix's generation-start record on a new shard leader |
 | `Crash`, `Restart` | an agent killed and started again under the same node id |
 | `Recreate` | the `epochs` cache recreated |
@@ -166,5 +169,5 @@ they are several reads after the claim has won.
 - Several inputs, pipelines, spec edits, `felixd run`'s history check, `felixd check` itself, and
   drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
-- Batches larger than one write, and the retry limit in `OutputLog::append`.
+- The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
