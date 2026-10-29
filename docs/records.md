@@ -30,7 +30,8 @@ The version is 2. A version 1 record has no epoch field and reads as epoch 0.
 
 ## Caches
 
-Values in `workloads` and `leases` are JSON.
+Values in `workloads` and `leases` are JSON. They are to become versioned typed records
+([design.md, System records and errors](design.md#system-records-and-errors)).
 
 - A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000),
   `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000)
