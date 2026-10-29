@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use super::Cli;
+use super::{Cli, Target, parse_target};
 
 #[test]
 fn a_lease_ttl_below_two_seconds_is_refused() {
@@ -18,4 +18,19 @@ fn a_lease_ttl_below_two_seconds_is_refused() {
     };
     assert!(parse("1999").is_err());
     assert!(parse("2000").is_ok());
+}
+
+#[test]
+fn replay_takes_an_offset_or_a_time() {
+    assert_eq!(parse_target("42"), Ok(Target::Offset(42)));
+    assert_eq!(
+        parse_target("1970-01-01T00:00:01.5Z"),
+        Ok(Target::Time(1_500_000))
+    );
+    assert_eq!(
+        parse_target("2026-10-29T14:02:00-07:00"),
+        Ok(Target::Time(1_793_307_720_000_000))
+    );
+    assert!(parse_target("14:02").is_err());
+    assert!(parse_target("1969-12-31T23:59:59Z").is_err());
 }

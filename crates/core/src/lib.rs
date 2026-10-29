@@ -9,6 +9,7 @@
 //! - [`placement`]: which free workloads a node claims.
 //! - [`module`]: how a module is identified.
 //! - [`resume`]: where a new owner picks a workload up.
+//! - [`replay`]: where a replay starts and stops.
 //! - [`check`]: what is wrong with an output stream, against a replay.
 
 pub mod check;
@@ -18,6 +19,7 @@ pub mod names;
 pub mod node;
 pub mod output;
 pub mod placement;
+pub mod replay;
 pub mod resume;
 pub mod snapshot;
 pub mod spec;
