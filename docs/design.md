@@ -549,12 +549,22 @@ outputs, and resume, replay and `felixd check` read that log. A deterministic
 merge by timestamp is not planned: one idle input would stall the workload, and
 it depends on clocks.
 
+## Placement
+
+Agents place workloads by first claim wins: when a lease is free or expired,
+an agent with room claims it after a random delay, and the broker's
+conditional write picks one winner. It sits behind the `Placement` seam.
+
+When that limits us (balancing, labels, graceful drain), placement moves to a
+scheduler that is itself a felixd workload (#60). It writes assignments as
+records, so placement is replayable and survives failover like any workload.
+Agents still claim through the lease, so the scheduler decides where work runs,
+never whether output is correct. First claim wins stays as the fallback when an
+assignment is missing or stale. A scheduler outside felixd is not planned.
+
 ## Open questions
 
-These are worth settling with collaborators before M1:
+These are still open:
 
-- Does placement belong in the agents (first claim wins, then rules) or in a
-  scheduler workload that writes assignments? A scheduler that is itself a
-  felixd workload would be replayable too.
 - Which effect system for step 4 of the path: WASI with every response
   recorded, or a narrower set of host calls?
