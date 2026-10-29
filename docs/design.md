@@ -411,6 +411,14 @@ checks was produced from inputs the replay sees. A step that fails ends the
 replay there, as it ends the workload on every node. Every failover test ends
 with `felixd check --complete`.
 
+The M1 failover test (`crates/felixd/tests/failover.rs`) runs Felix, three
+agents and six workloads on one input with a steady producer. Every 3 s it
+SIGKILLs the agent holding the most leases and starts it again 1.5 s later
+under the same node id, which then waits for its old leases to expire like
+any other node. Pull requests run the loop for 30 s and a nightly job for
+10 minutes. At the end every output stream must equal an uninterrupted run
+and pass `felixd check --complete`.
+
 ## Replay
 
 `felixd replay <workload> --to <offset | time>`:
