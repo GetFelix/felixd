@@ -137,3 +137,11 @@ fn a_cache_value_matches_its_record_whatever_its_state() {
     };
     assert!(!stopped.matches_record(&record));
 }
+
+#[test]
+fn the_cache_only_moves_to_a_later_record() {
+    assert!(moves_forward(None, 0));
+    assert!(moves_forward(Some(3), 4));
+    assert!(!moves_forward(Some(4), 4));
+    assert!(!moves_forward(Some(9), 2));
+}

@@ -121,6 +121,14 @@ impl WorkloadSpec {
     }
 }
 
+/// Whether a `workloads` value naming spec record `ours` may replace one
+/// naming `current`. The cache only moves forward, so a submitter that loses
+/// a race, or one whose `sys.specs` was recreated and restarted its offsets,
+/// changes nothing. A value naming no record predates spec records.
+pub fn moves_forward(current: Option<u64>, ours: u64) -> bool {
+    current.is_none_or(|current| current < ours)
+}
+
 /// The spec record format this build writes and reads.
 const RECORD_FORMAT: u32 = 1;
 

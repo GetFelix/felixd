@@ -369,13 +369,20 @@ the next owner's claim names the new record. A new module or input stream
 would not reproduce what the streams already hold, so `felixd run` refuses
 that change once the output or snapshot stream has a record, and an agent
 refuses to run a spec whose module or input differ from the spec the output
-stream's first claim names. It checks before its claim and again after it,
-when no claim under an older spec can still land first, and leaves the
-workload to an operator. New code goes under a new id.
+stream's first claim names. Claims only move forward too: an agent refuses a
+spec record below one a claim on the stream already names, which is what a
+node with a stale watch holds. It checks both before its lease claim, so a
+refused spec takes no epoch, and again once its own claim is on the stream,
+when no other claim can still land first. Either way the workload is left to
+an operator. `felixd run` refuses to point `workloads` at its record if the
+entry already names a later one, which happens when another submit won or
+`sys.specs` was recreated. New code goes under a new id.
 
-`felixd check` and `felixd replay --diff` judge each input under the limits of
-the spec whose claim covers it: a claim's spec applies from the input after
-the last output before it.
+`felixd check` and `felixd replay --diff` run the module and input of the
+first claim's spec, and judge each input under the limits of the spec whose
+claim covers it: a claim's spec applies from the input after the last output
+before it. A claim its owner refused, under another module or an older
+record, is passed over.
 
 ## Leases and failure detection
 

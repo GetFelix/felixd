@@ -104,8 +104,17 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         );
     }
     let record = SpecRecord::new(&submission.id, spec.clone());
-    spec.record = Some(specs::append(&felix, &record).await?);
-    specs::project(&felix, &submission.id, &spec).await?;
+    let ours = specs::append(&felix, &record).await?;
+    spec.record = Some(ours);
+    if let Some(current) = specs::project(&felix, &submission.id, &spec).await? {
+        bail!(
+            "workload {}'s workloads entry names spec record {current}, not before this one at \
+             {}:{ours}, so nothing changed; another submit won, or {} was recreated",
+            submission.id,
+            names::SPECS,
+            names::SPECS
+        );
+    }
     Ok(hash)
 }
 

@@ -15,6 +15,7 @@ use crate::felix::Felix;
 use crate::input::{self, StepInput};
 use crate::settings::Settings;
 use crate::snapshots::{self, Snapshot};
+use crate::specs;
 
 /// Where a replay stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,7 +150,7 @@ async fn open(settings: &Settings, id: &str) -> Result<(Felix, WorkloadSpec)> {
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = WorkloadSpec::decode(&spec)?;
+    let spec = specs::lineage(&felix, id, WorkloadSpec::decode(&spec)?).await?;
     Ok((felix, spec))
 }
 

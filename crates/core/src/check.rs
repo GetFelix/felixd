@@ -381,9 +381,14 @@ impl fmt::Display for Finding {
 /// A claim's spec applies from the input after the last one with an output
 /// before it, since the owner steps everything after that under its spec and
 /// only checks what it steps again below. Inputs before the first claim that
-/// names a spec are not covered. Records that do not decode are passed over;
-/// [`check`] reports them.
-pub fn specs_applied<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<(u64, u64)> {
+/// names a spec are not covered. Claims whose spec `ran` says no to, or that
+/// name a spec below one already claimed, are passed over: their owner
+/// refused the spec and stepped nothing. Records that do not decode are
+/// passed over too; [`check`] reports them.
+pub fn specs_applied<'a>(
+    records: impl IntoIterator<Item = &'a [u8]>,
+    ran: impl Fn(u64) -> bool,
+) -> Vec<(u64, u64)> {
     let mut applied: Vec<(u64, u64)> = Vec::new();
     let mut next_input = 0;
     for record in records {
@@ -391,7 +396,7 @@ pub fn specs_applied<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<(u6
             Ok(Record::Claim {
                 spec: Some(spec), ..
             }) => {
-                if applied.last().is_some_and(|(_, s)| *s == spec) {
+                if !ran(spec) || applied.last().is_some_and(|(_, s)| *s >= spec) {
                     continue;
                 }
                 // Two claims with no output between them: the later one ran
@@ -410,6 +415,21 @@ pub fn specs_applied<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<(u6
         }
     }
     applied
+}
+
+/// Every spec the claims on an output stream name, in stream order, once each.
+pub fn specs_claimed<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<u64> {
+    let mut claimed = Vec::new();
+    for record in records {
+        if let Ok(Record::Claim {
+            spec: Some(spec), ..
+        }) = output::decode(record)
+            && !claimed.contains(&spec)
+        {
+            claimed.push(spec);
+        }
+    }
+    claimed
 }
 
 #[cfg(test)]

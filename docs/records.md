@@ -36,8 +36,9 @@ their node as unknown. A new owner appends one before it resumes, so a stale own
 `publish_if` is refused. A claim under a spec, which this build writes, continues with the
 `sys.specs` offset (8) of the spec record the owner runs, then the node id as above. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
-judge the inputs after it, and an agent refuses to run a spec whose module or input differ from the
-one the stream's first claim names. A failure continues with:
+judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
+run a spec whose module or input differ from the one the stream's first claim names, or whose
+record is below one a claim already names. A failure continues with:
 
 | Bytes | Field |
 |---|---|

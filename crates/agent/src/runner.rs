@@ -310,7 +310,6 @@ async fn run(
 ) -> Result<Infallible> {
     let spec_version = spec_version(felix, id, spec).await?;
     let spec_record = spec.record.context("the spec names no spec record")?;
-    refuse_another_lineage(felix, id, spec).await?;
     // The claim comes first, so that from here on a stale owner's append is
     // refused, whether or not this owner ever writes an output.
     let log = OutputLog::claim(
@@ -322,9 +321,9 @@ async fn run(
         claim_from,
     )
     .await?;
-    // Again after the claim: an owner of an older spec may have written the
-    // first claim since the look above, and none can once this one is on.
-    refuse_another_lineage(felix, id, spec).await?;
+    // The agent looked before the lease claim. Again now: an owner of an
+    // older spec may have claimed since, and none can once this claim is on.
+    specs::refuse_stale_or_foreign(felix, id, spec, Some(fence.epoch())).await?;
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
@@ -646,21 +645,6 @@ impl Steps<'_> {
             }
         }
     }
-}
-
-/// Refuses to run `spec` over output written under another module or input,
-/// which it would not reproduce. An operator puts the change under a new id.
-async fn refuse_another_lineage(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Result<()> {
-    if let Some(written) = specs::written_under(felix, id).await?
-        && let Some(conflict) = written.conflicts_with_history(spec)
-    {
-        return Err(NeedsOperator(format!(
-            "its output was written while {conflict}, and this spec changes that; \
-             submit the change under a new id"
-        ))
-        .into());
-    }
-    Ok(())
 }
 
 /// The cache version of `spec`, which a failure record names. A different

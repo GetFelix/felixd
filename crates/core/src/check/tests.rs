@@ -477,7 +477,41 @@ fn each_input_runs_under_the_spec_of_the_claim_before_it() {
         at(4, 5),
     ];
     assert_eq!(
-        specs_applied(records.iter().map(Vec::as_slice)),
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
         [(1, 10), (4, 12)]
+    );
+    assert_eq!(
+        specs_claimed(records.iter().map(Vec::as_slice)),
+        [10, 11, 12]
+    );
+}
+
+#[test]
+fn a_refused_claim_does_not_displace_the_spec_before_it() {
+    let records = [
+        output::encode_claim_under(1, 10, "a"),
+        // Refused by its owner, which stepped nothing.
+        output::encode_claim_under(2, 11, "b"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |spec| spec != 11),
+        [(0, 10)]
+    );
+}
+
+#[test]
+fn a_claim_under_an_older_spec_than_one_claimed_is_passed_over() {
+    let at = |input: u64, epoch: u64| output::encode(header(input, 0), epoch, b"x");
+    let records = [
+        output::encode_claim_under(1, 10, "a"),
+        at(0, 1),
+        output::encode_claim_under(2, 12, "a"),
+        at(1, 2),
+        // A node with a stale view claimed under 11 and refused it.
+        output::encode_claim_under(3, 11, "b"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(0, 10), (1, 12)]
     );
 }

@@ -26,9 +26,10 @@ Behaviour that matters:
   at once. A holder that cannot reach Felix stops by its own clock at two thirds of the TTL, before
   another node can claim.
 - **Spec records.** An agent runs a `workloads` value only when the `sys.specs` record it names
-  says the same, and refuses a spec whose module or input differ from the one the output stream's
-  first claim names, before its own claim and again after it. Either refusal leaves the workload to
-  an operator.
+  says the same. It refuses a spec whose module or input differ from the one the output stream's
+  first claim names, or whose record is below one a claim already names, before its lease claim
+  and again after its own claim is on the stream. Either refusal leaves the workload to an
+  operator. A record past the tail of `sys.specs` is waited for 30 s, then left to an operator too.
 - **Fence.** A new owner appends a claim record, naming its spec record, to the output stream before it resumes. Every
   later write is `publish_if` at the tail, so a node frozen past its lease is refused when it
   wakes, whatever its clock says.

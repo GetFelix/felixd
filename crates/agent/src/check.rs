@@ -1,6 +1,8 @@
 //! `felixd check`: replays each workload's module over its input and reports
 //! what is wrong with its output stream. Needs read grants only.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
 use felix_client::CacheWatchItem;
 use felixd_core::check::{self, Expected, Finding};
@@ -52,7 +54,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = WorkloadSpec::decode(&spec)?;
+    let spec = specs::lineage(felix, id, WorkloadSpec::decode(&spec)?).await?;
     let bytes = module_bytes(felix, &spec.module).await?;
     let mut workload = runtime
         .load(&bytes, spec.limits)
@@ -124,22 +126,29 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
 /// The limits each input ran under, as `(first input, limits)`, from the
 /// spec records the claims on the output stream name. Each output is then
 /// judged under the spec that applied when it was written, not the latest.
-/// A claim whose spec has another module or input never ran anything, since
-/// its owner refuses it, and is passed over.
+/// `lineage` is the spec the stream was written under ([`specs::lineage`]):
+/// a claim whose spec has another module or input never ran anything, since
+/// its owner refused it, and is passed over.
 pub(crate) async fn limits_applied(
     felix: &Felix,
     id: &str,
-    spec: &WorkloadSpec,
+    lineage: &WorkloadSpec,
     records: &[StreamRecord],
 ) -> Result<Vec<(u64, Limits)>> {
-    let mut applied = Vec::new();
-    for (from, offset) in check::specs_applied(records.iter().map(|r| r.payload.as_ref())) {
-        let ran = specs::read(felix, id, offset).await?;
-        if ran.conflicts_with_history(spec).is_none() {
-            applied.push((from, ran.limits));
+    let payloads = || records.iter().map(|r| r.payload.as_ref());
+    let mut ran = HashMap::new();
+    for offset in check::specs_claimed(payloads()) {
+        let spec = specs::read(felix, id, offset).await?;
+        if spec.conflicts_with_history(lineage).is_none() {
+            ran.insert(offset, spec.limits);
         }
     }
-    Ok(applied)
+    Ok(
+        check::specs_applied(payloads(), |offset| ran.contains_key(&offset))
+            .into_iter()
+            .map(|(from, offset)| (from, ran[&offset]))
+            .collect(),
+    )
 }
 
 /// The module `hash` from the `modules` cache.
