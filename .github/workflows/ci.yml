@@ -77,6 +77,19 @@ jobs:
         if: failure()
         run: docker compose -f tests/felix/cluster.yaml logs --no-color
 
+  # The deploy/compose.yaml stack: three brokers, a control plane and three
+  # felixd containers. Kills the node holding a workload and checks that
+  # another takes it over without gaps or repeats.
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/compose-failover.sh
+      - name: Logs
+        if: failure()
+        run: docker compose -f deploy/compose.yaml --profile producer --profile cli logs --no-color
+
   # specs/Felixd.tla under every configuration in scripts/check_tla.sh: the
   # passing ones must pass and each twin must find its violation.
   tla:
