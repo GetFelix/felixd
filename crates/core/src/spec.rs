@@ -18,6 +18,11 @@ pub struct WorkloadSpec {
     /// A snapshot is written after every this many inputs.
     #[serde(default = "default_snapshot_every")]
     pub snapshot_every: u64,
+    /// A snapshot is also written at the first input of each interval this
+    /// many milliseconds long, by the input's append time, so a slow input
+    /// still gets snapshots. Either trigger restarts the count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_every_ms: Option<u64>,
     pub state: WorkloadState,
     /// What the workload may use. It is in the spec, not node configuration,
     /// so every node runs the workload under the same limits and fails it at

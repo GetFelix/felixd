@@ -5,13 +5,16 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 2 done. Agents hold a lease per workload, spread
+> **Status:** milestone 3 done. Agents hold a lease per workload, spread
 > workloads across nodes, and take a dead node's workloads over within one
 > lease TTL. A new owner fences the output stream with a claim record, so a
 > node frozen past its lease writes no output when it wakes, and each output
 > lands once through lost answers, partial batches and crashes. A three-node
 > failover test that keeps killing lease holders runs on every pull request
-> and ends with `felixd check`. Replay (milestone 3) is next. The plan is in
+> and ends with `felixd check`. `felixd replay`
+> rebuilds a workload as of any input offset or time, and `--diff` checks a
+> replay, or a new module, against the recorded outputs. Pipelines and
+> operations (milestone 4) are next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -88,6 +91,10 @@ module from the `modules` cache over the recorded inputs instead, so
 but until Felix can report a stream's tail to a reader
 ([Felix #1621](https://github.com/GetFelix/felix/issues/1621)) it needs publish
 grants on the streams it reads, as `felixd check` does.
+`felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
+workload every 1000 inputs and at the first input of each minute, by the
+inputs' append times on the broker, whichever comes first, so a slow input
+still gets snapshots and every node takes them at the same inputs.
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new

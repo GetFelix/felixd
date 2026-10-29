@@ -18,6 +18,7 @@ pub struct Submission {
     pub module: Vec<u8>,
     pub input: String,
     pub snapshot_every: u64,
+    pub snapshot_every_ms: Option<u64>,
     pub limits: Limits,
     pub replication_factor: u32,
 }
@@ -29,6 +30,7 @@ impl Submission {
             module,
             input: input.to_owned(),
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
+            snapshot_every_ms: None,
             limits: Limits::default(),
             replication_factor: DEFAULT_REPLICATION_FACTOR,
         }
@@ -42,6 +44,9 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     names::validate_id(&submission.id)?;
     if submission.snapshot_every == 0 {
         bail!("snapshot_every must be at least 1");
+    }
+    if submission.snapshot_every_ms == Some(0) {
+        bail!("snapshot_every_ms must be at least 1");
     }
     let kind = StreamKind {
         replication_factor: submission.replication_factor,
@@ -69,6 +74,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         input: submission.input,
         output,
         snapshot_every: submission.snapshot_every,
+        snapshot_every_ms: submission.snapshot_every_ms,
         state: WorkloadState::Running,
         limits: submission.limits,
         failure: None,

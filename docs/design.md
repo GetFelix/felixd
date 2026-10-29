@@ -601,7 +601,12 @@ or a step whose output (or a snapshot) is larger than one write to Felix may
 hold (8 MiB, against Felix's 16 MiB frame limit). The owner logs an error and
 marks the workload failed with the reason. Only Felix errors are retried.
 
-Snapshots are written every N inputs (default 1000). Each carries the
+Snapshots are written every N inputs (default 1000) and, with
+`snapshot_every_ms`, at the first input of each interval of that length,
+counted from the Unix epoch: an input whose append time falls in a later
+interval than the previous input's. The append time is the broker's stamp on
+the input record, so every node picks the same inputs, and a slow input still
+gets snapshots. Either trigger restarts the count. Each carries the
 writer's epoch and is appended with `publish_if` at the snapshot stream's
 tail as the owner last saw it, so a stale owner cannot write a snapshot after
 a later owner's. A refused write rereads the records past that tail: a

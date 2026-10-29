@@ -69,5 +69,18 @@ fn read_header(fields: &[u8]) -> SnapshotHeader {
     }
 }
 
+/// Whether the input appended at `micros` starts a new interval of
+/// `interval_ms`, counted from the Unix epoch, after the input before it,
+/// appended at `previous`. Both times are the broker's append stamps on the
+/// input stream, never a node's clock, so every node snapshots at the same
+/// inputs. The first input has no previous one and starts nothing.
+pub fn starts_interval(interval_ms: u64, previous: Option<u64>, micros: u64) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    let width = interval_ms.saturating_mul(1000).max(1);
+    micros / width > previous / width
+}
+
 #[cfg(test)]
 mod tests;
