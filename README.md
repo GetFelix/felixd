@@ -152,6 +152,44 @@ effect request, a chunk over 4 MiB) or finds its streams in a state it can't res
 output stream, fenced by epoch like an output, so a node that was frozen
 while another took over can't fail it.
 
+## Try it on three nodes
+
+`deploy/compose.yaml` starts three Felix brokers, a control plane and three
+felixd nodes in containers, with development credentials. It works with
+`docker compose` and with `podman compose` (use the docker-compose provider,
+`PODMAN_COMPOSE_PROVIDER=docker-compose`). You do not need Rust.
+
+```
+docker compose -f deploy/compose.yaml up -d --build
+docker compose -f deploy/compose.yaml run --rm felixd run --id counter \
+  --input in --replication-factor 3 /usr/local/share/felixd/counter.wasm
+docker compose -f deploy/compose.yaml --profile producer up -d producer
+```
+
+The first build compiles felixd and the example workloads, which takes a few
+minutes. `counter` counts the records the producer publishes to `in`. Find
+the node that holds it, kill that node and watch another claim it:
+
+```
+docker compose -f deploy/compose.yaml logs felixd-1 felixd-2 felixd-3 | grep claimed
+docker kill felixd-node-1
+docker compose -f deploy/compose.yaml logs -f felixd-2 felixd-3
+```
+
+Stop the producer, then check the output stream. Run `felixd check` as often
+as you like; it writes nothing:
+
+```
+docker compose -f deploy/compose.yaml stop producer
+docker compose -f deploy/compose.yaml run --rm felixd check --complete
+docker compose -f deploy/compose.yaml down -v
+```
+
+`window.wasm` is in the same directory. `FELIX_VERSION` picks the Felix image
+tag. The compose file publishes no ports, so the CLI runs in the stack.
+`scripts/compose-failover.sh` runs this sequence and CI runs it on every
+pull request.
+
 ## What we are trying to achieve
 
 The long-term goal is a distributed operating system built on one idea:
