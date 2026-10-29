@@ -599,12 +599,13 @@ snapshot stream has no claim of its own, so a stale owner can still append a
 snapshot after the new owner's claim until the new owner writes one. That
 snapshot is of a correct state, by determinism.
 
-`tests/fence.rs` freezes nodes past their leases, each with a long TTL and
-its lease ended early so that its own lease check passes when it wakes: a
-holder of an idle workload, one frozen before its claim, two frozen in turn
-across two takeovers, and one frozen with a snapshot taken, whose snapshot
-lands after the takeover and which a third owner then restores and resumes
-past. The cluster CI job runs them on three brokers.
+`tests/fence.rs` freezes nodes past their leases: a holder of an idle
+workload, one frozen before its claim, two frozen in turn across two
+takeovers, and one frozen with a snapshot taken, whose snapshot lands after
+the takeover and which a third owner restores and resumes past. Most have a
+long TTL and their lease ended early, so their own lease check passes when
+they wake and only the streams can stop them. The cluster CI job runs them
+on three brokers.
 
 ## Checking output
 
