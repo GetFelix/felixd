@@ -156,7 +156,7 @@ What not to do, where Plan 9 went wrong:
 - **Don't make a program's view of the world hard to see.** Per-process
   namespaces made "which `/net` is this?" a debugging question. A workload's
   bindings [name the stream incarnation](#names-and-incarnations) it reads,
-  are on the record, and are shown by `ps` and replay.
+  are on the record, and are shown by replay and, once it exists, `ps`.
 - **Don't keep everything forever by accident.** Venti never forgot anything.
   Retention, compaction and redaction are designed in.
 - **Don't fix one protocol version for good.** 9P forked into 9P2000.u and
@@ -260,10 +260,13 @@ One Rust workspace and one binary.
 felixd agent      run on every node
 felixd run        submit a workload
 felixd check      verify output streams against a replay of their inputs
-felixd ps         list workloads, owners and positions
-felixd drain      release a node's workloads
 felixd replay     rebuild a workload at an offset or time
 ```
+
+`felixd ps` (workloads, owners and positions) and `felixd drain` (release a
+node's workloads) are planned, not built yet
+([#17](https://github.com/GetFelix/felixd/issues/17)). Where this document says
+what they do, that is the design.
 
 | Crate | Owns |
 |---|---|
@@ -321,8 +324,10 @@ different one refuses the workload, is an open question.
 
 ## Data model
 
-Everything lives in one Felix tenant, in a namespace per cluster. `felixd run`
-creates the caches and streams below with three replicas and `Quorum`
+Everything lives in one Felix tenant, in a namespace per cluster. The
+namespace must already exist: `felixd run` does not create it, and fails with
+the control plane's HTTP error if it is missing. `felixd run` creates the
+caches and streams below with three replicas and `Quorum`
 consistency by default, so losing one broker loses no acknowledged write and
 stops no claim. `--replication-factor 1` is for a single development broker.
 
@@ -462,7 +467,8 @@ workloads ends, and every claim waits a random time of up to
 `--claim-delay-ms` (default 1 s). The agent sees placement only through the
 `Placement` trait in `core`, so the open question below (#26) can be settled
 without touching the lease code.
-`felixd drain` makes a node delete its own leases and stop claiming.
+`felixd drain` will make a node delete its own leases and stop claiming. It is
+not built yet ([#17](https://github.com/GetFelix/felixd/issues/17)).
 
 ## Exactly-once output
 
@@ -706,9 +712,9 @@ streams too (Felix #1621). `felixd check` has the same gap.
 
 | Principal | May |
 |---|---|
-| Node | Read `workloads` and `modules`; write `leases` and `nodes`; read every input; publish to `wl.*.out` and `wl.*.snap` |
-| Operator (`felixd run`, `drain`) | Write `workloads` and `modules`; create streams through the control plane |
-| Viewer (`ps`, `replay`, `check`) | Read everything, write nothing |
+| Node | Read `workloads`, `modules` and `epochs`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out` and `wl.*.snap` |
+| Operator (`felixd run`) | Read and write `workloads`; write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane |
+| Viewer (`replay`, `check`; `ps` once built) | Read everything, write nothing |
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
 but a compromised node could write garbage. Per-lease tokens close that
@@ -728,7 +734,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (`ps` and `drain` are not built yet, [#17](https://github.com/GetFelix/felixd/issues/17)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -761,7 +767,8 @@ failovers. Three rules hold that:
   fresh instance restored from that snapshot, so an instance's age can't change
   where a memory or stack limit trips. `restore(snapshot())` must behave as the
   identity, and `snapshot` must not change state.
-- **A determinism ABI** names everything that affects results: the felixd
+- **A determinism ABI** (not built yet,
+  [#62](https://github.com/GetFelix/felixd/issues/62)) names everything that affects results: the felixd
   runtime version, the wasmtime version and its settings, limits, and the
   instruction set while stack depth still depends on it. It is recorded in the
   spec, in each snapshot header and in `nodes`. A node never claims a workload
@@ -769,8 +776,9 @@ failovers. Three rules hold that:
   mixed x86_64 and aarch64 clusters pin workloads by instruction set. The pin
   comes off only when CI replays the same recorded inputs on x86_64 and aarch64
   and the output and snapshot digests match; native workloads stay pinned
-  regardless (#62).
-- **Trap classes.** A trap that depends only on the inputs (a guest panic,
+  regardless.
+- **Trap classes** (not built yet,
+  [#98](https://github.com/GetFelix/felixd/issues/98)). A trap that depends only on the inputs (a guest panic,
   running out of fuel) is a poison input and fails the workload. A trap that
   can depend on the host (stack overflow, a host resource failure) is retried
   once, on another node. The agent releases the lease and records the trap
@@ -978,9 +986,13 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   incarnation) or **poison** (an input the workload deterministically fails on).
   The [trap classes](#determinism) map onto these. The text is detail, never
   what a program compares.
+  Today needs operator is only a log line and a released lease on the node
+  that hit it, not a recorded state
+  ([#112](https://github.com/GetFelix/felixd/issues/112)).
 - A workload stuck on a transient error past a bound releases its lease and is
   recorded `degraded` with its class and reason, so it is visible instead of
-  retrying silently on one node.
+  retrying silently on one node. `degraded` is not built yet
+  ([#99](https://github.com/GetFelix/felixd/issues/99)).
 - **Restart intensity is counted cluster-wide.** The release above is per
   holder, so a workload that fails everywhere would bounce between nodes, each
   spending its own budget. The spec sets MaxR takeovers per window. Any
@@ -1064,7 +1076,8 @@ release binaries are built reproducibly and signed (#23).
 
 When a node can't reach Felix, it stops stepping every workload, native ones
 included, once two thirds of the lease TTL have passed (as in
-[Leases](#leases-and-failure-detection)). It reports itself `degraded` locally,
+[Leases](#leases-and-failure-detection)). It will report itself `degraded` locally
+(not built yet, [#99](https://github.com/GetFelix/felixd/issues/99)),
 marks nothing failed, and claims again when Felix is back. Recovery is resume
 from an offset, which is the normal path. If the whole Felix quorum is gone,
 every workload stalls until it returns, and that is visible on every node.
