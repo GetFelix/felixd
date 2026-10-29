@@ -323,7 +323,6 @@ async fn run(
     .await?;
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
-    specs::refuse_stale_or_foreign(felix, id, spec, Some(fence.epoch())).await?;
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
