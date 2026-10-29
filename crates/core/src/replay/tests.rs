@@ -1,5 +1,7 @@
 use super::*;
-use crate::output::{encode, encode_claim};
+use crate::output::{
+    Addressed, Rejected, encode, encode_addressed, encode_claim, encode_rejection,
+};
 
 fn at(input_offset: u64) -> SnapshotHeader {
     SnapshotHeader {
@@ -48,6 +50,10 @@ fn out(input_offset: u64, index: u32, epoch: u64, payload: &[u8]) -> Vec<u8> {
     encode(header, epoch, payload)
 }
 
+fn p(payload: &[u8]) -> Produced {
+    Produced::unnamed(payload.to_vec())
+}
+
 fn recorded(records: &[Vec<u8>], inputs: Range<u64>) -> Recorded {
     Recorded::read(records.iter().map(Vec::as_slice), inputs).unwrap()
 }
@@ -61,9 +67,9 @@ fn matching_outputs_do_not_diverge() {
         out(2, 0, 1, b"z"),
     ];
     let r = recorded(&stream, 0..10);
-    assert_eq!(r.compare(0, &[b"x".to_vec(), b"y".to_vec()]), None);
+    assert_eq!(r.compare(0, &[p(b"x"), p(b"y")]), None);
     assert_eq!(r.compare(1, &[]), None);
-    assert_eq!(r.compare(2, &[b"z".to_vec()]), None);
+    assert_eq!(r.compare(2, &[p(b"z")]), None);
     assert_eq!(r.end(), 3);
 }
 
@@ -76,7 +82,7 @@ fn a_different_payload_names_the_writer_and_both_digests() {
         out(1, 0, 2, b"y"),
     ];
     let r = recorded(&stream, 0..10);
-    let found = r.compare(1, &[b"other".to_vec()]).unwrap();
+    let found = r.compare(1, &[p(b"other")]).unwrap();
     assert_eq!(
         found,
         Divergence {
@@ -88,8 +94,8 @@ fn a_different_payload_names_the_writer_and_both_digests() {
                 epoch: 2,
                 node: Some("b".into())
             }),
-            recorded: Some(digest(b"y")),
-            replayed: Some(digest(b"other")),
+            recorded: Some(Summary::from(&p(b"y"))),
+            replayed: Some(Summary::from(&p(b"other"))),
         }
     );
     assert_eq!(
@@ -106,16 +112,14 @@ fn a_different_payload_names_the_writer_and_both_digests() {
 fn a_missing_or_extra_output_diverges() {
     let stream = [encode_claim(3, ""), out(0, 0, 3, b"x"), out(0, 1, 3, b"y")];
     let r = recorded(&stream, 0..10);
-    let fewer = r.compare(0, &[b"x".to_vec()]).unwrap();
+    let fewer = r.compare(0, &[p(b"x")]).unwrap();
     assert_eq!(fewer.header.index, 1);
     assert_eq!(fewer.replayed, None);
     assert!(
         fewer.to_string().contains("node unknown at epoch 3"),
         "{fewer}"
     );
-    let more = r
-        .compare(0, &[b"x".to_vec(), b"y".to_vec(), b"z".to_vec()])
-        .unwrap();
+    let more = r.compare(0, &[p(b"x"), p(b"y"), p(b"z")]).unwrap();
     assert_eq!(more.header.index, 2);
     assert_eq!(more.recorded, None);
     assert!(more.to_string().contains("not on the stream"), "{more}");
@@ -125,9 +129,64 @@ fn a_missing_or_extra_output_diverges() {
 fn outputs_outside_the_range_are_not_kept() {
     let stream = [out(0, 0, 1, b"x"), out(5, 0, 1, b"y")];
     let r = recorded(&stream, 1..5);
-    assert_eq!(
-        r.compare(0, &[b"other".to_vec()]).map(|d| d.recorded),
-        Some(None)
-    );
+    assert_eq!(r.compare(0, &[p(b"other")]).map(|d| d.recorded), Some(None));
     assert_eq!(r.end(), 0);
+}
+
+#[test]
+fn a_rejection_is_compared_like_an_output() {
+    let detail = b"too short";
+    let stream = [
+        encode_rejection(0, 1, Rejected { code: 7, detail }),
+        out(1, 0, 1, b"x"),
+    ];
+    let r = recorded(&stream, 0..10);
+    let rejected = |code| Produced::Rejection {
+        code,
+        detail: detail.to_vec(),
+    };
+    assert_eq!(r.compare(0, &[rejected(7)]), None);
+    assert_eq!(r.end(), 2);
+    let found = r.compare(0, &[rejected(8)]).unwrap();
+    assert_eq!(
+        found.to_string(),
+        format!(
+            "input 0 output 0: recorded by node unknown at epoch 1 with a rejection with code 7 and detail sha256 {d}, replayed with a rejection with code 8 and detail sha256 {d}",
+            d = digest(detail)
+        )
+    );
+    assert!(r.compare(0, &[p(b"x")]).is_some());
+    assert!(r.compare(1, &[rejected(7)]).is_some());
+    // A replay that rejects where nothing is recorded diverges too.
+    assert!(r.compare(2, &[rejected(7)]).is_some());
+}
+
+#[test]
+fn an_output_is_compared_by_name_and_key_as_well() {
+    let header = OutputHeader {
+        input_offset: 0,
+        index: 0,
+    };
+    let addressed = Addressed {
+        name: "alerts",
+        key: Some(b"k"),
+        payload: b"x",
+    };
+    let stream = [encode_addressed(header, 1, addressed).unwrap()];
+    let r = recorded(&stream, 0..10);
+    let named = |name: &str, key: Option<&[u8]>| Produced::Output {
+        name: name.to_owned(),
+        key: key.map(<[u8]>::to_vec),
+        payload: b"x".to_vec(),
+    };
+    assert_eq!(r.compare(0, &[named("alerts", Some(b"k"))]), None);
+    let found = r.compare(0, &[named("alerts", None)]).unwrap();
+    assert_eq!(
+        found.to_string(),
+        format!(
+            "input 0 output 0: recorded by node unknown at epoch 1 with name alerts, key 6b, sha256 {d}, replayed with name alerts, no key, sha256 {d}",
+            d = digest(b"x")
+        )
+    );
+    assert!(r.compare(0, &[named("out", Some(b"k"))]).is_some());
 }

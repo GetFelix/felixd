@@ -371,16 +371,14 @@ async fn a_claim_takes_an_epoch_above_the_last_snapshot() {
         .unwrap()
         .load(&module, Limits::default())
         .unwrap();
-    for i in 0..5 {
-        workload.step(&count(i)).unwrap();
-    }
+    common::step_all(&mut workload, (0..5).map(count));
     let state = workload.snapshot().unwrap();
     t.publish_all(OUTPUT, (0..5).map(|i| counted(i, 1))).await;
     let header = SnapshotHeader {
         input_offset: 4,
         output_tail: 5,
     };
-    t.publish_all(SNAPSHOTS, [snapshot::encode(header, 7, &state)])
+    t.publish_all(SNAPSHOTS, [snapshot::encode(header, 7, &state[0])])
         .await;
 
     let _agent = t.start_agent();

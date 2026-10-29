@@ -49,7 +49,7 @@ async fn a_new_module_is_refused_once_the_workload_has_output() {
     let before = t.spec().await.module;
 
     let dir = std::env::temp_dir().join(format!("felixd-{}", t.settings.namespace));
-    let path = dir.join("window.wasm");
+    let path = dir.join(format!("{}.wasm", felixd_core::module::hash(&window)));
     let out = t
         .felixd(&["run", "--id", common::ID, "--input", INPUT])
         .args([

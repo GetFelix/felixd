@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -9,16 +10,18 @@ use bytes::Bytes;
 use felix_client::{ConditionalWrite, StreamRecord};
 use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
-use felixd_core::snapshot::{self, SnapshotHeader};
+use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{MAX_WRITE_BYTES, module, names};
-use felixd_runtime::{Compiled, Runtime, Workload, WorkloadError};
+use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
 use tokio::sync::{OnceCell, Semaphore};
 
 use crate::faults;
 use crate::felix::Felix;
+use crate::input::{self, StepInput};
 use crate::lease::Fence;
 use crate::output::OutputLog;
+use crate::snapshots::{self, ReadError, Snapshot};
 
 /// A node's runtime, the modules it has compiled, by hash, and the limits on
 /// blocking work.
@@ -41,8 +44,9 @@ impl Modules {
     }
 
     /// The module `hash`, compiled once per node however many workloads ask
-    /// for it at once.
-    async fn compiled(&self, felix: &Felix, hash: &str) -> Result<Compiled> {
+    /// for it at once. A module built against the 0.1 contract is a
+    /// [`NeedsOperator`] error.
+    pub(crate) async fn compiled(&self, felix: &Felix, hash: &str) -> Result<Compiled> {
         self.compiled
             .get(hash, || async {
                 let bytes = felix
@@ -59,7 +63,12 @@ impl Modules {
                     runtime.compile(&bytes)
                 })
                 .await?
-                .map_err(poison)
+                .map_err(|error| match error {
+                    LoadError::Contract01 => {
+                        NeedsOperator(format!("module {hash}: {error}")).into()
+                    }
+                    error => poison(error),
+                })
             })
             .await
     }
@@ -135,7 +144,24 @@ pub(crate) enum Outcome {
     /// The output stream records that the workload failed under this spec
     /// version, which is the one this node runs or a later one.
     FailedOnStream { spec_version: u64, reason: String },
+    /// No node of this build can run the workload, and it is not the
+    /// workload's fault: an operator has to act.
+    NeedsOperator(String),
 }
+
+/// A workload no node of this build can run, through no fault of its
+/// inputs, such as a module built against the 0.1 contract. It is not
+/// marked failed; the fix is a new module under a new id.
+#[derive(Debug)]
+pub(crate) struct NeedsOperator(pub(crate) String);
+
+impl fmt::Display for NeedsOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsOperator {}
 
 /// The runner found it no longer holds the lease.
 #[derive(Debug)]
@@ -194,8 +220,34 @@ pub(crate) fn poison(message: impl fmt::Display) -> anyhow::Error {
 }
 
 fn failed(error: WorkloadError) -> anyhow::Error {
-    let WorkloadError::Failed(failure) = error;
-    poison(failure.message)
+    match error {
+        WorkloadError::Failed(failure) => poison(failure.message),
+        WorkloadError::SnapshotOutOfFuel => poison("a snapshot ran out of fuel"),
+    }
+}
+
+/// A snapshot ran out of `snapshot_fuel` and was abandoned. The wasm instance
+/// cannot be entered again after the trap, so the run ends and resumes from
+/// the last snapshot, which is still the one on the stream.
+#[derive(Debug)]
+struct SnapshotSkipped;
+
+impl fmt::Display for SnapshotSkipped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a snapshot ran out of fuel")
+    }
+}
+
+impl std::error::Error for SnapshotSkipped {}
+
+/// Snapshots abandoned for want of fuel since this process started.
+static SNAPSHOTS_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+fn read_error(error: ReadError) -> anyhow::Error {
+    match error {
+        ReadError::Felix(error) => error,
+        ReadError::Bad(message) => poison(message),
+    }
 }
 
 /// Resumes the workload from Felix and runs it: for each input, `step`, append
@@ -214,9 +266,16 @@ pub(crate) async fn run_workload(
     fence: &Fence,
     claim_from: &mut Option<u64>,
 ) -> Result<Outcome> {
-    let error = match run(felix, runtime, id, spec, fence, claim_from).await {
-        Ok(never) => match never {},
-        Err(error) => error,
+    // The first input a snapshot may be tried at again after one ran out of
+    // fuel. Without it the run that resumes would retry at its first live
+    // input and replay the whole gap each time.
+    let mut hold = 0;
+    let error = loop {
+        match run(felix, runtime, id, spec, fence, claim_from, &mut hold).await {
+            Ok(never) => match never {},
+            Err(error) if error.is::<SnapshotSkipped>() => continue,
+            Err(error) => break error,
+        }
     };
     if let Some(Superseded(epoch)) = error.downcast_ref::<Superseded>() {
         return Ok(Outcome::Superseded(*epoch));
@@ -226,6 +285,9 @@ pub(crate) async fn run_workload(
             spec_version: found.spec_version,
             reason: found.reason.clone(),
         });
+    }
+    if let Some(NeedsOperator(reason)) = error.downcast_ref::<NeedsOperator>() {
+        return Ok(Outcome::NeedsOperator(reason.clone()));
     }
     if error.is::<Poison>() {
         Ok(Outcome::Failed(format!("{error:#}")))
@@ -243,6 +305,7 @@ async fn run(
     spec: &WorkloadSpec,
     fence: &Fence,
     claim_from: &mut Option<u64>,
+    hold: &mut u64,
 ) -> Result<Infallible> {
     let spec_version = spec_version(felix, id, spec).await?;
     // The claim comes first, so that from here on a stale owner's append is
@@ -259,27 +322,14 @@ async fn run(
 
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
-    let snapshot = match felix.last_record(&snap_stream, snap_tail).await? {
-        Some(record) => {
-            let at = |e: &dyn fmt::Display| {
-                poison(format!("snapshot at {snap_stream}:{}: {e}", record.offset))
-            };
-            let decoded = snapshot::decode(&record.payload).map_err(|e| at(&e))?;
-            if decoded.epoch() > fence.epoch() {
-                tracing::info!(
-                    workload = id,
-                    epoch = decoded.epoch(),
-                    "a later owner took a snapshot"
-                );
-                return Err(Superseded(decoded.epoch()).into());
-            }
-            let snapshot::Record::Whole(taken, state) = decoded else {
-                return Err(at(&"this build restores only version 2 snapshots"));
-            };
-            Some((taken.header, state.to_vec()))
-        }
-        None => None,
-    };
+    let latest = snapshots::latest(felix, &snap_stream, snap_tail)
+        .await
+        .map_err(read_error)?;
+    if let Some(epoch) = latest.last_epoch.filter(|&e| e > fence.epoch()) {
+        tracing::info!(workload = id, epoch, "a later owner took a snapshot");
+        return Err(Superseded(epoch).into());
+    }
+    let snapshot = latest.snapshot;
     let last_output = last_output(felix, &spec.output, output_tail).await?;
     if let Some((_, last)) = last_output.filter(|(_, last)| last.epoch > fence.epoch()) {
         tracing::info!(
@@ -294,18 +344,36 @@ async fn run(
         header: last.header,
     });
     let resume = resume::fold(Found {
-        snapshot: snapshot.as_ref().map(|(header, _)| *header),
+        snapshot: snapshot.as_ref().map(|s| s.taken().header),
         last_output,
         output_tail,
     })
     .map_err(poison)?;
-    if let Some((_, state)) = snapshot.filter(|_| resume.restore) {
-        blocking(&runtime.calls, &mut workload, move |w| w.restore(&state))
-            .await?
-            .map_err(failed)?;
+    if let Some(snapshot) = snapshot.as_ref().filter(|_| resume.restore) {
+        let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
+            .await
+            .map_err(read_error)?;
+        blocking(&runtime.calls, &mut workload, move |w| {
+            let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
+            w.restore(&chunks)
+        })
+        .await?
+        .map_err(|error| match error {
+            WorkloadError::Failed(Failure {
+                kind: FailureKind::OutOfFuel,
+                ..
+            }) => NeedsOperator(format!(
+                "restoring the snapshot ran out of snapshot_fuel ({}), raise limits.snapshot_fuel",
+                spec.limits.snapshot_fuel
+            ))
+            .into(),
+            error => failed(error),
+        })?;
     }
     tracing::info!(workload = id, from = resume.next_input, "resumed");
     let skip_claims = names::is_output_stream(&spec.input);
+    // Chunks the next snapshot need not write again.
+    let previous = snapshot.as_ref().and_then(Snapshot::manifest).cloned();
     let previous_stamp = match spec.snapshot_every_ms {
         Some(_) => last_input_stamp(felix, &spec.input, resume.next_input, skip_claims).await?,
         None => None,
@@ -321,7 +389,7 @@ async fn run(
         workload,
         resume,
         log,
-        skip_claims,
+        previous,
         written: Written {
             felix,
             stream: &spec.output,
@@ -331,6 +399,7 @@ async fn run(
         },
         since_snapshot: 0,
         previous_stamp,
+        hold,
     };
     let mut events = felix.subscribe_from(&spec.input, resume.next_input).await?;
     let mut next_input = resume.next_input;
@@ -378,38 +447,42 @@ struct Steps<'a> {
     workload: Option<Workload>,
     resume: Resume,
     log: OutputLog<'a>,
-    /// Whether the input is another workload's output stream, whose claims
-    /// are not inputs.
-    skip_claims: bool,
+    /// The last snapshot manifest this owner restored or wrote.
+    previous: Option<Manifest>,
     written: Written<'a>,
     since_snapshot: u64,
     /// The append time of the last input stepped, for time-based snapshots.
     previous_stamp: Option<u64>,
+    /// No snapshot is taken at an input below this.
+    hold: &'a mut u64,
 }
 
 impl Steps<'_> {
-    async fn step(&mut self, offset: u64, stamp: u64, input: Bytes) -> Result<()> {
-        if self.skip_claims && output::passed_over(&input, output::DEFAULT_NAME) {
+    async fn step(&mut self, offset: u64, stamp: u64, record: Bytes) -> Result<()> {
+        let Some(input) = StepInput::read(self.spec, offset, stamp, &record).map_err(poison)?
+        else {
             return Ok(());
-        }
+        };
         let interval = self
             .spec
             .snapshot_every_ms
             .is_some_and(|ms| snapshot::starts_interval(ms, self.previous_stamp, stamp));
         self.previous_stamp = Some(stamp);
-        let outputs = blocking(&self.modules.calls, &mut self.workload, move |w| {
-            w.step(&input)
+        let stepped = blocking(&self.modules.calls, &mut self.workload, move |w| {
+            w.step(input.as_input())
         })
         .await?
         .map_err(failed)?;
         let mut batch = Vec::new();
-        for (index, payload) in outputs.iter().enumerate() {
+        for (index, produced) in input::produced(stepped).iter().enumerate() {
             let index = index as u32;
             let header = OutputHeader {
                 input_offset: offset,
                 index,
             };
-            let record = output::encode(header, self.fence.epoch(), payload);
+            let record = produced
+                .encode(header, self.fence.epoch())
+                .map_err(poison)?;
             if self.resume.already_written(offset, index) {
                 self.written.check(&record).await?;
             } else {
@@ -426,7 +499,7 @@ impl Steps<'_> {
 
         self.since_snapshot += 1;
         let due = interval || self.since_snapshot >= self.spec.snapshot_every;
-        if due && !self.resume.replaying(offset) {
+        if due && offset >= *self.hold && !self.resume.replaying(offset) {
             self.snapshot(offset).await?;
             self.since_snapshot = 0;
         }
@@ -441,58 +514,122 @@ impl Steps<'_> {
         if !self.fence.holds() {
             return Err(LostLease.into());
         }
-        let state = blocking(&self.modules.calls, &mut self.workload, Workload::snapshot)
-            .await?
-            .map_err(failed)?;
-        let header = SnapshotHeader {
-            input_offset,
-            output_tail: self.log.tail(),
+        let chunks =
+            match blocking(&self.modules.calls, &mut self.workload, Workload::snapshot).await? {
+                Ok(chunks) => chunks,
+                Err(WorkloadError::SnapshotOutOfFuel) => {
+                    // Nothing has been written, so the previous snapshot is still
+                    // the latest. Fuel is metered deterministically, so every
+                    // replica skips the same snapshots.
+                    let skipped = SNAPSHOTS_SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        workload = self.snap_stream,
+                        input = input_offset,
+                        skipped,
+                        "a snapshot ran out of snapshot_fuel and was abandoned"
+                    );
+                    *self.hold = input_offset + self.spec.snapshot_every.max(1);
+                    return Err(SnapshotSkipped.into());
+                }
+                Err(error) => return Err(failed(error)),
+            };
+        let taken = Taken {
+            header: SnapshotHeader {
+                input_offset,
+                output_tail: self.log.tail(),
+            },
+            epoch: self.fence.epoch(),
         };
-        let record = snapshot::encode(header, self.fence.epoch(), &state);
-        if record.len() > MAX_WRITE_BYTES {
-            return Err(poison(format!(
-                "the snapshot at input {input_offset} is {} bytes, more than the {MAX_WRITE_BYTES} one write may hold",
-                record.len()
-            )));
-        }
         faults::before_snapshot_write();
-        self.write_snapshot(record).await?;
+        let manifest = self.write_snapshot(taken, &chunks).await?;
+        self.previous = Some(manifest);
         faults::after_snapshot();
         Ok(())
     }
 
-    /// Appends `record` at the snapshot stream's tail with `publish_if`, so a
-    /// stale owner cannot write a snapshot after a later owner's. Snapshots
-    /// found at the tail from epochs up to this owner's are a stale owner's
-    /// that landed first, which determinism makes correct, so it writes after
-    /// them. One from a later epoch means this owner is superseded.
-    async fn write_snapshot(&mut self, record: Vec<u8>) -> Result<()> {
+    /// Writes the chunks the previous manifest does not hold, then the
+    /// manifest, which is what makes them a snapshot. Each write is a
+    /// `publish_if` at the snapshot stream's tail, so a stale owner cannot
+    /// write after a later owner's records. Records found at the tail from
+    /// epochs up to this owner's are a stale owner's that landed first, which
+    /// determinism makes correct, so it writes after them. One from a later
+    /// epoch means this owner is superseded. Chunks that land without their
+    /// manifest are inert.
+    async fn write_snapshot(&mut self, taken: Taken, chunks: &[Vec<u8>]) -> Result<Manifest> {
+        let refs: Vec<&[u8]> = chunks.iter().map(Vec::as_slice).collect();
+        let plan = snapshot::plan(self.previous.as_ref(), &refs);
+        let records: Vec<Vec<u8>> = plan
+            .write
+            .iter()
+            .map(|&i| snapshot::encode_chunk(taken.epoch, &plan.hashes[i], &chunks[i]))
+            .collect();
+        let mut written_at = Vec::with_capacity(records.len());
         loop {
+            let next = written_at.len();
+            let mut end = next;
+            let mut bytes = 0;
+            while end < records.len()
+                && (end == next || bytes + records[end].len() <= MAX_WRITE_BYTES)
+            {
+                bytes += records[end].len();
+                end += 1;
+            }
+            let mut batch = records[next..end].to_vec();
+            let mut manifest = None;
+            if end == records.len() {
+                // The manifest goes in the same write as the last chunks when
+                // it fits, at the offsets they land at if the write succeeds.
+                let at: Vec<u64> = written_at
+                    .iter()
+                    .copied()
+                    .chain((0..batch.len() as u64).map(|i| self.snap_tail + i))
+                    .collect();
+                let m = plan
+                    .manifest(taken, &at)
+                    .expect("one offset per chunk written");
+                let record = snapshot::encode_manifest(&m);
+                if batch.is_empty() || bytes + record.len() <= MAX_WRITE_BYTES {
+                    batch.push(record);
+                    manifest = Some(m);
+                }
+            }
             if !self.fence.holds() {
                 return Err(LostLease.into());
             }
-            let seen_tail = match self
+            let count = batch.len() as u64;
+            match self
                 .felix
-                .publish_if(self.snap_stream, vec![record.clone()], self.snap_tail)
+                .publish_if(self.snap_stream, batch, self.snap_tail)
                 .await?
             {
                 ConditionalWrite::Written { offset } => {
-                    self.snap_tail = offset + 1;
-                    return Ok(());
+                    if offset != self.snap_tail {
+                        return Err(poison(format!(
+                            "{} wrote at {offset}, expected {}",
+                            self.snap_stream, self.snap_tail
+                        )));
+                    }
+                    let chunks_written = count - u64::from(manifest.is_some());
+                    written_at.extend(offset..offset + chunks_written);
+                    self.snap_tail = offset + count;
+                    if let Some(manifest) = manifest {
+                        return Ok(manifest);
+                    }
                 }
-                ConditionalWrite::Refused { tail } => tail,
-            };
-            let found = self
-                .felix
-                .read_range(self.snap_stream, self.snap_tail, seen_tail)
-                .await?;
-            for found in &found {
-                let epoch = snapshot::decode(&found.payload).map_or(0, |r| r.epoch());
-                if epoch > self.fence.epoch() {
-                    return Err(Superseded(epoch).into());
+                ConditionalWrite::Refused { tail } => {
+                    let found = self
+                        .felix
+                        .read_range(self.snap_stream, self.snap_tail, tail)
+                        .await?;
+                    for found in &found {
+                        let epoch = snapshot::decode(&found.payload).map_or(0, |r| r.epoch());
+                        if epoch > self.fence.epoch() {
+                            return Err(Superseded(epoch).into());
+                        }
+                    }
+                    self.snap_tail = tail.max(self.snap_tail);
                 }
             }
-            self.snap_tail = seen_tail.max(self.snap_tail);
         }
     }
 }

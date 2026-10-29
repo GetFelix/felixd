@@ -39,11 +39,7 @@ impl Expected {
     pub fn output(header: OutputHeader, payload: Vec<u8>) -> Self {
         Expected {
             header,
-            produced: Produced::Output {
-                name: output::DEFAULT_NAME.to_owned(),
-                key: None,
-                payload,
-            },
+            produced: Produced::unnamed(payload),
         }
     }
 
@@ -60,6 +56,54 @@ impl Expected {
 }
 
 impl Produced {
+    /// An output under [`output::DEFAULT_NAME`] with no key.
+    pub fn unnamed(payload: Vec<u8>) -> Self {
+        Produced::Output {
+            name: output::DEFAULT_NAME.to_owned(),
+            key: None,
+            payload,
+        }
+    }
+
+    /// What `record` holds, if it is an output or a rejection.
+    pub fn of(record: &Record<'_>) -> Option<Self> {
+        match record {
+            Record::Output(_, found) => Some(Produced::Output {
+                name: found.name.to_owned(),
+                key: found.key.map(<[u8]>::to_vec),
+                payload: found.payload.to_vec(),
+            }),
+            Record::Rejection(_, found) => Some(Produced::Rejection {
+                code: found.code,
+                detail: found.detail.to_vec(),
+            }),
+            Record::Claim { .. } | Record::Failure { .. } => None,
+        }
+    }
+
+    /// The record an owner at `epoch` writes for this at `header`.
+    pub fn encode(&self, header: OutputHeader, epoch: u64) -> Result<Vec<u8>, output::InvalidName> {
+        match self {
+            Produced::Output { name, key, payload } => output::encode_addressed(
+                header,
+                epoch,
+                output::Addressed {
+                    name,
+                    key: key.as_deref(),
+                    payload,
+                },
+            ),
+            Produced::Rejection { code, detail } => Ok(output::encode_rejection(
+                header.input_offset,
+                epoch,
+                output::Rejected {
+                    code: *code,
+                    detail,
+                },
+            )),
+        }
+    }
+
     /// Whether `record` holds this, whatever its header and epoch.
     fn matches(&self, record: &Record<'_>) -> bool {
         match (self, record) {

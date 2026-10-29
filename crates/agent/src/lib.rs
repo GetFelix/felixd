@@ -10,6 +10,9 @@
 //! - [`lease`]: claims, renews and releases a workload's lease.
 //! - [`runner`]: runs one workload: resume, then step, append and snapshot.
 //! - [`output`]: appends a step's outputs exactly once.
+//! - [`input`]: what a step is given and what it produced, the same for every
+//!   caller.
+//! - [`snapshots`]: reads snapshots and their chunks back.
 //! - [`faults`]: crashes and dropped inputs the integration tests inject.
 
 pub mod admin;
@@ -21,6 +24,8 @@ pub mod settings;
 pub mod submit;
 
 mod faults;
+mod input;
 mod lease;
 mod output;
 mod runner;
+mod snapshots;

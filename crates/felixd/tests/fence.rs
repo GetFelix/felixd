@@ -163,9 +163,7 @@ async fn a_resume_passes_over_claims_between_outputs() {
         .unwrap()
         .load(&module, Limits::default())
         .unwrap();
-    for i in 0..4 {
-        workload.step(&count(i)).unwrap();
-    }
+    common::step_all(&mut workload, (0..4).map(count));
     let state = workload.snapshot().unwrap();
 
     let mut stream = vec![output::encode_claim(1, "")];
@@ -181,7 +179,7 @@ async fn a_resume_passes_over_claims_between_outputs() {
         input_offset: at[3],
         output_tail: fourth + 1,
     };
-    t.publish_all(SNAPSHOTS, [snapshot::encode(header, 1, &state)])
+    t.publish_all(SNAPSHOTS, [snapshot::encode(header, 1, &state[0])])
         .await;
 
     let _agent = t.start_agent();
@@ -296,7 +294,10 @@ async fn a_snapshot_frozen_past_a_takeover_is_safe_to_resume_from() {
     })
     .await;
     let snapshots = t.read_all(SNAPSHOTS).await;
-    let taken = snapshot::decode(&snapshots[0].1).unwrap().taken().unwrap();
+    let taken = snapshots
+        .iter()
+        .find_map(|(_, r)| snapshot::decode(r).unwrap().taken())
+        .unwrap();
     assert_eq!(taken.epoch, stale);
 
     next.kill();

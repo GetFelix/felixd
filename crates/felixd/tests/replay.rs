@@ -238,6 +238,6 @@ async fn a_diff_with_another_module_finds_where_it_changes_the_output() {
     assert!(ok, "{report}");
     let (ok, state) = t.replay(&["--id", ID, "--to", "6", "--module", &hash]);
     assert!(ok);
-    assert_eq!(state, "{}");
+    assert_eq!(state, r#"{"chunks":[]}"#);
     assert_eq!(t.read_all(OUTPUT).await, before);
 }

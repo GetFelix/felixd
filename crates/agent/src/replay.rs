@@ -3,15 +3,18 @@
 //! outputs a replay produces with the ones on the stream. Writes nothing.
 
 use anyhow::{Context, Result, anyhow, bail};
+use felixd_core::check::Produced;
+use felixd_core::names;
 use felixd_core::replay::{self, Divergence, Recorded};
-use felixd_core::snapshot::{self, SnapshotHeader};
+use felixd_core::snapshot::SnapshotHeader;
 use felixd_core::spec::WorkloadSpec;
-use felixd_core::{names, output};
 use felixd_runtime::{Runtime, Workload};
 
 use crate::check::module_bytes;
 use crate::felix::Felix;
+use crate::input::{self, StepInput};
 use crate::settings::Settings;
+use crate::snapshots::{self, Snapshot};
 
 /// Where a replay stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,22 +196,24 @@ async fn start(
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let records = felix.read_range(&snap_stream, 0, snap_tail).await?;
-    let mut snapshots = Vec::with_capacity(records.len());
+    let mut found = Vec::with_capacity(records.len());
     for record in &records {
-        let at =
-            |e: &dyn std::fmt::Display| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset);
-        let decoded = snapshot::decode(&record.payload).map_err(|e| at(&e))?;
-        let snapshot::Record::Whole(taken, state) = decoded else {
-            return Err(at(&"this build replays only version 2 snapshots"));
-        };
-        snapshots.push((taken.header, state));
+        let snapshot = Snapshot::decode(&record.payload)
+            .map_err(|e| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset))?;
+        found.extend(snapshot);
     }
-    let Some(index) = replay::nearest_snapshot(snapshots.iter().map(|(h, _)| *h), before) else {
+    let headers = found.iter().map(|s| s.taken().header);
+    let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, None));
     };
-    let (header, state) = snapshots[index];
+    let snapshot = &found[index];
+    let header = snapshot.taken().header;
+    let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
+        .await
+        .map_err(snapshots::ReadError::into_anyhow)?;
+    let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
     workload
-        .restore(state)
+        .restore(&chunks)
         .with_context(|| format!("restore the snapshot of input {}", header.input_offset))?;
     Ok((workload, Some(header)))
 }
@@ -222,20 +227,27 @@ async fn run_inputs<T>(
     workload: &mut Workload,
     from: u64,
     end: u64,
-    mut each: impl FnMut(u64, &[Vec<u8>]) -> Option<T>,
+    mut each: impl FnMut(u64, &[Produced]) -> Option<T>,
 ) -> Result<Option<T>> {
-    let skip_claims = names::is_output_stream(&spec.input);
     let mut next = from;
     while next < end {
         let (page, after) = felix.read_page(&spec.input, next, end).await?;
-        for input in page {
-            if skip_claims && output::passed_over(&input.payload, output::DEFAULT_NAME) {
+        for record in page {
+            let read = StepInput::read(
+                spec,
+                record.offset,
+                record.timestamp_micros,
+                &record.payload,
+            )
+            .map_err(|e| anyhow!(e))?;
+            let Some(step) = read else {
                 continue;
-            }
-            let outputs = workload
-                .step(&input.payload)
-                .with_context(|| format!("input {} fails the workload", input.offset))?;
-            if let Some(found) = each(input.offset, &outputs) {
+            };
+            let stepped = workload
+                .step(step.as_input())
+                .with_context(|| format!("input {} fails the workload", record.offset))?;
+            let outputs = input::produced(stepped);
+            if let Some(found) = each(record.offset, &outputs) {
                 return Ok(Some(found));
             }
         }

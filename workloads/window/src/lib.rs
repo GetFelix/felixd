@@ -5,7 +5,8 @@
 //! `WINDOW_MS`. A record that starts a later window closes the open one, and
 //! that step outputs the closed window's summary as a JSON line. Steps inside
 //! one window output nothing. A record with an earlier timestamp than the open
-//! window is counted in it, and a malformed record is counted as rejected.
+//! window is counted in it. A malformed record is rejected with code
+//! [`MALFORMED`] and counted.
 
 use std::cell::RefCell;
 
@@ -14,7 +15,14 @@ wit_bindgen::generate!({
     world: "workload",
 });
 
+use exports::felixd::workload::state;
+use exports::felixd::workload::step::{
+    self, Addressed, ErrorCode, Input, InputBody, Output, StepError,
+};
+
 const WINDOW_MS: u64 = 10_000;
+/// The rejection code for an input that is not 16 bytes.
+const MALFORMED: u32 = 1;
 const STATE_LEN: usize = 1 + 7 * 8;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -105,12 +113,28 @@ thread_local! {
 
 struct WindowAggregate;
 
-impl Guest for WindowAggregate {
-    fn step(input: Vec<u8>) -> Vec<Vec<u8>> {
+fn out(payload: Vec<u8>) -> Output {
+    Output::Record(Addressed {
+        name: "out".to_string(),
+        key: None,
+        payload,
+    })
+}
+
+impl step::Guest for WindowAggregate {
+    fn step(input: Input) -> Result<Vec<Output>, StepError> {
+        let InputBody::Record(record) = input.body else {
+            return Err(StepError::Poison(
+                "window takes no effect responses".to_string(),
+            ));
+        };
         STATE.with_borrow_mut(|state| {
-            let Ok(bytes) = <[u8; 16]>::try_from(input.as_slice()) else {
+            let Ok(bytes) = <[u8; 16]>::try_from(record.payload.as_slice()) else {
                 state.rejected += 1;
-                return Vec::new();
+                return Err(StepError::Reject(ErrorCode {
+                    code: MALFORMED,
+                    detail: format!("an input is 16 bytes, not {}", record.payload.len()),
+                }));
             };
             let ts = u64::from_le_bytes(bytes[..8].try_into().unwrap());
             let value = i64::from_le_bytes(bytes[8..].try_into().unwrap());
@@ -118,28 +142,38 @@ impl Guest for WindowAggregate {
             match &mut state.open {
                 Some(w) if start <= w.start => {
                     w.add(value);
-                    Vec::new()
+                    Ok(Vec::new())
                 }
                 Some(w) => {
                     let closed = w.summary();
                     *w = Window::new(start, value);
                     state.emitted += 1;
-                    vec![closed]
+                    Ok(vec![out(closed)])
                 }
                 None => {
                     state.open = Some(Window::new(start, value));
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             }
         })
     }
+}
 
-    fn snapshot() -> Vec<u8> {
+impl state::Guest for WindowAggregate {
+    fn snapshot() -> u32 {
+        1
+    }
+
+    fn snapshot_chunk(_index: u32) -> Vec<u8> {
         STATE.with_borrow(State::encode)
     }
 
-    fn restore(state: Vec<u8>) {
-        let decoded = State::decode(&state).expect("window state is malformed");
+    fn restore(chunks: u32) {
+        assert_eq!(chunks, 1, "window state is one chunk");
+    }
+
+    fn restore_chunk(_index: u32, chunk: Vec<u8>) {
+        let decoded = State::decode(&chunk).expect("window state is malformed");
         STATE.set(decoded);
     }
 

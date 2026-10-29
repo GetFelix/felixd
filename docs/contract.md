@@ -1,7 +1,7 @@
 # The workload contract, version 0.2
 
 This is the interface between felixd and a workload, and what each side
-promises. It replaces the 0.1 world in `wit/workload.wit`. It settles the
+promises. `wit/workload.wit` holds the WIT below; it replaced the 0.1 world. It settles the
 outline in [design.md, The workload contract, version 0.2](design.md#the-workload-contract-version-02)
 (#64) and leaves room for effects (#71) and typed records (#73) without
 another breaking change.
@@ -37,7 +37,7 @@ interface step {
   /// was written. Never looked up again, so replay sees the same values.
   record source {
     /// The input stream's name.
-    stream: string,
+    %stream: string,
     /// The Felix incarnation the name resolved to. 0 until specs record
     /// incarnations (#72).
     incarnation: u64,
@@ -198,7 +198,9 @@ size). The default is ten times the step default. `inspect` runs under
 Running out of snapshot fuel is not poison. A snapshot that runs out is
 abandoned: nothing is written, the previous snapshot stays current, the host
 counts and logs it, and the workload keeps running and replays from the older
-snapshot if it restarts. A restore that runs out puts the workload in
+snapshot if it restarts. A trap leaves the guest instance unusable, so the
+agent drops it, resumes from the older snapshot and does not retry a snapshot
+until `snapshot_every` more inputs have passed. A restore that runs out puts the workload in
 needs-operator, not failed, so the limit can be raised and the workload
 resumed. Fuel metering is deterministic, so every replica skips the same
 snapshots.

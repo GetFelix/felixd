@@ -11,6 +11,7 @@ fn spec() -> WorkloadSpec {
         limits: Limits {
             fuel_per_call: 1000,
             max_memory_bytes: 1 << 20,
+            snapshot_fuel: 5000,
         },
         failure: None,
     }
@@ -27,7 +28,7 @@ fn the_json_form_is_fixed() {
     assert_eq!(
         json,
         format!(
-            r#"{{"module":"{}","input":"sensors","output":"wl.temp.out","snapshot_every":50,"state":"running","limits":{{"fuel_per_call":1000,"max_memory_bytes":1048576}}}}"#,
+            r#"{{"module":"{}","input":"sensors","output":"wl.temp.out","snapshot_every":50,"state":"running","limits":{{"fuel_per_call":1000,"max_memory_bytes":1048576,"snapshot_fuel":5000}}}}"#,
             "ab".repeat(32)
         )
     );
@@ -44,6 +45,14 @@ fn optional_fields_have_defaults() {
     assert_eq!(decoded.limits, Limits::default());
     assert_eq!(decoded.failure, None);
     assert_eq!(decoded.state, WorkloadState::Stopped);
+}
+
+#[test]
+fn limits_without_snapshot_fuel_get_ten_times_the_step_default() {
+    let limits: Limits =
+        serde_json::from_str(r#"{"fuel_per_call":1000,"max_memory_bytes":1048576}"#).unwrap();
+    assert_eq!(limits.snapshot_fuel, 500_000_000);
+    assert_eq!(limits.snapshot_fuel, 10 * Limits::default().fuel_per_call);
 }
 
 #[test]

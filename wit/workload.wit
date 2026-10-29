@@ -1,15 +1,119 @@
-package felixd:workload@0.1.0;
+package felixd:workload@0.2.0;
 
-/// A deterministic program. The host gives it no imports: no clock, randomness,
-/// files or network. Anything else it needs arrives in an input record.
-world workload {
-  /// Handle one input record. Returns the output records it produced, which
-  /// may be none.
-  export step: func(input: list<u8>) -> list<list<u8>>;
-  /// The whole state, in a form `restore` accepts.
-  export snapshot: func() -> list<u8>;
-  /// Replace the state with one `snapshot` returned.
-  export restore: func(state: list<u8>);
+interface step {
+  /// Where an input came from, as recorded in the workload's spec when it
+  /// was written. Never looked up again, so replay sees the same values.
+  record source {
+    /// The input stream's name.
+    %stream: string,
+    /// The Felix incarnation the name resolved to. 0 until specs record
+    /// incarnations (#72).
+    incarnation: u64,
+  }
+
+  /// One input record and where it sits in the input.
+  record input {
+    source: source,
+    /// The record's offset in the input stream.
+    offset: u64,
+    /// The broker's append time, in microseconds since the Unix epoch.
+    timestamp-micros: u64,
+    body: input-body,
+  }
+
+  variant input-body {
+    /// A record from the input stream. `key` is the key it was addressed
+    /// with, when it is another workload's output.
+    %record(record-in),
+    /// The answer to an effect request. No version of felixd delivers one
+    /// yet (#71).
+    response(effect-response),
+  }
+
+  record record-in {
+    key: option<list<u8>>,
+    payload: list<u8>,
+  }
+
+  /// Something a step produces.
+  variant output {
+    /// A record for the named output, under an optional key.
+    %record(addressed),
+    /// A request for an effect. Refused until effects exist (#71).
+    request(effect-request),
+  }
+
+  record addressed {
+    /// Lowercase ASCII letters, digits and `-`, 1 to 64 bytes.
+    name: string,
+    key: option<list<u8>>,
+    payload: list<u8>,
+  }
+
+  record effect-request {
+    /// The versioned interface the body follows, such as
+    /// `felixd:http/fetch@0.1.0`. It states the kind's guarantee.
+    kind: string,
+    /// A credential's name, resolved by the executor. Never a secret.
+    credential: option<string>,
+    body: list<u8>,
+  }
+
+  record effect-response {
+    /// The request's id: the output header it was written with.
+    request: effect-id,
+    outcome: outcome,
+  }
+
+  record effect-id {
+    input-offset: u64,
+    index: u32,
+    epoch: u64,
+  }
+
+  variant outcome {
+    ok(list<u8>),
+    error(error-code),
+    timeout,
+    /// The executor was lost after it may have acted.
+    unknown,
+    /// The executor's queue was full; nothing was done.
+    backpressure,
+  }
+
+  record error-code {
+    /// What a program compares.
+    code: u32,
+    /// Detail for people. Never compared.
+    detail: string,
+  }
+
+  variant step-error {
+    /// The input is bad and the workload carries on. Recorded on the
+    /// output stream; produces no outputs.
+    reject(error-code),
+    /// The workload cannot go on. It fails with this reason.
+    poison(string),
+  }
+
+  step: func(input: input) -> result<list<output>, step-error>;
+}
+
+interface state {
+  /// Starts a snapshot and returns how many chunks it has. The host calls
+  /// `snapshot-chunk` for each index in order before anything else.
+  snapshot: func() -> u32;
+  /// Chunk `index` of the snapshot `snapshot` started.
+  snapshot-chunk: func(index: u32) -> list<u8>;
+  /// Starts a restore of `chunks` chunks on a fresh instance. The host then
+  /// calls `restore-chunk` for each index in order.
+  restore: func(chunks: u32);
+  restore-chunk: func(index: u32, chunk: list<u8>);
   /// The state as JSON, for replay and inspection.
-  export inspect: func() -> string;
+  inspect: func() -> string;
+}
+
+world workload {
+  export step;
+  export state;
 }

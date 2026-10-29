@@ -779,6 +779,7 @@ dependencies = [
 name = "felixd-testkit"
 version = "0.0.0"
 dependencies = [
+ "wat",
  "wit-component 0.262.0",
 ]
 
