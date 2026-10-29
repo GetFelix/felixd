@@ -6,6 +6,7 @@ use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
 use crate::runner::{FailedOnStream, LostLease, Superseded, poison};
+use crate::specs;
 
 /// Consecutive failed attempts to write one batch before giving up.
 const MAX_ATTEMPTS: u32 = 5;
@@ -128,8 +129,8 @@ impl<'a> OutputLog<'a> {
         }
     }
 
-    /// Claims the stream for this owner: appends a claim record with
-    /// `publish_if`, so any later append of a lower epoch is refused, and
+    /// Claims the stream for this owner: appends a claim record naming the
+    /// spec record it runs with `publish_if`, so any later append of a lower epoch is refused, and
     /// returns a log at the tail after it.
     ///
     /// `from` is the tail read with the epoch floor when the lease was
@@ -146,6 +147,7 @@ impl<'a> OutputLog<'a> {
         stream: &'a str,
         fence: &'a Fence,
         spec_version: u64,
+        spec_record: u64,
         from: &mut Option<u64>,
     ) -> Result<OutputLog<'a>> {
         let start = match *from {
@@ -159,13 +161,21 @@ impl<'a> OutputLog<'a> {
         if from.is_none() {
             return Ok(log);
         }
+        // The highest spec claimed before this claim, which it carries
+        // forward even if its owner then refuses its own older spec.
+        let mut floor = specs::claim_floor(felix, stream, start).await?.unwrap_or(0);
         let mut failures = 0;
         loop {
             if !fence.holds() {
                 return Err(LostLease.into());
             }
             faults::before_claim();
-            let claim = vec![output::encode_claim(fence.epoch(), fence.node())];
+            let claim = vec![output::encode_claim_under(
+                fence.epoch(),
+                spec_record,
+                floor,
+                fence.node(),
+            )];
             let sent = send(felix, stream, claim, log.tail, faults::Write::Claim).await;
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == log.tail => {
@@ -198,11 +208,18 @@ impl<'a> OutputLog<'a> {
             let mut ours = false;
             for record in felix.read_range(stream, log.tail, seen_tail).await? {
                 let found = log.check_found(&record.payload, record.offset)?;
-                ours |= found
-                    == Record::Claim {
-                        epoch: fence.epoch(),
-                        node: fence.node().as_bytes(),
-                    };
+                if let Record::Claim {
+                    floor: Some(claimed),
+                    ..
+                } = found
+                {
+                    floor = floor.max(claimed);
+                }
+                // An earlier attempt that landed may carry an older floor.
+                ours |= matches!(found, Record::Claim { epoch, node, spec, .. }
+                    if epoch == fence.epoch()
+                        && node == fence.node().as_bytes()
+                        && spec == Some(spec_record));
             }
             log.tail = seen_tail;
             if ours {

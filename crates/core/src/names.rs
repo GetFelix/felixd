@@ -12,6 +12,9 @@ pub const NODES: &str = "nodes";
 /// Cache of module bytes, keyed by the module's sha256 in hex.
 pub const MODULES: &str = "modules";
 
+/// Stream of spec records: every version of every workload's spec.
+pub const SPECS: &str = "sys.specs";
+
 const MAX_ID_LEN: usize = 64;
 
 /// Checks that `id` is usable in a stream name: 1 to 64 characters of

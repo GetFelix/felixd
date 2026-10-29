@@ -458,3 +458,113 @@ fn manifests_are_checked_and_chunks_are_not_snapshots() {
         [Finding::SnapshotTail { offset: 1, .. }]
     ));
 }
+
+#[test]
+fn each_input_runs_under_the_spec_of_the_claim_before_it() {
+    let at = |input: u64, epoch: u64| output::encode(header(input, 0), epoch, b"x");
+    let records = [
+        output::encode_claim(1, ""),
+        at(0, 1),
+        output::encode_claim_under(2, 10, 10, "a"),
+        at(1, 2),
+        at(2, 2),
+        // A claim under the same spec changes nothing.
+        output::encode_claim_under(3, 10, 10, "b"),
+        at(3, 3),
+        // Two changes with no output between: the later one runs from 4.
+        output::encode_claim_under(4, 11, 11, "a"),
+        output::encode_claim_under(5, 12, 12, "b"),
+        at(4, 5),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(1, 10), (4, 12)]
+    );
+    assert_eq!(
+        specs_claimed(records.iter().map(Vec::as_slice)),
+        [10, 11, 12]
+    );
+}
+
+#[test]
+fn a_refused_claim_does_not_displace_the_spec_before_it() {
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        // Refused by its owner, which stepped nothing.
+        output::encode_claim_under(2, 11, 11, "b"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |spec| spec != 11),
+        [(0, 10)]
+    );
+}
+
+#[test]
+fn a_claim_under_an_older_spec_than_one_claimed_is_passed_over() {
+    let at = |input: u64, epoch: u64| output::encode(header(input, 0), epoch, b"x");
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        at(0, 1),
+        output::encode_claim_under(2, 12, 12, "a"),
+        at(1, 2),
+        // A node with a stale view claimed under 11 and refused it.
+        output::encode_claim_under(3, 11, 11, "b"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(0, 10), (1, 12)]
+    );
+}
+
+#[test]
+fn a_claim_below_a_refused_claims_floor_is_passed_over() {
+    let at = |input: u64, epoch: u64| output::encode(header(input, 0), epoch, b"x");
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        at(0, 1),
+        // Refused after claiming, which still raises the floor to 13.
+        output::encode_claim_under(2, 13, 13, "b"),
+        // Below that floor, so its owner refused it too.
+        output::encode_claim_under(3, 12, 13, "c"),
+        at(1, 3),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |spec| spec != 13),
+        [(0, 10)]
+    );
+}
+
+/// rA's claim and outputs, then rB, a new module its owner refused after
+/// claiming. Every input is judged under rA, whatever the cache now says.
+#[test]
+fn a_refused_new_module_never_decides_what_a_check_runs() {
+    use crate::spec::{Limits, WorkloadSpec, WorkloadState};
+    let spec = |module: &str, fuel: u64| WorkloadSpec {
+        module: module.into(),
+        input: "in".into(),
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        state: WorkloadState::Running,
+        limits: Limits {
+            fuel_per_call: fuel,
+            ..Limits::default()
+        },
+        failure: None,
+        record: None,
+    };
+    let (a, b) = (spec("aa", 100), spec("bb", 1));
+    let claimed = HashMap::from([(0, a.clone()), (1, b.clone())]);
+    let records = [
+        output::encode_claim_under(1, 0, 0, "x"),
+        output::encode(header(0, 0), 1, b"x"),
+        output::encode_claim_under(2, 1, 1, "y"),
+    ];
+    let cached = WorkloadSpec {
+        record: Some(1),
+        ..b.clone()
+    };
+    let (lineage, limits) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.module, "aa");
+    assert_eq!(limits, [(0, a.limits)]);
+}

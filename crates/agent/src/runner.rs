@@ -22,6 +22,7 @@ use crate::input::{self, StepInput};
 use crate::lease::Fence;
 use crate::output::OutputLog;
 use crate::snapshots::{self, ReadError, Snapshot};
+use crate::specs;
 
 /// A node's runtime, the modules it has compiled, by hash, and the limits on
 /// blocking work.
@@ -308,9 +309,21 @@ async fn run(
     hold: &mut u64,
 ) -> Result<Infallible> {
     let spec_version = spec_version(felix, id, spec).await?;
+    let spec_record = spec.record.context("the spec names no spec record")?;
     // The claim comes first, so that from here on a stale owner's append is
     // refused, whether or not this owner ever writes an output.
-    let log = OutputLog::claim(felix, &spec.output, fence, spec_version, claim_from).await?;
+    let log = OutputLog::claim(
+        felix,
+        &spec.output,
+        fence,
+        spec_version,
+        spec_record,
+        claim_from,
+    )
+    .await?;
+    // The agent looked before the lease claim. Again now: an owner of an
+    // older spec may have claimed since, and none can once this claim is on.
+    specs::refuse_stale_or_foreign(felix, id, spec).await?;
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(

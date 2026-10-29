@@ -11,7 +11,7 @@ On `wl.<id>.out`. The version is 4, followed by a kind byte.
 | Bytes | Field |
 |---|---|
 | 1 | version, 4 |
-| 1 | kind: 0 for an output, 1 for a claim, 2 for a failure, 3 for a rejection |
+| 1 | kind: 0 for an output, 1 for a claim, 2 for a failure, 3 for a rejection, 4 for a claim under a spec |
 | 8 | the writer's lease epoch |
 
 An output continues with:
@@ -33,7 +33,16 @@ output whose name is not valid fails the workload instead of being written.
 A claim continues with the new owner's node id, in UTF-8, to the end of the record, so a reader can
 tell which node wrote each epoch. Claims written before that end after the epoch, and a reader takes
 their node as unknown. A new owner appends one before it resumes, so a stale owner's next
-`publish_if` is refused. A failure continues with:
+`publish_if` is refused. A claim under a spec, which this build writes, continues with the
+`sys.specs` offset (8) of the spec record the owner runs, the floor (8), then the node id as above.
+The floor is the highest spec record claimed on the stream so far, this claim's own included. An
+owner takes it from the last claim before its own, and from any claim it finds past the tail when
+its claim is refused, so the last claim alone says whether an older spec is being run, even when
+that claim's owner refused its spec. Kind 1 claims
+still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
+judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
+run a spec whose module or input differ from the one the stream's first claim names, or whose
+record is below one a claim already names. A failure continues with:
 
 | Bytes | Field |
 |---|---|
@@ -103,6 +112,13 @@ are unchanged. Chunks that land without their manifest, after a crash or a parti
 read. A new owner reads back from the tail for the last manifest or version 2 record, passing over
 chunks, reads the chunks it names and checks each hash; a mismatch fails the workload.
 
+## Spec records
+
+On `sys.specs`, one shard. Each record is JSON: `format` (1), `id`, the workload id, and `spec`, a
+workload spec as below with `state` `running` or `stopped`. A reader refuses another format. The
+record's offset is the spec's version, so a later record for an id supersedes an earlier one and
+the stream is the spec history. Records are never rewritten; `failed` stays in the cache.
+
 ## Caches
 
 Values in `workloads` and `leases` are JSON. They are to become versioned typed records
@@ -113,7 +129,9 @@ Values in `workloads` and `leases` are JSON. They are to become versioned typed 
   `max_memory_bytes` (default 64 MiB) and `snapshot_fuel` (default 500,000,000, for a whole
   snapshot or restore; a snapshot that runs out is skipped, a restore that runs out
 needs an operator). A spec without `limits` gets the defaults. A failed spec
-  also has `failure`.
+  also has `failure`. The cache value also has `record`, the `sys.specs` offset of the spec record
+  it comes from. An agent runs a spec only when that record says the same, state aside, and leaves
+  one without `record` to an operator.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a decimal number.
 
 ## The resume fold

@@ -79,3 +79,27 @@ fn fuel_is_per_call_not_per_workload() {
         assert_eq!(payloads(&mut wl, b"hi").unwrap(), [b"hi".to_vec()]);
     }
 }
+
+#[test]
+fn new_limits_apply_to_later_calls() {
+    let mut wl = load(Limits {
+        max_memory_bytes: 128 << 20,
+        fuel_per_call: 1 << 32,
+        ..Limits::default()
+    });
+    wl.set_limits(Limits {
+        max_memory_bytes: 16 << 20,
+        fuel_per_call: 1 << 32,
+        ..Limits::default()
+    });
+    assert_eq!(failure(payloads(&mut wl, b"grow")).kind, FailureKind::Trap);
+    let mut wl = load(Limits::default());
+    wl.set_limits(Limits {
+        fuel_per_call: 1_000_000,
+        ..Limits::default()
+    });
+    assert_eq!(
+        failure(payloads(&mut wl, b"spin")).kind,
+        FailureKind::OutOfFuel
+    );
+}

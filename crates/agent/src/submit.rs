@@ -2,13 +2,14 @@
 
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
-use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, Limits, WorkloadSpec, WorkloadState};
+use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
 use crate::admin::{self, StreamKind};
 use crate::felix::Felix;
 use crate::settings::Settings;
+use crate::specs;
 
 /// Replicas of felixd's caches and a workload's streams, enough to lose one
 /// broker without losing an acknowledged write.
@@ -39,9 +40,9 @@ impl Submission {
 }
 
 /// Checks the module is a component no node would refuse, then creates the
-/// caches and the workload's streams, uploads the module and writes the spec
-/// last, so an agent that sees the spec finds everything else. Returns the
-/// module's hash.
+/// caches and streams, uploads the module, appends the spec record to
+/// `sys.specs` and writes it into `workloads` last, so an agent that sees the
+/// spec finds everything else. Returns the module's hash.
 pub async fn submit(settings: &Settings, submission: Submission) -> Result<String> {
     names::validate_id(&submission.id)?;
     Runtime::new()
@@ -66,6 +67,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     ] {
         admin::ensure_cache(settings, cache, kind).await?;
     }
+    admin::ensure_stream(settings, names::SPECS, kind).await?;
     let output = names::output_stream(&submission.id);
     admin::ensure_stream(settings, &output, kind).await?;
     admin::ensure_stream(settings, &names::snapshot_stream(&submission.id), kind).await?;
@@ -75,7 +77,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let snap_stream = names::snapshot_stream(&submission.id);
     let module = Bytes::from(submission.module);
     felix.cache_put(names::MODULES, &hash, module).await?;
-    let spec = WorkloadSpec {
+    let mut spec = WorkloadSpec {
         module: hash.clone(),
         input: submission.input,
         output,
@@ -84,22 +86,50 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         state: WorkloadState::Running,
         limits: submission.limits,
         failure: None,
+        record: None,
     };
-    if let Some(old) = felix.cache_get(names::WORKLOADS, &submission.id).await?
-        && let Ok(old) = WorkloadSpec::decode(&old)
-        && let Some(conflict) = old.conflicts_with_history(&spec)
-        && (has_records(&felix, &spec.output).await? || has_records(&felix, &snap_stream).await?)
-    {
+    // A new workload has nothing to conflict with, and its streams, just
+    // created, may refuse reads until their leader has committed.
+    let written = match previous_spec(&felix, &submission.id).await? {
+        None => None,
+        Some(previous) => match specs::written_under(&felix, &submission.id).await? {
+            Some(written) => Some(written),
+            None if has_records(&felix, &spec.output).await?
+                || has_records(&felix, &snap_stream).await? =>
+            {
+                Some(previous)
+            }
+            None => None,
+        },
+    };
+    if let Some(conflict) = written.and_then(|w| w.conflicts_with_history(&spec)) {
         bail!(
             "workload {} already has output, and {conflict}; submit the change under a new id",
             submission.id
         );
     }
-    let spec = Bytes::from(spec.encode());
-    felix
-        .cache_put(names::WORKLOADS, &submission.id, spec)
-        .await?;
+    let record = SpecRecord::new(&submission.id, spec.clone());
+    let ours = specs::append(&felix, &record).await?;
+    spec.record = Some(ours);
+    if let Some(current) = specs::project(&felix, &submission.id, &spec).await? {
+        bail!(
+            "workload {}'s workloads entry names spec record {current}, not before this one at \
+             {}:{ours}, so nothing changed; another submit won, or {} was recreated",
+            submission.id,
+            names::SPECS,
+            names::SPECS
+        );
+    }
     Ok(hash)
+}
+
+/// The spec the `workloads` entry projects. Not the last record on
+/// `sys.specs`, which may be one that lost to a later one and never ran. The
+/// entry carries the spec, and agents run it only when its record agrees.
+/// `None` for a workload with no entry, which no agent has run.
+async fn previous_spec(felix: &Felix, id: &str) -> Result<Option<WorkloadSpec>> {
+    let cached = felix.cache_get(names::WORKLOADS, id).await?;
+    Ok(cached.and_then(|c| WorkloadSpec::decode(&c).ok()))
 }
 
 /// Whether `stream` holds any record. Its tail alone does not say: a new

@@ -14,7 +14,7 @@ It depends on no other felixd crate. `felixd-runtime` takes its `Limits` from it
 | `names` | The caches (`workloads`, `leases`, `epochs`, `nodes`, `modules`) and how a workload id maps to its `wl.<id>.out` and `wl.<id>.snap` streams |
 | `output` | Output stream records: outputs, claims, failures and rejections, with the name and key of each output |
 | `snapshot` | Snapshot chunk and manifest records, `plan` (which chunks a new snapshot writes) and `read_chunk` (checks a chunk against its hash) |
-| `spec`, `lease`, `node` | The JSON values in the `workloads`, `leases` and `nodes` caches, including `Limits` |
+| `spec`, `lease`, `node` | The JSON values in the `workloads`, `leases` and `nodes` caches, including `Limits`, and spec records on `sys.specs` with `History`, their fold for one workload |
 | `placement` | Which free workloads a node claims (`FirstClaimWins`) |
 | `module` | How a module is identified: the hex sha256 of its bytes |
 | `resume` | `fold`, which says where a new owner restores from, where it subscribes, and which outputs the stream already holds |

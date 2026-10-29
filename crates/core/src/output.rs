@@ -12,6 +12,11 @@
 //! - A claim: the owner's node id, which older claims leave out. A new owner
 //!   appends one before it runs anything, so a stale owner's next conditional
 //!   append is refused even if the new owner never writes an output.
+//! - A claim under a spec: `spec (8) | floor (8) | node id`, a claim that
+//!   also names the `sys.specs` offset of the spec record the owner runs, so
+//!   the records after it are known to come from that spec, and the highest
+//!   spec record claimed on the stream so far, its own included, so the last
+//!   claim alone says whether a spec is older than one that ran.
 //! - A failure: `spec_version (8) | reason`. The workload failed under that
 //!   version of its spec. It is the last record of that run.
 //! - A rejection: `input_offset (8) | index (4, always 0) | code (4) |
@@ -31,6 +36,7 @@ const OUTPUT: u8 = 0;
 const CLAIM: u8 = 1;
 const FAILURE: u8 = 2;
 const REJECTION: u8 = 3;
+const CLAIM_UNDER: u8 = 4;
 
 /// The name an output gets when the workload gives none, and the one a
 /// downstream workload reads unless its spec says otherwise.
@@ -90,8 +96,16 @@ pub enum Record<'a> {
     Rejection(Written, Rejected<'a>),
     /// The owner at `epoch`, on node `node`, took the workload over here. It
     /// holds no output. `node` is empty in claims written before it was
-    /// recorded.
-    Claim { epoch: u64, node: &'a [u8] },
+    /// recorded. `spec` is the `sys.specs` offset of the spec record the
+    /// owner runs, and `floor` the highest one claimed on the stream up to
+    /// and including this claim. Both are absent in claims written before
+    /// specs were records.
+    Claim {
+        epoch: u64,
+        node: &'a [u8],
+        spec: Option<u64>,
+        floor: Option<u64>,
+    },
     /// The owner at `epoch` failed the workload while it ran under spec
     /// version `spec_version`. It holds no output.
     Failure {
@@ -188,13 +202,27 @@ pub fn encode_rejection(input_offset: u64, epoch: u64, rejected: Rejected<'_>) -
     out
 }
 
-/// Builds the record an owner at `epoch` appends when it takes a workload
-/// over. `node` names the owner, so a reader can tell which node wrote each
-/// epoch's records.
+/// Builds a claim that names no spec, the form written before specs were
+/// records. Kept so readers and tests can build one.
 pub fn encode_claim(epoch: u64, node: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(10 + node.len());
     out.extend([VERSION, CLAIM]);
     out.extend(epoch.to_be_bytes());
+    out.extend(node.as_bytes());
+    out
+}
+
+/// Builds the record an owner at `epoch` appends when it takes a workload
+/// over. `node` names the owner, so a reader can tell which node wrote each
+/// epoch's records, and `spec` is the `sys.specs` offset of the spec record
+/// it runs. `floor` is the highest spec record claimed on the stream before
+/// it; the record holds the larger of the two.
+pub fn encode_claim_under(epoch: u64, spec: u64, floor: u64, node: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(26 + node.len());
+    out.extend([VERSION, CLAIM_UNDER]);
+    out.extend(epoch.to_be_bytes());
+    out.extend(spec.to_be_bytes());
+    out.extend(floor.max(spec).to_be_bytes());
     out.extend(node.as_bytes());
     out
 }
@@ -232,13 +260,23 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
         return Err(DecodeError::UnknownVersion(version));
     }
     let kind = r.u8()?;
-    if !matches!(kind, OUTPUT | CLAIM | FAILURE) && !(kind == REJECTION && version == VERSION) {
+    if !matches!(kind, OUTPUT | CLAIM | FAILURE)
+        && !(matches!(kind, REJECTION | CLAIM_UNDER) && version == VERSION)
+    {
         return Err(DecodeError::UnknownKind(kind));
     }
     let epoch = r.u64()?;
     match kind {
         CLAIM => Ok(Record::Claim {
             epoch,
+            node: r.rest(),
+            spec: None,
+            floor: None,
+        }),
+        CLAIM_UNDER => Ok(Record::Claim {
+            epoch,
+            spec: Some(r.u64()?),
+            floor: Some(r.u64()?),
             node: r.rest(),
         }),
         FAILURE => Ok(Record::Failure {

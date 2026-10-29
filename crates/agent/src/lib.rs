@@ -13,6 +13,8 @@
 //! - [`input`]: what a step is given and what it produced, the same for every
 //!   caller.
 //! - [`snapshots`]: reads snapshots and their chunks back.
+//! - [`specs`]: spec records on `sys.specs` and their projection into
+//!   `workloads`.
 //! - [`faults`]: crashes and dropped inputs the integration tests inject.
 
 pub mod admin;
@@ -29,3 +31,4 @@ mod lease;
 mod output;
 mod runner;
 mod snapshots;
+mod specs;

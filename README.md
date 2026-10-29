@@ -92,11 +92,13 @@ felixd agent
 ```
 
 `felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
-`wl.<id>.snap` streams and writes the spec. It creates felixd's caches and
+`wl.<id>.snap` streams, appends the spec as a record to the `sys.specs` stream
+and points the `workloads` cache at it. `sys.specs` keeps every version of every
+spec. It creates felixd's caches and
 streams with three `Quorum` replicas unless `--replication-factor` says
-otherwise; the single-broker test stack needs 1. The agent reads every spec in the
-`workloads` cache, claims the lease of each one nobody holds and runs it while
-the lease holds. Start a second agent and kill the first: within one lease TTL
+otherwise; the single-broker test stack needs 1. The agent watches the
+`workloads` cache, checks each spec against its record, claims the lease of each
+one nobody holds and runs it while the lease holds. Start a second agent and kill the first: within one lease TTL
 (10 s by default and at least 2 s, `--lease-ttl-ms`) the second carries on from the right input,
 with nothing missing and nothing repeated. Each agent needs its own
 `--node-id`; the default is the host name and process id. An agent holds at
@@ -145,7 +147,10 @@ runs out is left to an operator, who can raise the limit. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new
 module or input is refused once the workload has written anything; use a new
-id for new code. A workload that traps, runs
+id for new code. `felixd run` refuses it, and so does the agent when the output
+stream's first claim names a spec, which claims written before spec records
+don't. Each claim names the spec it runs, so `felixd check` and
+`felixd replay --diff` judge each output under the module and limits it ran with. A workload that traps, runs
 out of fuel, returns `poison`, breaks the contract (an invalid output name, an
 effect request, a chunk over 4 MiB) or finds its streams in a state it can't resume from is marked
 `failed` in its spec, with the reason. The failure is first a record on its

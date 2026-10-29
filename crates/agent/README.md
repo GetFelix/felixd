@@ -12,7 +12,7 @@ binary depends on it.
 | Module | Does |
 |---|---|
 | `agent` | `run` watches the `workloads` and `leases` caches, writes this node to `nodes`, and runs each workload it manages to claim while the lease holds. `AgentConfig` sets the node id, lease timing and placement. |
-| `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, and writes the spec. |
+| `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, appends the spec record to `sys.specs` and points `workloads` at it. |
 | `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ. |
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. |
@@ -25,7 +25,12 @@ Behaviour that matters:
 - **Renew.** The holder renews every TTL/3. A refused renewal means the lease is gone and it stops
   at once. A holder that cannot reach Felix stops by its own clock at two thirds of the TTL, before
   another node can claim.
-- **Fence.** A new owner appends a claim record to the output stream before it resumes. Every
+- **Spec records.** An agent runs a `workloads` value only when the `sys.specs` record it names
+  says the same. It refuses a spec whose module or input differ from the one the output stream's
+  first claim names, or whose record is below the last claim's floor (the highest spec record claimed so far, carried by every claim), before its lease claim
+  and again after its own claim is on the stream. Either refusal leaves the workload to an
+  operator. A record past the tail of `sys.specs` is waited for 30 s, then left to an operator too.
+- **Fence.** A new owner appends a claim record, naming its spec record, to the output stream before it resumes. Every
   later write is `publish_if` at the tail, so a node frozen past its lease is refused when it
   wakes, whatever its clock says.
 - **Resume.** The owner restores the newest snapshot, steps the inputs the output stream already

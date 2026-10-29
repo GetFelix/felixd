@@ -1,18 +1,22 @@
 //! `felixd check`: replays each workload's module over its input and reports
 //! what is wrong with its output stream. Needs read grants only.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
 use felix_client::CacheWatchItem;
 use felixd_core::check::{self, Expected, Finding};
 use felixd_core::output::{self, OutputHeader};
 
 use crate::input::{self, StepInput};
-use felixd_core::spec::WorkloadSpec;
+use felix_client::StreamRecord;
+use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
 use crate::felix::Felix;
 use crate::settings::Settings;
+use crate::specs;
 
 /// What the check found for one workload.
 #[derive(Debug)]
@@ -50,11 +54,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = WorkloadSpec::decode(&spec)?;
-    let bytes = module_bytes(felix, &spec.module).await?;
-    let mut workload = runtime
-        .load(&bytes, spec.limits)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cached = WorkloadSpec::decode(&spec)?;
 
     // Snapshots first, so every output a snapshot counts is on the stream when
     // it is read. Then the output: anything written after this is checked
@@ -62,11 +62,22 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let snapshots = felix.read_range(&snap_stream, 0, snap_tail).await?;
-    let output_tail = felix.tail(&spec.output).await?;
-    let records = felix.read_range(&spec.output, 0, output_tail).await?;
+    let output_tail = felix.tail(&cached.output).await?;
+    let records = felix.read_range(&cached.output, 0, output_tail).await?;
+    // The module, input and limits the stream was written under, not those
+    // of a later spec its owner refused.
+    let (spec, limits) = judged(felix, id, &cached, &records).await?;
+    let mut limits = limits.into_iter().peekable();
+    let bytes = module_bytes(felix, &spec.module).await?;
+    let mut workload = runtime
+        .load(&bytes, spec.limits)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let input_tail = felix.tail(&spec.input).await?;
     let mut expected = Vec::new();
     for record in felix.read_range(&spec.input, 0, input_tail).await? {
+        while let Some((_, applied)) = limits.next_if(|(from, _)| *from <= record.offset) {
+            workload.set_limits(applied);
+        }
         // An input that cannot be read or a step that fails ends the workload
         // there, on every node.
         let Ok(read) = StepInput::read(
@@ -110,6 +121,23 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
             .count(),
         findings,
     })
+}
+
+/// The spec workload `id`'s output stream was written under and the limits
+/// each input ran under, from the spec records its claims name
+/// ([`check::judged_under`]). `cached` is the `workloads` value.
+pub(crate) async fn judged(
+    felix: &Felix,
+    id: &str,
+    cached: &WorkloadSpec,
+    records: &[StreamRecord],
+) -> Result<(WorkloadSpec, Vec<(u64, Limits)>)> {
+    let payloads = records.iter().map(|r| r.payload.as_ref());
+    let mut claimed = HashMap::new();
+    for offset in check::specs_claimed(payloads.clone()) {
+        claimed.insert(offset, specs::read(felix, id, offset).await?);
+    }
+    Ok(check::judged_under(cached, &claimed, payloads))
 }
 
 /// The module `hash` from the `modules` cache.

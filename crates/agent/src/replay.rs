@@ -7,14 +7,15 @@ use felixd_core::check::Produced;
 use felixd_core::names;
 use felixd_core::replay::{self, Divergence, Recorded};
 use felixd_core::snapshot::SnapshotHeader;
-use felixd_core::spec::WorkloadSpec;
+use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
-use crate::check::module_bytes;
+use crate::check::{judged, module_bytes};
 use crate::felix::Felix;
 use crate::input::{self, StepInput};
 use crate::settings::Settings;
 use crate::snapshots::{self, Snapshot};
+use crate::specs;
 
 /// Where a replay stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,7 @@ pub async fn replay(
         &felix,
         &spec,
         &mut workload,
+        &[],
         replay::first_input(restored),
         end,
         |_, _| {
@@ -113,11 +115,13 @@ pub async fn diff(
         .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
+    let (_, limits) = judged(&felix, id, &spec, &records).await?;
     let mut matched = 0;
     let divergence = run_inputs(
         &felix,
         &spec,
         &mut workload,
+        &limits,
         replay::first_input(restored),
         end,
         |offset, outputs| {
@@ -146,7 +150,7 @@ async fn open(settings: &Settings, id: &str) -> Result<(Felix, WorkloadSpec)> {
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = WorkloadSpec::decode(&spec)?;
+    let spec = specs::lineage(&felix, id, WorkloadSpec::decode(&spec)?).await?;
     Ok((felix, spec))
 }
 
@@ -220,19 +224,25 @@ async fn start(
 
 /// Runs the inputs at offsets `from..end` through `workload`, handing each
 /// step's offset and outputs to `each`, and stops at the first step `each`
-/// returns something for.
+/// returns something for. `limits` are `(first input, limits)` changes, as
+/// [`judged`] gives them.
 async fn run_inputs<T>(
     felix: &Felix,
     spec: &WorkloadSpec,
     workload: &mut Workload,
+    limits: &[(u64, Limits)],
     from: u64,
     end: u64,
     mut each: impl FnMut(u64, &[Produced]) -> Option<T>,
 ) -> Result<Option<T>> {
+    let mut limits = limits.iter().peekable();
     let mut next = from;
     while next < end {
         let (page, after) = felix.read_page(&spec.input, next, end).await?;
         for record in page {
+            while let Some((_, applied)) = limits.next_if(|(at, _)| *at <= record.offset) {
+                workload.set_limits(*applied);
+            }
             let read = StepInput::read(
                 spec,
                 record.offset,

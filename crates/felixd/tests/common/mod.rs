@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use felix_client::ConditionalWrite;
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::felix::Felix;
 use felixd_agent::settings::Settings;
@@ -17,7 +18,7 @@ use felixd_core::lease::Lease;
 use felixd_core::names;
 use felixd_core::output;
 use felixd_core::spec::Limits;
-use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_core::spec::{SpecRecord, WorkloadSpec, WorkloadState};
 use felixd_runtime::{Input, Runtime, Stepped, Workload};
 
 /// The id every test gives its one workload, and its streams.
@@ -241,7 +242,39 @@ impl TestFelix {
         found.expect("the workload has a spec").version
     }
 
+    /// Writes `spec` the way `felixd run` does, skipping its checks: a record
+    /// on `sys.specs`, then the cache value naming it.
     pub(crate) async fn put_spec(&self, spec: &WorkloadSpec) {
+        let kind = StreamKind {
+            replication_factor: replication_factor(),
+        };
+        ensure_stream(&self.settings, names::SPECS, kind)
+            .await
+            .unwrap();
+        let mut spec = WorkloadSpec {
+            record: None,
+            failure: None,
+            ..spec.clone()
+        };
+        let record = SpecRecord::new(ID, spec.clone()).encode();
+        let offset = loop {
+            let tail = self.felix.tail(names::SPECS).await.unwrap();
+            let sent = self
+                .felix
+                .publish_if(names::SPECS, vec![record.clone()], tail)
+                .await
+                .unwrap();
+            if let ConditionalWrite::Written { offset } = sent {
+                break offset;
+            }
+        };
+        spec.record = Some(offset);
+        self.put_cache_spec(&spec).await;
+    }
+
+    /// Writes `spec` into the cache alone, as a felixd from before spec
+    /// records did.
+    pub(crate) async fn put_cache_spec(&self, spec: &WorkloadSpec) {
         let value = Bytes::from(spec.encode());
         self.felix
             .cache_put(names::WORKLOADS, ID, value)

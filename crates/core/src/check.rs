@@ -12,6 +12,7 @@ use std::fmt;
 
 use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::{self, SnapshotHeader};
+use crate::spec::{Limits, WorkloadSpec};
 
 /// One output or rejection a replay produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -374,6 +375,108 @@ impl fmt::Display for Finding {
             }
         }
     }
+}
+
+/// Which spec record each input ran under, from the claims on an output
+/// stream in stream order: `(first input, spec offset)` pairs, ascending.
+/// A claim's spec applies from the input after the last one with an output
+/// before it, since the owner steps everything after that under its spec and
+/// only checks what it steps again below. Inputs before the first claim that
+/// names a spec are not covered. Claims whose spec `ran` says no to, or that
+/// name a spec below the floor of the claim before them, are passed over: their owner
+/// refused the spec and stepped nothing. Records that do not decode are
+/// passed over too; [`check`] reports them.
+pub fn specs_applied<'a>(
+    records: impl IntoIterator<Item = &'a [u8]>,
+    ran: impl Fn(u64) -> bool,
+) -> Vec<(u64, u64)> {
+    let mut applied: Vec<(u64, u64)> = Vec::new();
+    let mut next_input = 0;
+    let mut floor = 0;
+    for record in records {
+        match output::decode(record) {
+            Ok(Record::Claim {
+                spec: Some(spec),
+                floor: claimed_floor,
+                ..
+            }) => {
+                // The owner refuses a spec below the floor the last claim
+                // carried, whether or not that claim ran, so a refused claim
+                // still raises it. A claim with no floor resets it.
+                let refused = spec < floor;
+                floor = claimed_floor.unwrap_or(0);
+                if refused || !ran(spec) || applied.last().is_some_and(|(_, s)| *s == spec) {
+                    continue;
+                }
+                // Two claims with no output between them: the later one ran
+                // from the same input.
+                if applied.last().is_some_and(|(from, _)| *from == next_input) {
+                    applied.pop();
+                }
+                applied.push((next_input, spec));
+            }
+            Ok(found) => {
+                if let Some(written) = found.written() {
+                    next_input = next_input.max(written.header.input_offset + 1);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    applied
+}
+
+/// What a check or replay of an output stream runs: the spec it was written
+/// under, which is the first claim's when that names one and `cached`, the
+/// `workloads` value, otherwise; and the limits each input ran under, as
+/// `(first input, limits)`. `claimed` holds the spec record of every spec
+/// the claims name ([`specs_claimed`]). A claim whose spec has another module
+/// or input than the first claim's was refused by its owner and is passed
+/// over, so a refused later spec never decides the module or the limits.
+pub fn judged_under<'a, R>(
+    cached: &WorkloadSpec,
+    claimed: &HashMap<u64, WorkloadSpec>,
+    records: R,
+) -> (WorkloadSpec, Vec<(u64, Limits)>)
+where
+    R: IntoIterator<Item = &'a [u8]> + Clone,
+{
+    let first = records
+        .clone()
+        .into_iter()
+        .find_map(|r| output::decode(r).ok());
+    let lineage = match first {
+        Some(Record::Claim {
+            spec: Some(spec), ..
+        }) => claimed.get(&spec).cloned(),
+        _ => None,
+    }
+    .unwrap_or_else(|| cached.clone());
+    let ran = |spec: u64| {
+        claimed
+            .get(&spec)
+            .is_some_and(|s| s.conflicts_with_history(&lineage).is_none())
+    };
+    let limits = specs_applied(records, ran)
+        .into_iter()
+        .map(|(from, spec)| (from, claimed[&spec].limits))
+        .collect();
+    (lineage, limits)
+}
+
+/// Every spec the claims on an output stream name, in stream order, once each.
+pub fn specs_claimed<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<u64> {
+    let mut claimed = Vec::new();
+    for record in records {
+        if let Ok(Record::Claim {
+            spec: Some(spec), ..
+        }) = output::decode(record)
+            && !claimed.contains(&spec)
+        {
+            claimed.push(spec);
+        }
+    }
+    claimed
 }
 
 #[cfg(test)]

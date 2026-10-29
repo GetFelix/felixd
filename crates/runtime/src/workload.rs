@@ -112,6 +112,13 @@ impl Workload {
         }
     }
 
+    /// Runs later calls under `limits`, for a replay that crosses a spec
+    /// change. Memory already grown stays; only growth past it is refused.
+    pub fn set_limits(&mut self, limits: Limits) {
+        *self.store.data_mut() = crate::runtime::store_limits(limits);
+        self.limits = limits;
+    }
+
     /// The reason the workload was stopped, if it was.
     pub fn failure(&self) -> Option<&Failure> {
         self.failure.as_ref()

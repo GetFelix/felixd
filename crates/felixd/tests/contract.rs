@@ -372,6 +372,7 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
         state: WorkloadState::Running,
         limits: Limits::default(),
         failure: None,
+        record: None,
     })
     .await;
     let _agent = t.start_agent();
@@ -410,6 +411,7 @@ async fn a_contract_01_module_found_after_the_claim_is_left_for_an_operator() {
         state: WorkloadState::Running,
         limits: Limits::default(),
         failure: None,
+        record: None,
     })
     .await;
     let _agent = t.start_agent();

@@ -29,6 +29,7 @@ use crate::lease::{self, Confirmer, Fence, Held};
 use crate::output::{Recorded, record_failure};
 use crate::runner::{Modules, NeedsOperator, Outcome, run_workload};
 use crate::settings::Settings;
+use crate::specs;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -39,6 +40,10 @@ const OPEN_WATCH_WITHIN: Duration = Duration::from_secs(10);
 /// How often the brokers serving the watches are asked whether they are
 /// still there, and how long they have to answer.
 const PROBE_WATCHES_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a spec record past the tail of `sys.specs` is waited for before
+/// the workload is left to an operator.
+const RECORD_WAIT: Duration = Duration::from_secs(30);
 
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
@@ -411,9 +416,46 @@ async fn own(
         needs_operator(&id, reason, &mut stop).await;
         return;
     }
+    // Only a spec in the history runs, so check and replay see what ran.
+    let past_tail_until = tokio::time::Instant::now() + RECORD_WAIT;
+    while let Err(error) = specs::check_record(&node.felix, &id, &spec).await {
+        if let Some(reason) = error.downcast_ref::<NeedsOperator>() {
+            needs_operator(&id, reason, &mut stop).await;
+            return;
+        }
+        if let Some(past) = error.downcast_ref::<specs::PastTail>()
+            && tokio::time::Instant::now() >= past_tail_until
+        {
+            needs_operator(&id, &NeedsOperator(past.to_string()), &mut stop).await;
+            return;
+        }
+        tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the spec record");
+        tokio::select! {
+            () = tokio::time::sleep(RETRY_DELAY) => {}
+            _ = stop.wait_for(|stop| *stop) => return,
+        }
+    }
     loop {
         if !node.wait_for_chance(&id, &mut lease, &mut stop).await {
             return;
+        }
+        // Before the lease claim, so a spec every node refuses does not
+        // take an epoch on each of them. The runner looks again after its
+        // claim is on the stream.
+        match specs::refuse_stale_or_foreign(&node.felix, &id, &spec).await {
+            Ok(()) => {}
+            Err(error) => {
+                if let Some(reason) = error.downcast_ref::<NeedsOperator>() {
+                    needs_operator(&id, reason, &mut stop).await;
+                    return;
+                }
+                tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                tokio::select! {
+                    () = tokio::time::sleep(RETRY_DELAY) => {}
+                    _ = stop.wait_for(|stop| *stop) => return,
+                }
+                continue;
+            }
         }
         let slot = Slot::take(&node);
         if slot.is_none() {
