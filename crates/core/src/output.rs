@@ -5,8 +5,8 @@
 //! endian, where `epoch` is the lease epoch of the owner that wrote it; see
 //! [`crate::lease`]. An output's body is `input_offset (8) | index (4) |
 //! payload`: which input produced it and which of that step's outputs it is,
-//! so a new owner can tell what its predecessor already wrote. A claim has no
-//! body. A new owner appends one before it runs anything, so a stale owner's
+//! so a new owner can tell what its predecessor already wrote. A claim's body
+//! is the owner's node id, which older claims leave out. A new owner appends one before it runs anything, so a stale owner's
 //! next conditional append is refused even if the new owner never writes an
 //! output. A failure's body is `spec_version (8) | reason`: the workload
 //! failed under that version of its spec. It is the last record of that run.
@@ -46,8 +46,10 @@ pub struct Written {
 pub enum Record<'a> {
     /// One of the workload's outputs and its payload.
     Output(Written, &'a [u8]),
-    /// An owner at `epoch` took the workload over here. It holds no output.
-    Claim { epoch: u64 },
+    /// The owner at `epoch`, on node `node`, took the workload over here. It
+    /// holds no output. `node` is empty in claims written before it was
+    /// recorded.
+    Claim { epoch: u64, node: &'a [u8] },
     /// The owner at `epoch` failed the workload while it ran under spec
     /// version `spec_version`. It holds no output.
     Failure {
@@ -62,7 +64,7 @@ impl<'a> Record<'a> {
     pub fn epoch(&self) -> u64 {
         match self {
             Record::Output(written, _) => written.epoch,
-            Record::Claim { epoch } | Record::Failure { epoch, .. } => *epoch,
+            Record::Claim { epoch, .. } | Record::Failure { epoch, .. } => *epoch,
         }
     }
 
@@ -87,11 +89,14 @@ pub fn encode(header: OutputHeader, epoch: u64, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Builds the record an owner at `epoch` appends when it takes a workload over.
-pub fn encode_claim(epoch: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + COMMON_BYTES);
+/// Builds the record an owner at `epoch` appends when it takes a workload
+/// over. `node` names the owner, so a reader can tell which node wrote each
+/// epoch's records.
+pub fn encode_claim(epoch: u64, node: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + COMMON_BYTES + node.len());
     out.extend([VERSION, CLAIM]);
     out.extend(epoch.to_be_bytes());
+    out.extend(node.as_bytes());
     out
 }
 
@@ -133,7 +138,7 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     };
     let epoch = u64::from_be_bytes(*epoch);
     if kind == CLAIM {
-        return Ok(Record::Claim { epoch });
+        return Ok(Record::Claim { epoch, node: body });
     }
     if kind == FAILURE {
         let Some((spec_version, reason)) = body.split_first_chunk::<8>() else {

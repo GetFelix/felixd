@@ -5,13 +5,16 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 2 done. Agents hold a lease per workload, spread
+> **Status:** milestone 3 done. Agents hold a lease per workload, spread
 > workloads across nodes, and take a dead node's workloads over within one
 > lease TTL. A new owner fences the output stream with a claim record, so a
 > node frozen past its lease writes no output when it wakes, and each output
 > lands once through lost answers, partial batches and crashes. A three-node
 > failover test that keeps killing lease holders runs on every pull request
-> and ends with `felixd check`. Replay (milestone 3) is next. The plan is in
+> and ends with `felixd check`. `felixd replay`
+> rebuilds a workload as of any input offset or time, and `--diff` checks a
+> replay, or a new module, against the recorded outputs. Pipelines and
+> operations (milestone 4) are next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -79,9 +82,15 @@ should have caught up. It writes nothing.
 input 41, and `--to 2026-10-29T14:02:00Z` its state after every input appended
 before that time. It restores the nearest snapshot at or before that point on a
 fresh instance, runs the inputs after it and prints what the workload's
-`inspect` returns. It writes nothing, but until Felix can report a stream's
-tail to a reader ([Felix #1621](https://github.com/GetFelix/felix/issues/1621))
-it needs publish grants on the input and snapshot streams, as `felixd check` does.
+`inspect` returns. `--diff` replays a range (`--from`, `--to`, by default every
+input with a recorded output) and compares each output with the one on the
+stream, reporting the first divergence with the node, epoch, input offset and
+both digests, and exits with 1 if it finds one. `--module <hash>` runs another
+module from the `modules` cache over the recorded inputs instead, so
+`--diff --module` checks an upgrade before it goes live. Replay writes nothing,
+but until Felix can report a stream's tail to a reader
+([Felix #1621](https://github.com/GetFelix/felix/issues/1621)) it needs publish
+grants on the streams it reads, as `felixd check` does.
 `felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
 workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input

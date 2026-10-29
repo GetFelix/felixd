@@ -67,16 +67,16 @@ fn an_owner_change_is_not_a_finding() {
 #[test]
 fn claims_between_outputs_are_not_findings() {
     let expected = replay(5);
-    let mut records = vec![output::encode_claim(1)];
+    let mut records = vec![output::encode_claim(1, "")];
     records.extend(clean(&expected[..3]));
-    records.push(output::encode_claim(2));
-    records.push(output::encode_claim(3));
+    records.push(output::encode_claim(2, ""));
+    records.push(output::encode_claim(3, ""));
     records.extend(
         expected[3..]
             .iter()
             .map(|e| output::encode(e.header, 3, &e.payload)),
     );
-    records.push(output::encode_claim(4));
+    records.push(output::encode_claim(4, ""));
     assert_eq!(run(&expected, &records, true), []);
 }
 
@@ -85,7 +85,7 @@ fn an_output_below_a_claims_epoch_is_a_regression() {
     let expected = replay(2);
     let records = vec![
         record(0, 0, 1, &[0]),
-        output::encode_claim(2),
+        output::encode_claim(2, ""),
         record(1, 0, 1, &[1]),
     ];
     assert_eq!(
@@ -295,9 +295,9 @@ fn claims_do_not_move_a_snapshots_bounds() {
     // Outputs of inputs 0 and 1 at offsets 0 and 2, with claims at 1 and 3.
     let records = [
         record(0, 0, 1, &[0]),
-        output::encode_claim(2),
+        output::encode_claim(2, ""),
         record(1, 0, 2, &[1]),
-        output::encode_claim(3),
+        output::encode_claim(3, ""),
     ];
     let on_stream: Vec<(u64, &[u8])> = records
         .iter()

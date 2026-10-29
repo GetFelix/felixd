@@ -165,7 +165,7 @@ impl<'a> OutputLog<'a> {
                 return Err(LostLease.into());
             }
             faults::before_claim();
-            let claim = vec![output::encode_claim(fence.epoch())];
+            let claim = vec![output::encode_claim(fence.epoch(), fence.node())];
             let sent = send(felix, stream, claim, log.tail, faults::Write::Claim).await;
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == log.tail => {
@@ -201,6 +201,7 @@ impl<'a> OutputLog<'a> {
                 ours |= found
                     == Record::Claim {
                         epoch: fence.epoch(),
+                        node: fence.node().as_bytes(),
                     };
             }
             log.tail = seen_tail;

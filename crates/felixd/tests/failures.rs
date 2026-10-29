@@ -208,7 +208,7 @@ async fn a_node_frozen_after_confirming_a_failure_does_not_fail_a_later_owners_w
         t.read_all(OUTPUT)
             .await
             .iter()
-            .any(|(_, r)| output::decode(r) == Ok(Record::Claim { epoch }))
+            .any(|(_, r)| matches!(output::decode(r), Ok(Record::Claim { epoch: e, .. }) if e == epoch))
             .then_some(())
     })
     .await;
