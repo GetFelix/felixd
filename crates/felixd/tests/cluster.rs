@@ -143,7 +143,7 @@ async fn generation_starts_after_failover() {
         Duration::from_secs(60),
         || async {
             let last = t.read_all(SNAPSHOTS).await.pop()?;
-            let (taken, _) = snapshot::decode(&last.1).unwrap();
+            let taken = snapshot::decode(&last.1).unwrap().taken().unwrap();
             (taken.header.input_offset == last_input).then_some(())
         },
     )

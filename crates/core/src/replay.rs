@@ -89,11 +89,11 @@ impl Recorded {
         let mut recorded = Recorded::default();
         for record in records {
             match output::decode(record)? {
-                Record::Output(written, payload) => {
+                Record::Output(written, addressed) => {
                     if inputs.contains(&written.header.input_offset) {
                         recorded.outputs.entry(written.header).or_insert(Kept {
                             epoch: written.epoch,
-                            digest: digest(payload),
+                            digest: digest(addressed.payload),
                         });
                     }
                 }
@@ -101,7 +101,8 @@ impl Recorded {
                     let node = String::from_utf8_lossy(node).into_owned();
                     recorded.nodes.insert(epoch, node);
                 }
-                Record::Claim { .. } | Record::Failure { .. } => {}
+                // A replay produces no rejections until the runtime can.
+                Record::Rejection(..) | Record::Claim { .. } | Record::Failure { .. } => {}
             }
         }
         Ok(recorded)

@@ -55,7 +55,7 @@ async fn a_replay_after_a_takeover_matches_the_live_output() {
     let snapshots = t.read_all(SNAPSHOTS).await;
     let epochs: Vec<u64> = snapshots
         .iter()
-        .map(|(_, r)| snapshot::decode(r).unwrap().0.epoch)
+        .map(|(_, r)| snapshot::decode(r).unwrap().epoch())
         .collect();
     assert!(
         epochs.first() < epochs.last(),
@@ -65,7 +65,7 @@ async fn a_replay_after_a_takeover_matches_the_live_output() {
     for (_, record) in &outputs {
         let decoded = output::decode(record).unwrap();
         let (written, payload) = decoded.output().unwrap();
-        let live = u64::from_be_bytes(payload.try_into().unwrap());
+        let live = u64::from_be_bytes(payload.payload.try_into().unwrap());
         let offset = written.header.input_offset.to_string();
         let (ok, replayed) = t.replay(&["--id", ID, "--to", &offset]);
         assert!(ok, "replay to {offset} failed");

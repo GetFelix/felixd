@@ -553,7 +553,7 @@ async fn written_epoch(
     let snapshot = last(&names::snapshot_stream(id))
         .await?
         .1
-        .map_or(0, |r| snapshot::decode(&r).map_or(0, |(t, _)| t.epoch));
+        .map_or(0, |r| snapshot::decode(&r).map_or(0, |r| r.epoch()));
     Ok(output.max(snapshot))
 }
 

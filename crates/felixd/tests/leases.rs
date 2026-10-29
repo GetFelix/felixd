@@ -350,7 +350,7 @@ async fn a_holder_frozen_before_a_snapshot_write_writes_no_snapshot_after_the_ne
         .read_all(SNAPSHOTS)
         .await
         .iter()
-        .map(|(_, r)| snapshot::decode(r).unwrap().0.epoch)
+        .map(|(_, r)| snapshot::decode(r).unwrap().epoch())
         .collect();
     assert!(
         epochs.iter().all(|&e| e > stale.epoch),

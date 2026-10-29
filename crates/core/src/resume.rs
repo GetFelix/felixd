@@ -21,13 +21,14 @@ use crate::snapshot::SnapshotHeader;
 pub struct Found {
     /// The latest snapshot, if the workload has one.
     pub snapshot: Option<SnapshotHeader>,
-    /// The last output record on the output stream, if it has any.
+    /// The last output or rejection record on the output stream, if any.
     pub last_output: Option<LastOutput>,
     /// The output stream's next offset, counting records that are not events.
     pub output_tail: u64,
 }
 
-/// The last output record on the output stream and where it is.
+/// The last output or rejection record on the output stream and where it is.
+/// A rejection counts as its input's only output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LastOutput {
     pub offset: u64,

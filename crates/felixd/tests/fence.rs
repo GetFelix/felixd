@@ -296,7 +296,7 @@ async fn a_snapshot_frozen_past_a_takeover_is_safe_to_resume_from() {
     })
     .await;
     let snapshots = t.read_all(SNAPSHOTS).await;
-    let (taken, _) = snapshot::decode(&snapshots[0].1).unwrap();
+    let taken = snapshot::decode(&snapshots[0].1).unwrap().taken().unwrap();
     assert_eq!(taken.epoch, stale);
 
     next.kill();

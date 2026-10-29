@@ -195,8 +195,12 @@ async fn start(
     let records = felix.read_range(&snap_stream, 0, snap_tail).await?;
     let mut snapshots = Vec::with_capacity(records.len());
     for record in &records {
-        let (taken, state) = snapshot::decode(&record.payload)
-            .map_err(|e| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset))?;
+        let at =
+            |e: &dyn std::fmt::Display| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset);
+        let decoded = snapshot::decode(&record.payload).map_err(|e| at(&e))?;
+        let snapshot::Record::Whole(taken, state) = decoded else {
+            return Err(at(&"this build replays only version 2 snapshots"));
+        };
         snapshots.push((taken.header, state));
     }
     let Some(index) = replay::nearest_snapshot(snapshots.iter().map(|(h, _)| *h), before) else {
@@ -225,7 +229,7 @@ async fn run_inputs<T>(
     while next < end {
         let (page, after) = felix.read_page(&spec.input, next, end).await?;
         for input in page {
-            if skip_claims && output::is_marker(&input.payload) {
+            if skip_claims && output::passed_over(&input.payload, output::DEFAULT_NAME) {
                 continue;
             }
             let outputs = workload

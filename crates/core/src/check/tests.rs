@@ -12,15 +12,9 @@ fn header(input_offset: u64, index: u32) -> OutputHeader {
 fn replay(n: u64) -> Vec<Expected> {
     let mut expected = Vec::new();
     for i in 0..n {
-        expected.push(Expected {
-            header: header(i, 0),
-            payload: vec![i as u8],
-        });
+        expected.push(Expected::output(header(i, 0), vec![i as u8]));
         if i == 2 {
-            expected.push(Expected {
-                header: header(2, 1),
-                payload: vec![99],
-            });
+            expected.push(Expected::output(header(2, 1), vec![99]));
         }
     }
     expected
@@ -30,12 +24,30 @@ fn record(input: u64, index: u32, epoch: u64, payload: &[u8]) -> Vec<u8> {
     output::encode(header(input, index), epoch, payload)
 }
 
+fn encode(e: &Expected, epoch: u64) -> Vec<u8> {
+    match &e.produced {
+        Produced::Output { name, key, payload } => {
+            let addressed = output::Addressed {
+                name,
+                key: key.as_deref(),
+                payload,
+            };
+            output::encode_addressed(e.header, epoch, addressed).unwrap()
+        }
+        Produced::Rejection { code, detail } => output::encode_rejection(
+            e.header.input_offset,
+            epoch,
+            output::Rejected {
+                code: *code,
+                detail,
+            },
+        ),
+    }
+}
+
 /// The stream an uninterrupted owner at epoch 1 would write.
 fn clean(expected: &[Expected]) -> Vec<Vec<u8>> {
-    expected
-        .iter()
-        .map(|e| output::encode(e.header, 1, &e.payload))
-        .collect()
+    expected.iter().map(|e| encode(e, 1)).collect()
 }
 
 fn run(expected: &[Expected], records: &[Vec<u8>], complete: bool) -> Vec<Finding> {
@@ -59,7 +71,7 @@ fn an_owner_change_is_not_a_finding() {
     let mut records = clean(&expected);
     for r in &mut records[3..] {
         let (w, p) = output::decode(r).unwrap().output().unwrap();
-        *r = output::encode(w.header, 2, p);
+        *r = output::encode(w.header, 2, p.payload);
     }
     assert_eq!(run(&expected, &records, true), []);
 }
@@ -71,11 +83,7 @@ fn claims_between_outputs_are_not_findings() {
     records.extend(clean(&expected[..3]));
     records.push(output::encode_claim(2, ""));
     records.push(output::encode_claim(3, ""));
-    records.extend(
-        expected[3..]
-            .iter()
-            .map(|e| output::encode(e.header, 3, &e.payload)),
-    );
+    records.extend(expected[3..].iter().map(|e| encode(e, 3)));
     records.push(output::encode_claim(4, ""));
     assert_eq!(run(&expected, &records, true), []);
 }
@@ -311,4 +319,142 @@ fn claims_do_not_move_a_snapshots_bounds() {
     for tail in [3, 4] {
         assert_eq!(check_snapshots(&[(0, &snap(1, tail))], &on_stream, 4), []);
     }
+}
+
+/// `replay(5)`, but the workload rejects input 3.
+fn with_rejection() -> Vec<Expected> {
+    let mut expected = replay(5);
+    let at = expected
+        .iter()
+        .position(|e| e.header == header(3, 0))
+        .unwrap();
+    expected[at] = Expected::rejection(3, 22, b"bad".to_vec());
+    expected
+}
+
+#[test]
+fn a_rejection_is_checked_like_an_output() {
+    let expected = with_rejection();
+    let records = clean(&expected);
+    assert_eq!(run(&expected, &records, true), []);
+    // Missing, repeated and differing rejections are found like outputs.
+    let mut missing = records.clone();
+    missing.remove(4);
+    assert_eq!(
+        run(&expected, &missing, true),
+        [Finding::Gap {
+            header: header(3, 0)
+        }]
+    );
+    let mut twice = records.clone();
+    twice.insert(5, records[4].clone());
+    assert!(matches!(
+        run(&expected, &twice, true).as_slice(),
+        [Finding::Duplicate { offset: 5, .. }]
+    ));
+    let mut other = records.clone();
+    other[4] = encode(&Expected::rejection(3, 23, b"bad".to_vec()), 1);
+    assert_eq!(
+        run(&expected, &other, true),
+        [Finding::Differs {
+            offset: 4,
+            header: header(3, 0)
+        }]
+    );
+}
+
+#[test]
+fn an_output_where_the_replay_rejects_differs() {
+    let expected = with_rejection();
+    let mut records = clean(&expected);
+    records[4] = record(3, 0, 1, &[3]);
+    assert_eq!(
+        run(&expected, &records, true),
+        [Finding::Differs {
+            offset: 4,
+            header: header(3, 0)
+        }]
+    );
+}
+
+#[test]
+fn a_rejection_where_the_replay_outputs_differs() {
+    let expected = replay(5);
+    let mut records = clean(&expected);
+    records[4] = encode(&Expected::rejection(3, 22, b"bad".to_vec()), 1);
+    assert_eq!(
+        run(&expected, &records, true),
+        [Finding::Differs {
+            offset: 4,
+            header: header(3, 0)
+        }]
+    );
+}
+
+#[test]
+fn an_output_of_another_name_differs() {
+    let expected = replay(2);
+    let mut records = clean(&expected);
+    let addressed = output::Addressed {
+        name: "other",
+        key: None,
+        payload: &[1],
+    };
+    records[1] = output::encode_addressed(header(1, 0), 1, addressed).unwrap();
+    assert_eq!(
+        run(&expected, &records, true),
+        [Finding::Differs {
+            offset: 1,
+            header: header(1, 0)
+        }]
+    );
+}
+
+#[test]
+fn a_rejection_moves_a_snapshots_bounds_like_an_output() {
+    // Input 0 is rejected at offset 0; input 1 has an output at offset 1.
+    let records = [
+        output::encode_rejection(
+            0,
+            1,
+            output::Rejected {
+                code: 1,
+                detail: b"",
+            },
+        ),
+        record(1, 0, 1, &[1]),
+    ];
+    let on_stream: Vec<(u64, &[u8])> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i as u64, r.as_slice()))
+        .collect();
+    assert_eq!(check_snapshots(&[(0, &snap(0, 1))], &on_stream, 2), []);
+    assert!(!check_snapshots(&[(0, &snap(0, 0))], &on_stream, 2).is_empty());
+}
+
+#[test]
+fn manifests_are_checked_and_chunks_are_not_snapshots() {
+    let r = record(0, 0, 1, &[0]);
+    let chunk = snapshot::encode_chunk(1, &snapshot::sha256(b"s"), b"s");
+    let manifest = |output_tail| {
+        snapshot::encode_manifest(&snapshot::Manifest {
+            taken: snapshot::Taken {
+                header: SnapshotHeader {
+                    input_offset: 0,
+                    output_tail,
+                },
+                epoch: 1,
+            },
+            chunks: vec![],
+        })
+    };
+    let good = manifest(1);
+    let snapshots = [(0, chunk.as_slice()), (1, good.as_slice())];
+    assert_eq!(check_snapshots(&snapshots, &[(0, &r)], 1), []);
+    let bad = manifest(2);
+    assert!(matches!(
+        check_snapshots(&[(0, &chunk), (1, &bad)], &[(0, &r)], 1).as_slice(),
+        [Finding::SnapshotTail { offset: 1, .. }]
+    ));
 }
