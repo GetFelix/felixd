@@ -2,7 +2,8 @@
 # and caches with three replicas, so a broker can be killed under a running
 # workload. Development credentials, as in compose.yaml.
 #
-#   docker compose -f tests/felix/cluster.yaml up -d --wait
+#   docker compose -f tests/felix/cluster.yaml up -d --wait broker-1 broker-2 broker-3
+#   docker compose -f tests/felix/cluster.yaml run --rm felix-fleet
 #
 # DEVELOPMENT ONLY. Every host port is bound to 127.0.0.1, and brokers talk to
 # each other without mTLS on a private network.

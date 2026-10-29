@@ -32,8 +32,8 @@ The `cluster` job runs `tests/cluster.rs` against three brokers with three-repli
 kills the broker that leads a workload's output stream. To run it locally:
 
 ```
-docker compose -f tests/felix/cluster.yaml up -d --wait
-docker compose -f tests/felix/cluster.yaml wait felix-fleet
+docker compose -f tests/felix/cluster.yaml up -d --wait broker-1 broker-2 broker-3
+docker compose -f tests/felix/cluster.yaml run --rm felix-fleet
 tests/felix/credentials.sh /tmp/felix cluster
 export FELIX_BROKERS=127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300 \
   FELIX_OPERATOR_TOKEN_FILE=/tmp/felix/operator.jwt FELIXD_CLUSTER=$PWD/tests/felix/cluster.yaml
