@@ -18,7 +18,7 @@ TLC_SIMULATE=100000 scripts/check_tla.sh FelixdFull  # random behaviours, not ev
 | `OutputsExact` | The output records, in stream order, are a prefix of the deterministic outputs of the inputs in order: no duplicate, no gap. |
 | `EpochMonotone` | Epochs on `.out` and on `.snap` never decrease (generation-start records excepted). |
 | `NoInterleave` | Once an owner has begun, nothing from an earlier epoch lands after that point on `.out`. An owner begins when its claim record lands, or without the marker, when it reads the tail to resume. |
-| `NoStaleFailure` | `failed` in the spec follows a failure record on `.out`, that record landed before any later owner began, and only generation-start records land after it. Without `FailRecord`: no node writes `failed` while the lease is not its own. |
+| `NoStaleFailure` | `failed` in the spec follows a failure record on `.out`, that record landed before any later owner began, and only generation-start records land after it (the model has one spec version; a resubmit's run lands after it in the code). Without `FailRecord`: no node writes `failed` while the lease is not its own. |
 | `NoPoison` | No node finds the streams impossible to resume from. The model is deterministic, so every such finding would fail a healthy workload. |
 | `UniqueEpoch` | No two claims that run, or have records or requests in flight, share an epoch. |
 | `SnapshotsSplit` | For each snapshot (X, T), the output records below offset T are of inputs up to X and the rest are of later inputs. |
@@ -102,9 +102,9 @@ Paths are from the repository root, as of the failure record (#70).
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:411-472` |
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:634-648` |
 | `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:596-598` |
-| `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:704-735`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
+| `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:704-733`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
 | `FailSend`, `FailAck`, `FailRetry` | `record_failure`: `crates/agent/src/output.rs:43-94`; the record is `encode_failure`: `crates/core/src/output.rs:100-107` |
-| `Derive` | `write_failed`: `crates/agent/src/agent.rs:771-812`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:623-633` |
+| `Derive` | `write_failed`: `crates/agent/src/agent.rs:770-828`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:623-633` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
 | `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |
 | `LocalDeadline`, `StopLocal` | `Fence::holds` and the 2/3 TTL stop: `crates/agent/src/lease.rs:125-159`, `crates/core/src/lease.rs:87-93` |
@@ -159,7 +159,10 @@ they are several reads after the claim has won.
 - Spec versions: every failure record is taken to be for the spec that runs. The code passes
   over a failure record from an older spec version, which only a resubmit makes.
 - The later epoch a holder that finds epochs went backwards puts on its failure record: in the
-  model a holder never finds a later epoch while it still holds the lease.
+  model a holder never finds a later epoch while it still holds the lease, so that record is never
+  written. The epoch floor reads it like any other record, so later claims stay above it.
+- Stale cache reads of the spec version. The code reads again when it sees a version below the
+  record's.
 - Several inputs, pipelines, spec edits, `felixd run`'s history check, `felixd check` itself, and
   drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.

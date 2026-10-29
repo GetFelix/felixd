@@ -721,11 +721,9 @@ async fn mark_failed(
                 return Ok(Err(true));
             };
             let spec = WorkloadSpec::decode(&found.value)?;
-            if spec.state != WorkloadState::Running {
-                return Ok(Err(true));
-            }
             if spec != *running {
-                // The task restarts under the new spec, which decides again.
+                // Stopped, edited, or a stale read: the watch restarts or
+                // stops the task, which decides again.
                 return Ok(Err(false));
             }
             faults::before_failure_record().await;
@@ -768,6 +766,29 @@ async fn mark_failed(
 /// overwritten. It needs no lease, because the record has decided. Returns
 /// `false` if the spec was written again since, still running: the record
 /// is then not about the spec that runs now.
+/// What [`write_failed`] does with a spec read at `found` in `state`, for a
+/// failure recorded under `version`.
+#[derive(Debug, PartialEq, Eq)]
+enum SpecWrite {
+    /// Nothing to write. `true` if the workload is no longer running.
+    Done(bool),
+    /// The read is older than the record, so it is stale. Read again.
+    Stale,
+    Write,
+}
+
+fn spec_write(found: u64, state: WorkloadState, version: u64) -> SpecWrite {
+    if found < version {
+        SpecWrite::Stale
+    } else if state != WorkloadState::Running {
+        SpecWrite::Done(true)
+    } else if found > version {
+        SpecWrite::Done(false)
+    } else {
+        SpecWrite::Write
+    }
+}
+
 async fn write_failed(felix: &Felix, id: &str, version: u64, reason: &str) -> bool {
     loop {
         let attempt = async {
@@ -775,18 +796,13 @@ async fn write_failed(felix: &Felix, id: &str, version: u64, reason: &str) -> bo
                 return Ok(Some(true));
             };
             let mut spec = WorkloadSpec::decode(&found.value)?;
-            if spec.state != WorkloadState::Running {
-                return Ok(Some(true));
+            match spec_write(found.version, spec.state, version) {
+                SpecWrite::Done(done) => return Ok(Some(done)),
+                SpecWrite::Stale => {
+                    anyhow::bail!("read spec version {} below {version}", found.version)
+                }
+                SpecWrite::Write => {}
             }
-            if found.version > version {
-                return Ok(Some(false));
-            }
-            // An older version is a stale read; read again.
-            anyhow::ensure!(
-                found.version == version,
-                "read spec version {} below {version}",
-                found.version
-            );
             spec.state = WorkloadState::Failed;
             spec.failure = Some(reason.to_owned());
             let put = felix
