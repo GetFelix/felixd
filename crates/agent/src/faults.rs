@@ -117,9 +117,9 @@ pub(crate) fn before_snapshot() {
     }
 }
 
-pub(crate) fn before_snapshot_write() {
+pub(crate) async fn before_snapshot_write() {
     if fault("freeze-before-snapshot-write") == Some(SNAPSHOTS.load(Ordering::Relaxed)) {
-        freeze();
+        freeze().await;
     }
 }
 
@@ -139,13 +139,13 @@ pub(crate) fn skip_snapshot() -> bool {
         .is_ok()
 }
 
-pub(crate) fn after_append_sent() {
+pub(crate) async fn after_append_sent() {
     let n = APPENDS.load(Ordering::Relaxed);
     if fault("crash-after-append-sent") == Some(n) {
         crash("crash-after-append-sent");
     }
     if fault("freeze-after-append-sent") == Some(n) {
-        freeze();
+        freeze().await;
     }
 }
 
@@ -182,26 +182,41 @@ pub(crate) fn drop_input(offset: u64) -> bool {
     fault("drop-input") == Some(offset)
 }
 
-pub(crate) fn before_append() {
+pub(crate) async fn before_append() {
     let n = APPENDS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-append") == Some(n) {
-        freeze();
+        freeze().await;
     }
 }
 
-pub(crate) fn before_claim() {
+pub(crate) async fn before_claim() {
     let n = CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-claim") == Some(n) {
-        freeze();
+        freeze().await;
     }
 }
 
-fn freeze() {
+/// Stops the whole process, renewals included, and returns once it is
+/// continued.
+async fn freeze() {
     tracing::warn!("injected freeze");
-    // Stopping ourselves stops every thread at once, renewals included.
-    let _ = std::process::Command::new("kill")
-        .args(["-STOP", &std::process::id().to_string()])
-        .status();
+    until_continued(|| {
+        let _ = std::process::Command::new("kill")
+            .args(["-STOP", &std::process::id().to_string()])
+            .status();
+    })
+    .await;
+}
+
+/// Runs `stop`, then waits for `SIGCONT`. `kill -STOP` is aimed at the
+/// process, so the kernel may hand it to another thread, and this one can
+/// return from `stop` and run on until that thread stops the group. That is
+/// long enough to send the write the freeze was meant to hold back.
+async fn until_continued(stop: impl FnOnce()) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut continued = signal(SignalKind::from_raw(libc::SIGCONT)).expect("listen for SIGCONT");
+    stop();
+    continued.recv().await;
 }
 
 pub(crate) async fn before_failure_record() {
@@ -210,14 +225,14 @@ pub(crate) async fn before_failure_record() {
     }
     let n = FAILURE_RECORDS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-failure-record") == Some(n) {
-        freeze();
+        freeze().await;
     }
 }
 
-pub(crate) fn before_failure_append() {
+pub(crate) async fn before_failure_append() {
     FAILURES.fetch_add(1, Ordering::Relaxed);
     if fault("freeze-before-failure-append") == Some(1) {
-        freeze();
+        freeze().await;
     }
 }
 
@@ -242,3 +257,6 @@ pub(crate) fn during_compile() {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
+
+#[cfg(test)]
+mod tests;
