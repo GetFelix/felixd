@@ -426,11 +426,6 @@ async fn run(
         output_tail,
     })
     .map_err(poison)?;
-    not_behind(
-        &spec.input,
-        felix.tail(&spec.input).await?,
-        resume.next_input,
-    )?;
     if let Some(snapshot) = snapshot.as_ref().filter(|_| resume.restore) {
         let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
             .await
