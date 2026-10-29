@@ -1173,8 +1173,8 @@ Sources: Quinlan and Dorward, "Venti: a new approach to archival storage"
 
 Submission through intake and admission is decided and is built in the order
 of the issues under [Submitting work](#submitting-work): spec history (#72),
-intake and admission (#118), the thin `felixd run` (#119), `felixd init` (#120)
-and the grants wiring (#121). The items below are not designed yet. Each has an
+intake and admission (#114), the thin `felixd run` (#115), `felixd init` (#116)
+and the grants wiring (#117). The items below are not designed yet. Each has an
 issue and a rough shape.
 
 - **Guarded operator actions and a small operator surface** (#101). Operator
