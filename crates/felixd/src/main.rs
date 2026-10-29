@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::agent::AgentConfig;
+use felixd_agent::check::check;
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
@@ -48,6 +49,21 @@ enum Command {
         /// workload, so that the first node to see it does not take everything.
         #[arg(long, default_value_t = placement::DEFAULT_CLAIM_DELAY.as_millis() as u64)]
         claim_delay_ms: u64,
+    },
+    /// Check output streams: replay each workload's module over its input and
+    /// report gaps, duplicates, records out of order, epoch regressions and
+    /// outputs that differ. Exits with 1 if anything is found.
+    Check {
+        #[command(flatten)]
+        connection: Connection,
+        /// The workload to check. Repeat for several; every workload when
+        /// left out.
+        #[arg(long = "id")]
+        ids: Vec<String>,
+        /// Also report outputs missing from the end of a stream, for when the
+        /// workloads should have caught up with their input.
+        #[arg(long)]
+        complete: bool,
     },
     /// Submit a workload: store its module, create its streams and start it.
     Run {
@@ -108,6 +124,27 @@ async fn main() -> Result<()> {
                 },
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
+        }
+        Command::Check {
+            connection,
+            ids,
+            complete,
+        } => {
+            let reports = check(&connection.settings()?, &ids, complete).await?;
+            let mut found = false;
+            for report in &reports {
+                if report.findings.is_empty() {
+                    println!("{}: {} records, ok", report.output, report.records);
+                }
+                for finding in &report.findings {
+                    println!("{}: {finding}", report.output);
+                    found = true;
+                }
+            }
+            if found {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Command::Run {
             connection,

@@ -13,7 +13,7 @@ const VERSION: u8 = 2;
 const HEADER_BYTES: usize = 20;
 
 /// Where an output record came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OutputHeader {
     /// Offset of the input record whose step produced this output.
     pub input_offset: u64,
