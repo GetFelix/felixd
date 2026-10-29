@@ -85,9 +85,10 @@ enum Command {
         /// The most memory the workload may use, in bytes. Stored in the spec.
         #[arg(long, default_value_t = Limits::default().max_memory_bytes)]
         max_memory: u64,
-        /// Replicas of the workload's output and snapshot streams. More than
-        /// one makes them quorum streams.
-        #[arg(long, default_value_t = 1)]
+        /// Replicas of felixd's caches and the workload's output and snapshot
+        /// streams. More than one makes them `Quorum`. Use 1 against a single
+        /// broker. Caches that already exist keep their replicas.
+        #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
         replication_factor: u32,
         /// The workload, a WebAssembly component.
         module: PathBuf,

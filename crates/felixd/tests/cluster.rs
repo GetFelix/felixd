@@ -71,38 +71,37 @@ async fn leader(t: &TestFelix, stream: &str) -> Option<(String, u64)> {
     })
 }
 
-/// Creates felixd's caches with three replicas before `felixd run` would
-/// create them with one, so losing a broker loses no control state.
-async fn replicated_caches(t: &TestFelix) {
-    let settings = &t.settings;
-    let url = format!(
-        "{}/v1/tenants/{}/namespaces/{}/caches",
-        settings.controlplane_url, settings.tenant, settings.namespace
-    );
-    let token = settings.controlplane_token.clone().unwrap();
-    for cache in [
-        names::WORKLOADS,
-        names::MODULES,
-        names::LEASES,
-        names::EPOCHS,
-        names::NODES,
-    ] {
-        let body = serde_json::json!({
-            "cache": cache,
-            "display_name": cache,
-            "replication_factor": 3,
-            "consistency": "Quorum",
-        });
-        let (url, token) = (url.clone(), token.clone());
-        tokio::task::spawn_blocking(move || {
-            ureq::post(&url)
-                .header("Authorization", &format!("Bearer {token}"))
-                .send_json(&body)
-                .unwrap();
-        })
-        .await
-        .unwrap();
+/// A broker killed by a test, started again when dropped and waited for, so
+/// the next test, or a failing one, does not find the cluster short.
+struct Killed(String);
+
+impl Killed {
+    fn new(broker: &str) -> Killed {
+        compose(&["kill", broker]);
+        Killed(broker.to_owned())
     }
+}
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        compose(&["up", "-d", "--wait", &self.0]);
+    }
+}
+
+/// Waits until no shard of the test's namespace is led by `old`, then
+/// connects the test's client again, since one that knew the old leaders can
+/// still try them first.
+async fn moved_off(t: &mut TestFelix, old: &str) {
+    eventually(
+        "every shard to leave the killed broker",
+        Duration::from_secs(90),
+        || async {
+            let items = assignments(t).await;
+            items.iter().all(|item| item["leader"] != old).then_some(())
+        },
+    )
+    .await;
+    t.felix = Felix::connect(&t.settings).await.unwrap();
 }
 
 async fn publish_range(t: &TestFelix, inputs: std::ops::Range<u64>) {
@@ -129,7 +128,6 @@ async fn generation_starts_after_failover() {
     let Some(mut t) = test_felix().await else {
         return;
     };
-    replicated_caches(&t).await;
     let every = SNAPSHOT_EVERY.to_string();
     let module = t.submit("counter", &["--snapshot-every", &every]).await;
     let mut first = t.start_agent();
@@ -156,7 +154,7 @@ async fn generation_starts_after_failover() {
         .await
         .expect("the output stream has a leader");
     eprintln!("killing {old}, which leads {OUTPUT} at generation {generation}");
-    compose(&["kill", &old]);
+    let _killed = Killed::new(&old);
     let (new, _) = eventually(
         "a new leader for the output",
         Duration::from_secs(90),
@@ -168,20 +166,7 @@ async fn generation_starts_after_failover() {
     )
     .await;
     eprintln!("{new} leads {OUTPUT} now");
-    eventually(
-        "every shard to leave the killed broker",
-        Duration::from_secs(90),
-        || async {
-            let items = assignments(&t).await;
-            items
-                .iter()
-                .all(|item| item["leader"] != old.as_str())
-                .then_some(())
-        },
-    )
-    .await;
-    // A client that knew the old leaders can still try them first.
-    t.felix = Felix::connect(&t.settings).await.unwrap();
+    moved_off(&mut t, &old).await;
 
     let _second = t.start_agent();
     publish_range(&t, 4 * SNAPSHOT_EVERY..8 * SNAPSHOT_EVERY).await;
@@ -195,5 +180,44 @@ async fn generation_starts_after_failover() {
     );
     let (ok, report) = t.check(&["--complete"]);
     assert!(ok, "felixd check found problems:\n{report}");
-    compose(&["start", &old]);
+}
+
+/// The broker serving the agent's workloads watch is killed under it. The
+/// agent must not wait on that watch forever: a workload submitted once the
+/// cache has a new leader still runs. The broker is started again first,
+/// because the client keeps routing cache requests to an owner it cannot
+/// reach, which is a separate Felix problem.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_on_a_killed_broker_is_replaced() {
+    if std::env::var_os("FELIXD_CLUSTER").is_none() {
+        eprintln!("skipping: FELIXD_CLUSTER is not set");
+        return;
+    }
+    let Some(mut t) = test_felix().await else {
+        return;
+    };
+    let module = t.submit("counter", &[]).await;
+    let _agent = t.start_agent();
+    publish_range(&t, 0..5).await;
+    eventually("the first outputs", Duration::from_secs(60), || async {
+        (t.read_all(OUTPUT).await.len() >= 5).then_some(())
+    })
+    .await;
+    let (old, _) = leader(&t, names::WORKLOADS)
+        .await
+        .expect("the workloads cache has a leader");
+    eprintln!("killing {old}, which leads {}", names::WORKLOADS);
+    let killed = Killed::new(&old);
+    moved_off(&mut t, &old).await;
+    drop(killed);
+
+    t.submit_as("later", "counter", &[]).await;
+    eventually(
+        "a claim of the later workload",
+        Duration::from_secs(90),
+        || async { t.lease("later").await.filter(|(lease, _)| lease.epoch > 0) },
+    )
+    .await;
+    publish_range(&t, 5..10).await;
+    assert_uninterrupted_on(&t, &module, 10, "wl.later.out").await;
 }

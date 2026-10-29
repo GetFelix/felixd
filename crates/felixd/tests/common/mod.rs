@@ -171,6 +171,18 @@ impl TestFelix {
         }
     }
 
+    /// Appends `records` at offset `at`, which must be the tail. A stream
+    /// just created may not be served yet; `tail` waits for that, as the
+    /// agent does.
+    pub(crate) async fn publish_if(&self, stream: &str, records: Vec<Vec<u8>>, at: u64) {
+        assert_eq!(self.felix.tail(stream).await.unwrap(), at);
+        let written = self.felix.publish_if(stream, records, at).await.unwrap();
+        assert!(
+            matches!(written, felix_client::ConditionalWrite::Written { offset } if offset == at),
+            "{written:?}"
+        );
+    }
+
     pub(crate) async fn read_all(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
         let tail = self.felix.tail(stream).await.unwrap();
         self.felix

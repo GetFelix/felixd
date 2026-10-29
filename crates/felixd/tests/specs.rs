@@ -52,6 +52,10 @@ async fn a_new_module_is_refused_once_the_workload_has_output() {
     let path = dir.join("window.wasm");
     let out = t
         .felixd(&["run", "--id", common::ID, "--input", INPUT])
+        .args([
+            "--replication-factor",
+            &common::replication_factor().to_string(),
+        ])
         .arg(&path)
         .stderr(std::process::Stdio::piped())
         .output()

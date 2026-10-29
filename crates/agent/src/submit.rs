@@ -9,6 +9,10 @@ use crate::admin::{self, StreamKind};
 use crate::felix::Felix;
 use crate::settings::Settings;
 
+/// Replicas of felixd's caches and a workload's streams, enough to lose one
+/// broker without losing an acknowledged write.
+pub const DEFAULT_REPLICATION_FACTOR: u32 = 3;
+
 pub struct Submission {
     pub id: String,
     pub module: Vec<u8>,
@@ -26,7 +30,7 @@ impl Submission {
             input: input.to_owned(),
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
             limits: Limits::default(),
-            replication_factor: 1,
+            replication_factor: DEFAULT_REPLICATION_FACTOR,
         }
     }
 }
@@ -49,7 +53,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         names::EPOCHS,
         names::NODES,
     ] {
-        admin::ensure_cache(settings, cache).await?;
+        admin::ensure_cache(settings, cache, kind).await?;
     }
     let output = names::output_stream(&submission.id);
     admin::ensure_stream(settings, &output, kind).await?;

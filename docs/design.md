@@ -232,7 +232,10 @@ different one refuses the workload, is an open question.
 
 ## Data model
 
-Everything lives in one Felix tenant, in a namespace per cluster.
+Everything lives in one Felix tenant, in a namespace per cluster. `felixd run`
+creates the caches and streams below with three replicas and `Quorum`
+consistency by default, so losing one broker loses no acknowledged write and
+stops no claim. `--replication-factor 1` is for a single development broker.
 
 | Resource | Kind | Key or name | Value | Written by |
 |---|---|---|---|---|
@@ -292,9 +295,12 @@ The one assumption is that `epochs` is not recreated while a holder that has
 not written anything yet may still be running: its epoch is then on no
 record, so the next claim could get the same one.
 
-A holder that finds a record from a later epoch on the output stream reads
-its lease. If the lease is gone, a later owner has taken over and the holder
-stops. If the lease is still its own, epochs went backwards, which nothing
+A holder that finds a record from a later epoch on the output stream renews
+its lease at once, conditional on the version it holds. A read would not do,
+because Felix does not yet define how fresh a cache read is after a leader
+change, and a stale read can still show the holder's own lease. If the
+renewal is refused, a later owner has taken over and the holder stops. If it
+is applied, the lease is still its own: epochs went backwards, which nothing
 can repair automatically, so it logs an error and marks the workload failed
 with that reason instead of stopping and claiming again.
 
@@ -320,8 +326,11 @@ An agent never adopts a lease it finds under its own name. A restarted agent
 waits for its old leases to expire, so two processes configured with the same
 node id can't both believe they hold a workload. On a clean shutdown an agent
 deletes its leases with `cache_delete_if`, so another node can claim at once.
-Only a holder marks a workload failed in its spec, so a stale node can't fail
-a workload another node is running. It keeps renewing the lease until the
+Only a holder marks a workload failed in its spec. Right before the write it
+renews its lease the same way, and writes nothing if that renewal is refused,
+so a node that was frozen while another took over can't fail the workload the
+other node now runs. The write itself is a `cache_put_if` on the spec version
+it read. It keeps renewing the lease until the
 failure is recorded, so a slow write doesn't let the lease lapse with the
 spec still `running`.
 

@@ -235,7 +235,7 @@ async fn the_holder_renews_every_third_of_the_ttl_at_the_version_it_wrote() {
     let start = Instant::now();
     let holding = tokio::time::timeout(
         TTL * 3 + Duration::from_secs(1),
-        hold(&store, &mut held, &tx),
+        hold(&store, &mut held, &tx, &mut Confirmer::new().1),
     )
     .await;
     assert!(holding.is_err(), "the lease was lost: {holding:?}");
@@ -260,7 +260,8 @@ async fn a_refused_renewal_loses_the_lease_at_once() {
     let (tx, _fence) = held.fence();
     store.overwrite();
     let start = Instant::now();
-    let lost = tokio::time::timeout(TTL, hold(&store, &mut held, &tx)).await;
+    let lost =
+        tokio::time::timeout(TTL, hold(&store, &mut held, &tx, &mut Confirmer::new().1)).await;
     assert_eq!(lost.expect("still holding"), Lost::Refused);
     assert_eq!(Instant::now() - start, timing().renew_after());
 }
@@ -273,7 +274,8 @@ async fn an_expired_lease_is_not_renewed() {
     // The holder was frozen past the TTL, so the broker expired the entry
     // before the renewal that was due at 3 s.
     tokio::time::advance(TTL).await;
-    let lost = tokio::time::timeout(TTL, hold(&store, &mut held, &tx)).await;
+    let lost =
+        tokio::time::timeout(TTL, hold(&store, &mut held, &tx, &mut Confirmer::new().1)).await;
     assert_eq!(lost.expect("still holding"), Lost::Refused);
 }
 
@@ -285,7 +287,11 @@ async fn without_felix_the_holder_stops_by_its_own_clock_at_two_thirds() {
     let start = Instant::now();
     store.set(|s| s.down = true);
     let holder = async {
-        let lost = tokio::time::timeout(TTL * 2, hold(&store, &mut held, &tx)).await;
+        let lost = tokio::time::timeout(
+            TTL * 2,
+            hold(&store, &mut held, &tx, &mut Confirmer::new().1),
+        )
+        .await;
         (lost.expect("still holding"), Instant::now() - start)
     };
     let watcher = async {
@@ -308,7 +314,11 @@ async fn a_renewal_whose_answer_was_lost_is_found_by_reading_it_back() {
     let claimed = held.version;
     let (tx, fence) = held.fence();
     store.set(|s| s.lose_next_answer = true);
-    let holding = tokio::time::timeout(TTL * 2, hold(&store, &mut held, &tx)).await;
+    let holding = tokio::time::timeout(
+        TTL * 2,
+        hold(&store, &mut held, &tx, &mut Confirmer::new().1),
+    )
+    .await;
     assert!(holding.is_err(), "the lease was lost: {holding:?}");
     assert!(fence.holds());
     assert!(held.version > claimed + 1);
@@ -335,7 +345,7 @@ async fn a_read_back_renewal_is_credited_from_the_earliest_attempt_it_may_be() {
     let holding = async {
         tokio::time::timeout(
             timing().renew_after() * 2 - Duration::from_millis(1),
-            hold(&store, &mut held, &tx),
+            hold(&store, &mut held, &tx, &mut Confirmer::new().1),
         )
         .await
     };
@@ -358,4 +368,34 @@ async fn release_deletes_only_this_holders_lease() {
     };
     release(&store, &held).await;
     assert_eq!(store.version(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_confirmation_renews_at_once() {
+    let store = FakeStore::default();
+    let mut held = take(&store, "a").await.unwrap();
+    let claimed = held.version;
+    let (tx, _fence) = held.fence();
+    let (confirmer, mut asks) = Confirmer::new();
+    let start = Instant::now();
+    tokio::select! {
+        _ = hold(&store, &mut held, &tx, &mut asks) => panic!("the lease was lost"),
+        confirmed = confirmer.confirm() => assert!(confirmed),
+    }
+    assert_eq!(Instant::now(), start);
+    assert_eq!(store.version(), Some(claimed + 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_confirmation_is_refused_once_another_node_holds_the_lease() {
+    let store = FakeStore::default();
+    let mut held = take(&store, "a").await.unwrap();
+    let (tx, _fence) = held.fence();
+    let (confirmer, mut asks) = Confirmer::new();
+    store.overwrite();
+    let (lost, confirmed) = tokio::join!(hold(&store, &mut held, &tx, &mut asks), async {
+        confirmer.confirm().await
+    });
+    assert_eq!(lost, Lost::Refused);
+    assert!(!confirmed);
 }
