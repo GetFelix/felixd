@@ -22,7 +22,7 @@ An output continues with:
 | 4 | index among that step's outputs, from 0 |
 | rest | the payload the workload returned |
 
-A claim ends after the epoch. A new owner appends one before it resumes, so a stale owner's next
+A claim continues with the new owner's node id, in UTF-8, to the end of the record, so a reader can tell which node wrote each epoch. Claims written before that end after the epoch, and a reader takes their node as unknown. A new owner appends one before it resumes, so a stale owner's next
 `publish_if` is refused. A failure continues with:
 
 | Bytes | Field |

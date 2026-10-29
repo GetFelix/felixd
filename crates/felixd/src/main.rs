@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::agent::AgentConfig;
 use felixd_agent::check::check;
-use felixd_agent::replay::{Target, replay};
+use felixd_agent::replay::{Target, diff, replay};
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
@@ -67,7 +67,8 @@ enum Command {
         complete: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
-    /// what its `inspect` returns. Writes nothing.
+    /// what its `inspect` returns, or with `--diff` compare the outputs a
+    /// replay produces with the recorded ones. Writes nothing.
     Replay {
         #[command(flatten)]
         connection: Connection,
@@ -76,9 +77,22 @@ enum Command {
         id: String,
         /// An input offset, for the state after that input, or an RFC 3339
         /// time such as 2026-10-29T14:02:00Z, for the state after every input
-        /// appended before it.
-        #[arg(long, value_parser = parse_target)]
-        to: Target,
+        /// appended before it. A diff runs to the last input by default.
+        #[arg(long, value_parser = parse_target, required_unless_present = "diff")]
+        to: Option<Target>,
+        /// Compare each output the replay produces with the one on the output
+        /// stream and report the first divergence. Exits with 1 if it finds
+        /// one.
+        #[arg(long)]
+        diff: bool,
+        /// The first input a diff compares.
+        #[arg(long, default_value_t = 0, requires = "diff")]
+        from: u64,
+        /// Run this module, the hash of one in the `modules` cache, over the
+        /// recorded inputs instead of the workload's own, from its initial
+        /// state. With `--diff` this checks an upgrade.
+        #[arg(long)]
+        module: Option<String>,
     },
     /// Submit a workload: store its module, create its streams and start it.
     Run {
@@ -162,8 +176,16 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Replay { connection, id, to } => {
-            let replayed = replay(&connection.settings()?, &id, to).await?;
+        Command::Replay {
+            connection,
+            id,
+            to,
+            diff: false,
+            module,
+            ..
+        } => {
+            let to = to.context("--to is required without --diff")?;
+            let replayed = replay(&connection.settings()?, &id, to, module.as_deref()).await?;
             let from = match replayed.restored {
                 Some(offset) => format!("the snapshot of input {offset}"),
                 None => "the initial state".to_owned(),
@@ -173,6 +195,25 @@ async fn main() -> Result<()> {
                 replayed.steps, replayed.end
             );
             println!("{}", replayed.state);
+            Ok(())
+        }
+        Command::Replay {
+            connection,
+            id,
+            to,
+            from,
+            module,
+            ..
+        } => {
+            let diffed = diff(&connection.settings()?, &id, from, to, module.as_deref()).await?;
+            if let Some(divergence) = diffed.divergence {
+                println!("first divergence at {divergence}");
+                std::process::exit(1);
+            }
+            println!(
+                "inputs from {} below {}: {} outputs match",
+                diffed.from, diffed.end, diffed.matched
+            );
             Ok(())
         }
         Command::Run {

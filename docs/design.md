@@ -676,12 +676,21 @@ and pass `felixd check --complete`.
    one it starts from the initial state.
 3. Range-reads the inputs after the snapshot up to the target, runs `step`, and
    prints `inspect()`.
-   With `--diff`, it compares the outputs it produced with the ones on the
-   stream, which checks determinism.
 
-The same comparison with a different module (`--module <hash>`) checks an
-upgrade before it goes live: run the new version over recorded inputs and
-see where its outputs differ (#29).
+`felixd replay --id <workload> --diff [--from <offset>] [--to <offset | time>]`
+replays the range the same way, from the nearest snapshot before `--from`, and
+compares each output it produces with the one on the stream by input offset,
+index and the sha256 of the payload. It stops at the last input with a
+recorded output, since the workload may not have reached later ones. The first
+divergence is reported with the input offset, the epoch of the record, the node
+its epoch's claim names and both digests, and the command exits with 1. That
+checks determinism; CI runs it on every example workload after a takeover.
+
+The same comparison with a different module (`--module <hash>`, a module in
+the `modules` cache) checks an upgrade before it goes live: the new version
+runs over the recorded inputs from its initial state, since the snapshots hold
+the old version's state, and the diff shows where its outputs differ (#29).
+`--module` without `--diff` prints the new version's state at `--to`.
 
 Replay needs no lease and writes nothing. It should run anywhere with read
 grants, but it reads the input and snapshot streams' tails, and Felix reports a

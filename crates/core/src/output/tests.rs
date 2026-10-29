@@ -27,13 +27,26 @@ fn the_layout_is_fixed() {
             3, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 2, b'x'
         ]
     );
-    assert_eq!(encode_claim(5), [3, 1, 0, 0, 0, 0, 0, 0, 0, 5]);
+    assert_eq!(encode_claim(5, ""), [3, 1, 0, 0, 0, 0, 0, 0, 0, 5]);
 }
 
 #[test]
 fn a_claim_round_trips_and_holds_no_output() {
-    let record = encode_claim(9);
-    assert_eq!(decode(&record), Ok(Record::Claim { epoch: 9 }));
+    let record = encode_claim(9, "");
+    assert_eq!(
+        decode(&record),
+        Ok(Record::Claim {
+            epoch: 9,
+            node: b""
+        })
+    );
+    assert_eq!(
+        decode(&encode_claim(9, "node-a")),
+        Ok(Record::Claim {
+            epoch: 9,
+            node: b"node-a"
+        })
+    );
     assert_eq!(decode(&record).unwrap().epoch(), 9);
     assert_eq!(decode(&record).unwrap().output(), None);
     assert!(is_marker(&record));
@@ -169,7 +182,7 @@ fn different_records_are_a_divergence() {
 #[test]
 fn a_later_claim_stops_this_owner() {
     let ours = batch(3, &[10]);
-    let theirs = [encode_claim(7)];
+    let theirs = [encode_claim(7, "")];
     assert_eq!(
         reconcile(3, &ours, &refs(&theirs)),
         Reconciled::Superseded { epoch: 7 }
@@ -179,11 +192,11 @@ fn a_later_claim_stops_this_owner() {
 #[test]
 fn earlier_claims_are_passed_over() {
     let ours = batch(7, &[10, 11]);
-    let mut theirs = vec![encode_claim(2)];
+    let mut theirs = vec![encode_claim(2, "")];
     theirs.extend(batch(3, &[10]));
-    theirs.push(encode_claim(3));
+    theirs.push(encode_claim(3, ""));
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(1));
-    let theirs = [encode_claim(7)];
+    let theirs = [encode_claim(7, "")];
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(0));
 }
 
@@ -217,7 +230,7 @@ fn a_failure_ends_the_run_unless_a_later_owner_wrote() {
             reason: "trap".to_owned()
         }
     );
-    let theirs = [encode_failure(5, 3, "trap"), encode_claim(8)];
+    let theirs = [encode_failure(5, 3, "trap"), encode_claim(8, "")];
     assert_eq!(
         reconcile(7, &ours, &refs(&theirs)),
         Reconciled::Superseded { epoch: 8 }
