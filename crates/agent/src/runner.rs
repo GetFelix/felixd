@@ -362,7 +362,7 @@ async fn run(
             WorkloadError::Failed(Failure {
                 kind: FailureKind::OutOfFuel,
                 ..
-            }) => NeedsOperator(format!(
+            }) if false => NeedsOperator(format!(
                 "restoring the snapshot ran out of snapshot_fuel ({}), raise limits.snapshot_fuel",
                 spec.limits.snapshot_fuel
             ))
