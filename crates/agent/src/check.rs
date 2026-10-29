@@ -49,13 +49,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .await?
         .context("no such workload")?;
     let spec = WorkloadSpec::decode(&spec)?;
-    let bytes = felix
-        .cache_get(names::MODULES, &spec.module)
-        .await?
-        .with_context(|| format!("module {} is not in the modules cache", spec.module))?;
-    if module::hash(&bytes) != spec.module {
-        bail!("module {} does not match its hash", spec.module);
-    }
+    let bytes = module_bytes(felix, &spec.module).await?;
     let mut workload = runtime
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -108,6 +102,18 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
             .count(),
         findings,
     })
+}
+
+/// The module `hash` from the `modules` cache.
+pub(crate) async fn module_bytes(felix: &Felix, hash: &str) -> Result<Vec<u8>> {
+    let bytes = felix
+        .cache_get(names::MODULES, hash)
+        .await?
+        .with_context(|| format!("module {hash} is not in the modules cache"))?;
+    if module::hash(&bytes) != hash {
+        bail!("module {hash} does not match its hash");
+    }
+    Ok(bytes.to_vec())
 }
 
 /// Every key in the `workloads` cache. Felix has no call that lists a

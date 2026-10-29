@@ -266,6 +266,17 @@ impl Felix {
         }
     }
 
+    /// The first offset appended at or after `at_micros` (microseconds since
+    /// the Unix epoch), by the clock of the broker that led the shard. `None`
+    /// when no record is that recent.
+    pub async fn offset_for_time(&self, stream: &str, at_micros: u64) -> Result<Option<u64>> {
+        until_ready(|| {
+            self.client
+                .offset_for_time(&self.tenant, &self.namespace, stream, 0, at_micros)
+        })
+        .await
+    }
+
     /// Subscribes to the stream starting at input offset `from`.
     pub async fn subscribe_from(&self, stream: &str, from: u64) -> Result<Subscription> {
         self.client
