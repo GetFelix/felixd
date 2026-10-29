@@ -20,6 +20,32 @@ A node agent that runs programs across a cluster with
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
+## Install
+
+Each `v*` release has builds for Linux x86_64, Linux aarch64 and macOS aarch64
+(Apple silicon), a `SHA256SUMS` file and its Sigstore signature. Download the
+archive for your platform with those two files from the
+[releases page](https://github.com/GetFelix/felixd/releases), then check the
+signature, which proves the checksums came from this repository's release
+workflow, and the archive:
+
+```
+cosign verify-blob \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/GetFelix/felixd/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS   # shasum -a 256 -c on macOS
+tar -xzf felixd-<tag>-<target>.tar.gz
+```
+
+The builds are reproducible. The workflow builds each target twice from
+different directories and fails unless the archives match byte for byte, with
+a locked `Cargo.lock`, the pinned toolchain, `SOURCE_DATE_EPOCH` set to the
+commit time and build paths remapped. To check one yourself, check out the
+tag and run `scripts/release-build.sh <archive-name> out` with the same
+toolchain on the same platform, then compare the archive's hash.
+
 ## Try it
 
 You need Rust and a container runtime. The test stack starts one Felix broker
