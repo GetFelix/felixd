@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
-use felixd_core::output::{self, OutputHeader};
+use felixd_core::output::{self, OutputHeader, Record};
 use felixd_core::spec::WorkloadState;
 
 fn count(i: u64) -> Vec<u8> {
@@ -179,4 +179,95 @@ async fn a_node_frozen_before_recording_a_failure_does_not_fail_a_later_owners_w
         spec.failure
     );
     assert_uninterrupted(&t, &module, 5).await;
+}
+
+/// A node decides to fail the workload, confirms its lease with a renewal and
+/// is frozen right after, before the failure is written. Another node claims
+/// meanwhile and writes its claim record. The failure is a record on the
+/// output stream behind the stale node's claim, so it is refused, and the
+/// workload the other node now runs is not failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_frozen_after_confirming_a_failure_does_not_fail_a_later_owners_workload() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    let stale = t.start_agent_with_faults("fail-workload=1,freeze-before-failure-append=1");
+    eventually("the freeze", Duration::from_secs(60), || async {
+        stale.stopped().then_some(())
+    })
+    .await;
+    let next = t.start_agent();
+    let epoch = eventually("a new owner", Duration::from_secs(30), || async {
+        t.lease(ID)
+            .await
+            .filter(|(lease, _)| lease.owner == next.node_id && lease.epoch > 0)
+            .map(|(lease, _)| lease.epoch)
+    })
+    .await;
+    eventually("its claim record", Duration::from_secs(30), || async {
+        t.read_all(OUTPUT)
+            .await
+            .iter()
+            .any(|(_, r)| output::decode(r) == Ok(Record::Claim { epoch }))
+            .then_some(())
+    })
+    .await;
+    stale.resume();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let spec = t.spec().await;
+    assert_eq!(
+        spec.state,
+        WorkloadState::Running,
+        "the stale node failed it: {:?}",
+        spec.failure
+    );
+    assert_uninterrupted(&t, &module, 5).await;
+    assert!(
+        !t.read_all(OUTPUT)
+            .await
+            .iter()
+            .any(|(_, r)| matches!(output::decode(r), Ok(Record::Failure { .. }))),
+        "a failure record landed after the new owner's claim"
+    );
+}
+
+/// The output stream records a failure under the current spec, but the spec
+/// still says running, as after a node that crashed between the two writes.
+/// The next owner writes the failure into the spec instead of running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_record_fails_the_workload_on_the_next_claim() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    let version = t.spec_version().await;
+    t.publish_if(
+        OUTPUT,
+        vec![output::encode_failure(0, version, "a trap")],
+        0,
+    )
+    .await;
+    let _agent = t.start_agent();
+    assert_eq!(t.failure().await, "a trap");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(t.outputs(OUTPUT).await, vec![]);
+}
+
+/// A failure record from before the spec was written again belongs to an
+/// earlier run, and is passed over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resubmitted_workload_runs_past_an_earlier_failure_record() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    let version = t.spec_version().await;
+    t.publish_if(
+        OUTPUT,
+        vec![output::encode_failure(0, version, "a trap")],
+        0,
+    )
+    .await;
+    t.submit("counter", &[]).await;
+    let _agent = t.start_agent();
+    assert_uninterrupted(&t, &module, 3).await;
+    assert_eq!(t.spec().await.state, WorkloadState::Running);
 }

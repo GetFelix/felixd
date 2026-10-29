@@ -29,11 +29,14 @@
 (*   ReplayGuard     no snapshot while replaying already written outputs. *)
 (*   FoldOnEvents    the resume fold uses the last output's offset, not   *)
 (*                   the raw tail.                                        *)
+(*   FailRecord      a failure is a record on `.out`, appended with       *)
+(*                   publish_if, and the spec's `failed` follows from it.  *)
 (* Assumptions, each dropped in a twin:                                    *)
 (*   RecreateWhenWritten  `epochs` is recreated only while every live     *)
 (*                        epoch is on a record (design.md, Leases).        *)
 (*   FaultsInFailWindow   when FALSE, no clock fault falls between an     *)
 (*                        applied confirm and the failure write.          *)
+(*                        Only a twin without FailRecord needs it.        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -54,6 +57,7 @@ CONSTANTS
     LaterEpochWins,
     ReplayGuard,
     FoldOnEvents,
+    FailRecord,
     LocalFaults,       \* a holder may fail the workload on its own
     TimingFaults,      \* local deadlines pass and clock faults happen
     FaultsInFailWindow,
@@ -61,7 +65,7 @@ CONSTANTS
 
 ASSUME /\ NoNode \notin Nodes
        /\ \A b \in {ClaimMarker, EpochFloor, Confirmer, LaterEpochWins,
-                    ReplayGuard, FoldOnEvents, LocalFaults, TimingFaults,
+                    ReplayGuard, FoldOnEvents, FailRecord, LocalFaults, TimingFaults,
                     FaultsInFailWindow, RecreateWhenWritten} : b \in BOOLEAN
 
 \* Workload shapes for the configurations.
@@ -103,7 +107,8 @@ VARIABLES
     nd,         \* each node's state
     bud,        \* fault and bound counters
     started,    \* ghost: [e, at] once epoch e began, with the .out tail then
-    staleFail,  \* ghost: a failure was written by a node not holding the lease
+    staleFail,  \* ghost: a failure was written by a node not holding the lease,
+                \* or its record landed after a later owner began
     poisoned    \* ghost: some node found the streams impossible to resume
 
 vars == <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned>>
@@ -141,7 +146,12 @@ LastOf(s, kinds) ==
     IN IF ps = {} THEN 0 ELSE Max(ps)
 
 LastEpoch(s) ==
-    LET p == LastOf(s, {"out", "claim", "snap"}) IN IF p = 0 THEN 0 ELSE s[p].e
+    LET p == LastOf(s, {"out", "claim", "fail", "snap"}) IN IF p = 0 THEN 0 ELSE s[p].e
+
+\* Position of the last record on .out that is not a generation start.
+LastRec(s) == LastOf(s, {"out", "claim", "fail"})
+
+Failed(s) == \E j \in 1..Len(s) : s[j].k = "fail"
 
 MaxEpochOn(s) ==
     LET es == {s[p].e : p \in {q \in 1..Len(s) : s[q].k # "gen"}}
@@ -184,6 +194,11 @@ Poison(n) ==
 
 Superseded(n) ==
     nd' = [nd EXCEPT ![n].pc = "sup", ![n].await = NoMsg, ![n].rep = "none"]
+
+\* A failure record is on the stream: the workload has failed, and the node
+\* writes that into the spec instead of running.
+FoundFailure(n) ==
+    nd' = [nd EXCEPT ![n].pc = "derive", ![n].await = NoMsg, ![n].rep = "none"]
 
 Send(n, m, pc) ==
     /\ net' = net \cup {m}
@@ -236,11 +251,16 @@ PutLease(n) ==
             /\ UNCHANGED lease
     /\ UNCHANGED <<out, snap, net, ctr, spec, bud, ghosts>>
 
+\* With FailRecord, a failure record last before the expected tail ends the
+\* claim instead.
 Marker(n) ==
     /\ nd[n].pc = "marker" /\ nd[n].ok
     /\ InFlight(n) < MaxInflight
-    /\ Send(n, [n |-> n, s |-> "out", at |-> nd[n].kt,
-                recs |-> <<Rec("claim", nd[n].ep, nd[n].cid, 0, 0)>>], "mwait")
+    /\ LET p == LastRec(SubSeq(out, 1, Min2(nd[n].kt, Len(out))))
+       IN IF FailRecord /\ p > 0 /\ out[p].k = "fail"
+          THEN FoundFailure(n) /\ UNCHANGED net
+          ELSE Send(n, [n |-> n, s |-> "out", at |-> nd[n].kt,
+                        recs |-> <<Rec("claim", nd[n].ep, nd[n].cid, 0, 0)>>], "mwait")
     /\ UNCHANGED <<out, snap, lease, ctr, spec, bud, ghosts>>
 
 MarkerAck(n) ==
@@ -255,6 +275,8 @@ MarkerRetry(n) ==
     /\ LET found == NonGen(SubSeq(out, nd[n].kt + 1, Len(out)))
        IN IF \E j \in 1..Len(found) : found[j].e > nd[n].ep
           THEN Superseded(n)
+          ELSE IF FailRecord /\ Failed(found)
+          THEN FoundFailure(n)
           ELSE IF \E j \in 1..Len(found) : found[j].k = "claim" /\ found[j].e = nd[n].ep
           THEN nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out),
                                 ![n].await = NoMsg, ![n].rep = "none"]
@@ -269,9 +291,11 @@ MarkerRetry(n) ==
 \* the tail, and the superseded check on the last record of any kind.
 Probe(n) ==
     /\ nd[n].pc = "probe"
-    /\ LET p == LastOf(out, {"out", "claim"})
+    /\ LET p == LastRec(out)
        IN IF p > 0 /\ out[p].e > nd[n].ep
           THEN Superseded(n)
+          ELSE IF FailRecord /\ p > 0 /\ out[p].k = "fail"
+          THEN FoundFailure(n)
           ELSE nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out)]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -359,6 +383,7 @@ Reconcile(n) ==
             [] T = kt -> nd' = [clear EXCEPT ![n].pc = "osend"] /\ UNCHANGED poisoned
             [] LaterEpochWins /\ \E j \in 1..Len(found) : found[j].e > nd[n].ep ->
                     Superseded(n) /\ UNCHANGED poisoned
+            [] FailRecord /\ Failed(found) -> FoundFailure(n) /\ UNCHANGED poisoned
             [] \E j \in 1..cmp : outsF[j].i # b[j].i \/ outsF[j].x # b[j].x -> Poison(n)
             [] Len(outsF) > Len(b) ->
                     \* Behind: an earlier owner got further. Resume again.
@@ -452,8 +477,10 @@ ConfirmFail(n) ==
             /\ nd' = Left(n)
     /\ UNCHANGED <<out, snap, net, ctr, spec, bud, ghosts>>
 
-\* The spec write, guarded by the local fence, then the lease is released.
+\* Without FailRecord: the spec write, guarded by the local fence, then the
+\* lease is released.
 WriteFail(n) ==
+    /\ ~FailRecord
     /\ nd[n].pc = IF Confirmer THEN "confirmed" ELSE "failing"
     /\ nd[n].ok
     /\ IF spec = "running"
@@ -463,6 +490,41 @@ WriteFail(n) ==
     /\ lease' = IF Owns(n) THEN NoLease ELSE lease
     /\ nd' = Left(n)
     /\ UNCHANGED <<out, snap, net, ctr, bud, started, poisoned>>
+
+\* With FailRecord: the failure record at the tail just read, unless the last
+\* record there is from a later epoch or is already a failure.
+FailSend(n) ==
+    /\ FailRecord
+    /\ nd[n].pc = IF Confirmer THEN "confirmed" ELSE "failing"
+    /\ nd[n].ok
+    /\ InFlight(n) < MaxInflight
+    /\ LET p == LastRec(out)
+       IN IF p > 0 /\ out[p].e > nd[n].ep
+          THEN nd' = Left(n) /\ UNCHANGED net
+          ELSE IF p > 0 /\ out[p].k = "fail"
+          THEN FoundFailure(n) /\ UNCHANGED net
+          ELSE Send(n, [n |-> n, s |-> "out", at |-> Len(out),
+                        recs |-> <<Rec("fail", nd[n].ep, nd[n].cid, 0, 0)>>], "fwait")
+    /\ UNCHANGED <<out, snap, lease, ctr, spec, bud, ghosts>>
+
+FailAck(n) ==
+    /\ nd[n].pc = "fwait" /\ nd[n].rep = "ok"
+    /\ FoundFailure(n)
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
+
+\* Refused or unanswered: confirm again and read the tail again.
+FailRetry(n) ==
+    /\ nd[n].pc = "fwait" /\ nd[n].rep \in {"refused", "lost"}
+    /\ nd' = [nd EXCEPT ![n].pc = "failing", ![n].await = NoMsg, ![n].rep = "none"]
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
+
+\* The spec follows the record, so this write needs no fence.
+Derive(n) ==
+    /\ nd[n].pc = "derive"
+    /\ spec' = "failed"
+    /\ lease' = IF Owns(n) THEN NoLease ELSE lease
+    /\ nd' = Left(n)
+    /\ UNCHANGED <<out, snap, net, ctr, bud, ghosts>>
 
 -----------------------------------------------------------------------------
 (* The lease over time *)
@@ -524,8 +586,11 @@ Deliver(m) ==
           /\ nd' = IF nd[m.n].up /\ nd[m.n].await = m /\ nd[m.n].rep = "none"
                    THEN [nd EXCEPT ![m.n].rep = IF applied THEN "ok" ELSE "refused"]
                    ELSE nd
+          /\ staleFail' = \/ staleFail
+                          \/ /\ applied /\ m.s = "out" /\ m.recs[1].k = "fail"
+                             /\ \E x \in started : x.e > m.recs[1].e
     /\ net' = net \ {m}
-    /\ UNCHANGED <<lease, ctr, spec, bud, staleFail, poisoned>>
+    /\ UNCHANGED <<lease, ctr, spec, bud, poisoned>>
 
 \* The sender gives up waiting. The request may still land.
 Timeout(n) ==
@@ -582,6 +647,7 @@ NodeStep(n) ==
     \/ Step(n) \/ OSend(n) \/ OAck(n) \/ Reconcile(n)
     \/ Continue(n) \/ SnapSend(n) \/ SSend(n) \/ SAck(n) \/ SRefused(n) \/ SLost(n)
     \/ Sup(n) \/ ConfirmFail(n) \/ WriteFail(n)
+    \/ FailSend(n) \/ FailAck(n) \/ FailRetry(n) \/ Derive(n)
     \/ Renew(n) \/ StopLocal(n) \/ Restart(n)
 
 NodeFault(n) ==
@@ -627,7 +693,15 @@ NoInterleave ==
     \A st \in started : \A p \in 1..Len(out) :
         (out[p].k # "gen" /\ out[p].e < st.e) => p <= st.at
 
-NoStaleFailure == ~staleFail
+\* No stale node fails the workload. Without FailRecord: no node writes
+\* `failed` while the lease is not its own. With it: `failed` follows a
+\* failure record, that record landed before any later owner began, and
+\* nothing but a generation start lands after it.
+NoStaleFailure ==
+    /\ ~staleFail
+    /\ FailRecord =>
+         /\ spec = "failed" => Failed(out)
+         /\ \A p, q \in 1..Len(out) : (p < q /\ out[p].k = "fail") => out[q].k = "gen"
 
 NoPoison == ~poisoned
 

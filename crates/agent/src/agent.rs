@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held};
+use crate::output::{Recorded, record_failure};
 use crate::runner::{Modules, Outcome, run_workload};
 use crate::settings::Settings;
 
@@ -612,9 +613,24 @@ async fn run_held(
                 }
             }
         };
+        // The failure record's epoch. It is the later epoch found when epochs
+        // went backwards, so it stays above every record before it and below
+        // any claim taken after.
+        let mut at_epoch = epoch;
         let reason = match outcome {
             Outcome::Failed(message) => message,
             Outcome::Lost => return Ended::Lost,
+            Outcome::FailedOnStream {
+                spec_version,
+                reason,
+            } => {
+                tracing::error!(workload = %id, %reason, "the output stream records a failure");
+                return if write_failed(&node.felix, id, spec_version, &reason).await {
+                    Ended::Failed
+                } else {
+                    Ended::Lost
+                };
+            }
             Outcome::Superseded(found) => {
                 // A later owner means this lease is gone. If a renewal at the
                 // held version is still applied, epochs went backwards, which
@@ -624,6 +640,7 @@ async fn run_held(
                     tracing::warn!(workload = %id, "a later owner has taken over");
                     return Ended::Lost;
                 }
+                at_epoch = found;
                 format!(
                     "epoch {found} on the output stream is above this holder's {epoch} \
                      while it still holds the lease, so lease epochs went backwards"
@@ -631,7 +648,12 @@ async fn run_held(
             }
         };
         tracing::error!(workload = %id, %reason, "workload failed");
-        if mark_failed(&node.felix, id, &reason, &fence, &confirmer).await {
+        let failing = Failing {
+            spec,
+            message: &reason,
+            epoch: at_epoch,
+        };
+        if mark_failed(&node.felix, id, &failing, &fence, &confirmer).await {
             Ended::Failed
         } else {
             // Not recorded: claim again, fail again and retry.
@@ -665,21 +687,89 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// Records why the workload failed in its spec, with `cache_put_if` on the
-/// version read so a concurrent edit is not overwritten. Only a holder does
-/// this: right before each write it renews its lease through `confirmer`, and
-/// writes nothing if that renewal is refused, so a node that was frozen while
-/// another took over cannot fail the workload it now runs. Returns whether
-/// the failure was recorded.
+/// A failure to record: the spec that ran, why, and the failure record's epoch.
+struct Failing<'a> {
+    spec: &'a WorkloadSpec,
+    message: &'a str,
+    epoch: u64,
+}
+
+/// Records that the workload failed: a failure record on its output stream,
+/// then `failed` and the reason in its spec. Only a holder does this. Right
+/// before the record it renews its lease through `confirmer`, and gives up if
+/// that is refused. The record is what fences the failure: it is appended
+/// with `publish_if` behind the holder's claim, so a node that was frozen
+/// while another took over cannot fail the workload the other now runs, even
+/// if it is frozen after the renewal. Returns whether the failure was recorded.
 async fn mark_failed(
     felix: &Felix,
     id: &str,
-    message: &str,
+    failing: &Failing<'_>,
     fence: &Fence,
     confirmer: &Confirmer,
 ) -> bool {
-    let failure = message.lines().next().unwrap_or_default().to_owned();
+    let running = failing.spec;
+    let failure = failing
+        .message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
     while fence.holds() {
+        let attempt = async {
+            let Some(found) = felix.cache_get_versioned(names::WORKLOADS, id).await? else {
+                return Ok(Err(true));
+            };
+            let spec = WorkloadSpec::decode(&found.value)?;
+            if spec.state != WorkloadState::Running {
+                return Ok(Err(true));
+            }
+            if spec != *running {
+                // The task restarts under the new spec, which decides again.
+                return Ok(Err(false));
+            }
+            faults::before_failure_record().await;
+            if !confirmer.confirm().await || !fence.holds() {
+                tracing::warn!(workload = %id, "the lease is lost, not recording the failure");
+                return Ok(Err(false));
+            }
+            let recorded = record_failure(
+                felix,
+                &spec.output,
+                fence,
+                failing.epoch,
+                found.version,
+                &failure,
+            )
+            .await?;
+            anyhow::Ok(Ok(recorded))
+        };
+        match attempt.await {
+            Ok(Ok(Recorded::Failed {
+                spec_version,
+                reason,
+            })) => return write_failed(felix, id, spec_version, &reason).await,
+            Ok(Ok(Recorded::Superseded(epoch))) => {
+                tracing::warn!(workload = %id, epoch, "a later owner has written, not failing");
+                return false;
+            }
+            Ok(Err(done)) => return done,
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not record the failure, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+    }
+    false
+}
+
+/// Writes the failure the output stream records under `version` into the
+/// spec, with `cache_put_if` on that version so a later edit is not
+/// overwritten. It needs no lease, because the record has decided. Returns
+/// `false` if the spec was written again since, still running: the record
+/// is then not about the spec that runs now.
+async fn write_failed(felix: &Felix, id: &str, version: u64, reason: &str) -> bool {
+    loop {
         let attempt = async {
             let Some(found) = felix.cache_get_versioned(names::WORKLOADS, id).await? else {
                 return Ok(Some(true));
@@ -688,37 +778,37 @@ async fn mark_failed(
             if spec.state != WorkloadState::Running {
                 return Ok(Some(true));
             }
-            spec.state = WorkloadState::Failed;
-            spec.failure = Some(failure.clone());
-            faults::before_failure_record().await;
-            if !confirmer.confirm().await || !fence.holds() {
-                return Ok(None);
+            if found.version > version {
+                return Ok(Some(false));
             }
+            // An older version is a stale read; read again.
+            anyhow::ensure!(
+                found.version == version,
+                "read spec version {} below {version}",
+                found.version
+            );
+            spec.state = WorkloadState::Failed;
+            spec.failure = Some(reason.to_owned());
             let put = felix
                 .cache_put_if(
                     names::WORKLOADS,
                     id,
                     Bytes::from(spec.encode()),
                     None,
-                    CacheCondition::Version(found.version),
+                    CacheCondition::Version(version),
                 )
                 .await?;
-            anyhow::Ok(Some(put.applied))
+            anyhow::Ok(put.applied.then_some(true))
         };
         match attempt.await {
-            Ok(Some(true)) => return true,
-            Ok(Some(false)) => {}
-            Ok(None) => {
-                tracing::warn!(workload = %id, "the lease is lost, not recording the failure");
-                return false;
-            }
+            Ok(Some(done)) => return done,
+            Ok(None) => {}
             Err(error) => {
-                tracing::warn!(workload = %id, %error, "could not record the failure, retrying");
+                tracing::warn!(workload = %id, %error, "could not write the failure, retrying");
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
     }
-    false
 }
 
 #[cfg(test)]

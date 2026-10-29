@@ -79,7 +79,9 @@ again for the same id restarts the workload under the new spec, but a new
 module or input is refused once the workload has written anything; use a new
 id for new code. A workload that traps, runs
 out of fuel or finds its streams in a state it can't resume from is marked
-`failed` in its spec, with the reason.
+`failed` in its spec, with the reason. The failure is first a record on its
+output stream, fenced by epoch like an output, so a node that was frozen
+while another took over can't fail it.
 
 ## What we are trying to achieve
 

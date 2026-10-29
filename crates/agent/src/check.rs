@@ -72,7 +72,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let skip_claims = names::is_output_stream(&spec.input);
     let mut expected = Vec::new();
     for input in felix.read_range(&spec.input, 0, input_tail).await? {
-        if skip_claims && output::is_claim(&input.payload) {
+        if skip_claims && output::is_marker(&input.payload) {
             continue;
         }
         // A step that fails ends the workload there, on every node.
@@ -104,7 +104,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         output: spec.output.clone(),
         records: records
             .iter()
-            .filter(|r| !output::is_claim(&r.payload))
+            .filter(|r| !output::is_marker(&r.payload))
             .count(),
         findings,
     })

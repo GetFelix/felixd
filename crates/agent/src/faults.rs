@@ -18,9 +18,13 @@
 //! - `freeze-before-claim=N`: stop the process with `SIGSTOP` just before its
 //!   Nth claim append, after the lease was checked. It carries on at `SIGCONT`.
 //! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
-//!   workload's spec and writing the failure into it, as a slow broker would.
+//!   workload's spec and confirming the lease to record the failure, as a slow
+//!   broker would.
 //! - `freeze-before-failure-record=1`: stop the process with `SIGSTOP` at the
 //!   same point. It carries on at `SIGCONT`.
+//! - `freeze-before-failure-append=1`: stop the process with `SIGSTOP` after
+//!   the lease was confirmed and the output tail read, just before the failure
+//!   record is appended. It carries on at `SIGCONT`.
 //! - `fail-workload=1`: fail every workload this node claims, as a trap would,
 //!   but only on this node.
 //! - `drop-watch=MS`: when the key `drop-watch` is written to the workloads
@@ -140,6 +144,12 @@ pub(crate) async fn before_failure_record() {
         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
     if fault("freeze-before-failure-record") == Some(1) {
+        freeze();
+    }
+}
+
+pub(crate) fn before_failure_append() {
+    if fault("freeze-before-failure-append") == Some(1) {
         freeze();
     }
 }

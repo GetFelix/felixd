@@ -132,6 +132,9 @@ pub(crate) enum Outcome {
     /// A record at this epoch was found on the output stream, above the
     /// owner's own: a later owner has written.
     Superseded(u64),
+    /// The output stream records that the workload failed under this spec
+    /// version, which is the one this node runs or a later one.
+    FailedOnStream { spec_version: u64, reason: String },
 }
 
 /// The runner found it no longer holds the lease.
@@ -145,6 +148,21 @@ impl fmt::Display for LostLease {
 }
 
 impl std::error::Error for LostLease {}
+
+/// The output stream holds a failure record for the spec the runner runs.
+#[derive(Debug)]
+pub(crate) struct FailedOnStream {
+    pub(crate) spec_version: u64,
+    pub(crate) reason: String,
+}
+
+impl fmt::Display for FailedOnStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the output stream records a failure: {}", self.reason)
+    }
+}
+
+impl std::error::Error for FailedOnStream {}
 
 /// The output stream holds a record from a later epoch than the runner's.
 #[derive(Debug)]
@@ -202,6 +220,12 @@ pub(crate) async fn run_workload(
     if let Some(Superseded(epoch)) = error.downcast_ref::<Superseded>() {
         return Ok(Outcome::Superseded(*epoch));
     }
+    if let Some(found) = error.downcast_ref::<FailedOnStream>() {
+        return Ok(Outcome::FailedOnStream {
+            spec_version: found.spec_version,
+            reason: found.reason.clone(),
+        });
+    }
     if error.is::<Poison>() {
         Ok(Outcome::Failed(format!("{error:#}")))
     } else if error.is::<LostLease>() {
@@ -219,9 +243,10 @@ async fn run(
     fence: &Fence,
     claim_from: &mut Option<u64>,
 ) -> Result<Infallible> {
+    let spec_version = spec_version(felix, id, spec).await?;
     // The claim comes first, so that from here on a stale owner's append is
     // refused, whether or not this owner ever writes an output.
-    let log = OutputLog::claim(felix, &spec.output, fence, claim_from).await?;
+    let log = OutputLog::claim(felix, &spec.output, fence, spec_version, claim_from).await?;
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
@@ -345,7 +370,7 @@ struct Steps<'a> {
 
 impl Steps<'_> {
     async fn step(&mut self, offset: u64, input: Bytes) -> Result<()> {
-        if self.skip_claims && output::is_claim(&input) {
+        if self.skip_claims && output::is_marker(&input) {
             return Ok(());
         }
         let outputs = blocking(&self.modules.calls, &mut self.workload, move |w| {
@@ -447,6 +472,18 @@ impl Steps<'_> {
     }
 }
 
+/// The cache version of `spec`, which a failure record names. A different
+/// spec in the cache means this task is about to be restarted under it.
+async fn spec_version(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Result<u64> {
+    let found = felix
+        .cache_get_versioned(names::WORKLOADS, id)
+        .await?
+        .context("the spec is gone")?;
+    let current = WorkloadSpec::decode(&found.value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    anyhow::ensure!(current == *spec, "the spec has changed");
+    Ok(found.version)
+}
+
 /// The last output record below `tail` and where it is, passing over claims.
 async fn last_output(
     felix: &Felix,
@@ -491,7 +528,7 @@ impl Written<'_> {
             self.page.extend(
                 records
                     .into_iter()
-                    .filter(|r| !output::is_claim(&r.payload)),
+                    .filter(|r| !output::is_marker(&r.payload)),
             );
             self.next = after;
         }

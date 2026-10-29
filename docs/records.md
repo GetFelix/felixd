@@ -11,7 +11,7 @@ On `wl.<id>.out`. The version is 3, followed by a kind byte.
 | Bytes | Field |
 |---|---|
 | 1 | version, 3 |
-| 1 | kind: 0 for an output, 1 for a claim |
+| 1 | kind: 0 for an output, 1 for a claim, 2 for a failure |
 | 8 | the writer's lease epoch |
 
 An output continues with:
@@ -23,7 +23,16 @@ An output continues with:
 | rest | the payload the workload returned |
 
 A claim ends after the epoch. A new owner appends one before it resumes, so a stale owner's next
-`publish_if` is refused. Readers pass over claims: the resume fold, the skipped-output checks,
+`publish_if` is refused. A failure continues with:
+
+| Bytes | Field |
+|---|---|
+| 8 | the `workloads` cache version of the spec the workload failed under |
+| rest | the reason, UTF-8 |
+
+A holder appends it when the workload fails, before it writes `failed` into the spec. It is the
+last record of that run: an owner of the same spec version that finds it writes `failed` into the
+spec and stops. Readers pass over claims and failures: the resume fold, the skipped-output checks,
 `felixd check`, and a workload whose input is another workload's output stream.
 
 A version 2 record is an output with no kind byte: version, input offset (8), index (4), epoch (8),
