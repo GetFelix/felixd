@@ -8,7 +8,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
+use common::{Agent, ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
 use felixd_core::names;
 use felixd_core::output::{self, OutputHeader, Record};
 use felixd_core::snapshot::{self, SnapshotHeader};
@@ -212,4 +212,102 @@ async fn check_passes_on_a_stream_with_claims() {
     let (ok, report) = t.check(&["--id", ID, "--complete"]);
     assert!(ok, "{report}");
     assert!(report.contains("wl.wl.out: 5 records, ok"), "{report}");
+}
+
+/// Starts `node_id` with a long TTL and `faults`, waits for it to freeze and
+/// ends its lease early, so that once it wakes its own lease check still
+/// passes and only what the streams hold can stop it. Returns the node and
+/// the epoch it held.
+async fn freeze_holder(t: &common::TestFelix, node_id: &str, faults: &str) -> (Agent, u64) {
+    let node = t.start_node_with_ttl(node_id, faults, Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        node.stopped().then_some(())
+    })
+    .await;
+    let (held, version) = t.lease(ID).await.expect("the frozen node's lease");
+    assert_eq!(held.owner, node_id);
+    t.felix
+        .cache_delete_if(names::LEASES, ID, version)
+        .await
+        .unwrap();
+    (node, held.epoch)
+}
+
+/// Two holders are frozen in turn, each past a takeover: the first before
+/// its fifth append, the second, which took over from it, before its third.
+/// A third node takes over from both. When the two wake together, each
+/// finds a later claim at its tail and writes nothing more.
+#[tokio::test(flavor = "multi_thread")]
+async fn holders_frozen_across_several_takeovers_write_nothing_after_them() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    let (mut first, first_epoch) = freeze_holder(&t, "first", "freeze-before-append=5").await;
+    let (mut second, second_epoch) = freeze_holder(&t, "second", "freeze-before-append=3").await;
+    assert!(second_epoch > first_epoch);
+
+    let last = t.start_agent();
+    eventually(
+        "the last owner's outputs",
+        Duration::from_secs(60),
+        || async { (t.outputs(OUTPUT).await.len() >= 10).then_some(()) },
+    )
+    .await;
+    first.resume();
+    second.resume();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    t.publish_all(INPUT, (10..15).map(count)).await;
+    assert_uninterrupted(&t, &module, 15).await;
+
+    let found = records(&t).await;
+    let outputs = |epoch| found.iter().filter(|&&(e, c)| !c && e == epoch).count();
+    assert_eq!(outputs(first_epoch), 4, "{found:?}");
+    assert_eq!(outputs(second_epoch), 2, "{found:?}");
+    let (held, _) = t.lease(ID).await.expect("a live lease");
+    assert_eq!(held.owner, last.node_id);
+    assert!(held.epoch > second_epoch);
+    assert!(first.alive() && second.alive(), "a frozen node exited");
+}
+
+/// A holder is frozen with a snapshot taken and not yet written, and the
+/// next owner writes none of its own. The stale snapshot lands after the
+/// takeover, which is safe: it is of a state the stream agrees with. A third
+/// owner restores it and resumes past the second owner's outputs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_frozen_past_a_takeover_is_safe_to_resume_from() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "5"]).await;
+    t.publish_all(INPUT, (0..8).map(count)).await;
+    let (frozen, stale) = freeze_holder(&t, "holder", "freeze-before-snapshot-write=1").await;
+    // On a cluster a generation-start record can take offset 0, so count
+    // records rather than read the tail.
+    assert!(t.read_all(SNAPSHOTS).await.is_empty());
+
+    let mut next = t.start_agent_with_faults("skip-snapshots=100");
+    eventually(
+        "the next owner's outputs",
+        Duration::from_secs(60),
+        || async { (t.outputs(OUTPUT).await.len() >= 8).then_some(()) },
+    )
+    .await;
+    frozen.resume();
+    eventually("the stale snapshot", Duration::from_secs(30), || async {
+        (!t.read_all(SNAPSHOTS).await.is_empty()).then_some(())
+    })
+    .await;
+    let snapshots = t.read_all(SNAPSHOTS).await;
+    let (taken, _) = snapshot::decode(&snapshots[0].1).unwrap();
+    assert_eq!(taken.epoch, stale);
+
+    next.kill();
+    let _last = t.start_agent();
+    t.publish_all(INPUT, (8..12).map(count)).await;
+    assert_uninterrupted(&t, &module, 12).await;
+    let epochs: Vec<u64> = t
+        .outputs(OUTPUT)
+        .await
+        .iter()
+        .map(|(_, r)| output::decode(r).unwrap().epoch())
+        .collect();
+    assert!(epochs[5..].iter().all(|&e| e > stale), "{epochs:?}");
 }

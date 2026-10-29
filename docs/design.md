@@ -241,7 +241,8 @@ OSDI 2021; Peter et al., "Arrakis", OSDI 2014 (abstract only).
 - **Failover:** kill a node mid-run, and each of its workloads continues on
   another node. Its output stream has no gaps and no duplicates.
 - **Fencing:** freeze a node (`SIGSTOP`) past its lease and resume it. Its
-  stale workloads write nothing.
+  stale workloads write no output. A snapshot it took before the freeze can
+  still land, and is of a correct state (see Resume).
 - **Replay:** rebuild any workload at any input offset or time, and print its
   state.
 - **Pipelines:** one workload's output is another's input, and failover in the
@@ -613,6 +614,14 @@ on the output stream would stop this one at its next output anyway. The
 snapshot stream has no claim of its own, so a stale owner can still append a
 snapshot after the new owner's claim until the new owner writes one. That
 snapshot is of a correct state, by determinism.
+
+`tests/fence.rs` freezes nodes past their leases: a holder of an idle
+workload, one frozen before its claim, two frozen in turn across two
+takeovers, and one frozen with a snapshot taken, whose snapshot lands after
+the takeover and which a third owner restores and resumes past. Most have a
+long TTL and their lease ended early, so their own lease check passes when
+they wake and only the streams can stop them. The cluster CI job runs them
+on three brokers.
 
 ## Checking output
 
