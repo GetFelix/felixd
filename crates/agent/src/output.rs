@@ -28,29 +28,34 @@ impl<'a> OutputLog<'a> {
         }
     }
 
-    /// Claims the stream for this owner: appends a claim record at its tail
-    /// with `publish_if`, so any later append of a lower epoch is refused, and
-    /// returns a log at the tail after it. The claim is skipped when the last
-    /// record is already this epoch's.
+    /// Claims the stream for this owner: appends a claim record with
+    /// `publish_if`, so any later append of a lower epoch is refused, and
+    /// returns a log at the tail after it.
     ///
-    /// A refused claim means someone else appended. The records past our tail
-    /// decide: a later epoch means this owner is superseded, its own claim
-    /// means an earlier attempt landed, and anything else is claimed after.
+    /// `from` is the tail read with the epoch floor when the lease was
+    /// claimed. Writing there rather than at a fresh tail means that anything
+    /// appended since, such as a later owner's claim, refuses this one. A
+    /// refused claim reads the records past the tail: a later epoch means this
+    /// owner is superseded, its own claim means an earlier attempt landed, and
+    /// anything else is claimed after. Once the claim is on the stream `from`
+    /// is cleared, and later resumes only check that no later owner wrote.
     pub(crate) async fn claim(
         felix: &'a Felix,
         stream: &'a str,
         fence: &'a Fence,
+        from: &mut Option<u64>,
     ) -> Result<OutputLog<'a>> {
-        let mut log = OutputLog::new(felix, stream, fence, felix.tail(stream).await?);
-        if let Some(last) = felix.last_record(stream, log.tail).await? {
-            let epoch = log.decode(&last.payload, last.offset)?.epoch();
-            if epoch > fence.epoch() {
-                return Err(Superseded(epoch).into());
+        let Some(start) = *from else {
+            let log = OutputLog::new(felix, stream, fence, felix.tail(stream).await?);
+            if let Some(last) = felix.last_record(stream, log.tail).await? {
+                let epoch = log.decode(&last.payload, last.offset)?.epoch();
+                if epoch > fence.epoch() {
+                    return Err(Superseded(epoch).into());
+                }
             }
-            if epoch == fence.epoch() {
-                return Ok(log);
-            }
-        }
+            return Ok(log);
+        };
+        let mut log = OutputLog::new(felix, stream, fence, start);
         let mut failures = 0;
         loop {
             if !fence.holds() {
@@ -63,6 +68,7 @@ impl<'a> OutputLog<'a> {
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == log.tail => {
                     log.tail += 1;
+                    *from = None;
                     return Ok(log);
                 }
                 Ok(ConditionalWrite::Written { offset }) => {
@@ -101,6 +107,7 @@ impl<'a> OutputLog<'a> {
             }
             log.tail = seen_tail;
             if ours {
+                *from = None;
                 return Ok(log);
             }
         }

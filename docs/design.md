@@ -371,10 +371,12 @@ expects to be the tail. `publish_if` is a compare-and-set on the whole shard
 `.out` stream has one shard.
 
 The claim fences the stream. Before a new owner reads anything to resume
-from, it appends a claim record carrying its epoch at the tail. It skips this
-when the last record is already from its own epoch, as when it resumes again
-after an error. A refused claim means someone else appended first, and the
-records past the tail decide: one from a later epoch means this owner is
+from, it appends a claim record carrying its epoch at the output tail it read
+along with the epoch floor when it took the lease, not at a fresh tail. A
+claimer frozen between taking its epoch and writing the claim would otherwise
+land its claim after a later owner's. Once the claim is on the stream, a
+resume after an error does not claim again. A refused claim means someone
+else appended first, and the records past that tail decide: one from a later epoch means this owner is
 superseded and stops, its own claim means an earlier attempt whose answer was
 lost landed, and anything else is claimed after. Then:
 

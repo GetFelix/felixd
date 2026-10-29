@@ -193,8 +193,9 @@ pub(crate) async fn run_workload(
     id: &str,
     spec: &WorkloadSpec,
     fence: &Fence,
+    claim_from: &mut Option<u64>,
 ) -> Result<Outcome> {
-    let error = match run(felix, runtime, id, spec, fence).await {
+    let error = match run(felix, runtime, id, spec, fence, claim_from).await {
         Ok(never) => match never {},
         Err(error) => error,
     };
@@ -216,10 +217,11 @@ async fn run(
     id: &str,
     spec: &WorkloadSpec,
     fence: &Fence,
+    claim_from: &mut Option<u64>,
 ) -> Result<Infallible> {
     // The claim comes first, so that from here on a stale owner's append is
     // refused, whether or not this owner ever writes an output.
-    let log = OutputLog::claim(felix, &spec.output, fence).await?;
+    let log = OutputLog::claim(felix, &spec.output, fence, claim_from).await?;
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(

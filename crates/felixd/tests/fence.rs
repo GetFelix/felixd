@@ -9,6 +9,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
+use felixd_core::names;
 use felixd_core::output::{self, OutputHeader, Record};
 use felixd_core::snapshot::{self, SnapshotHeader};
 use felixd_core::spec::{Limits, WorkloadState};
@@ -18,13 +19,20 @@ fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
 }
 
-/// What the counter writes for input `i`, stamped with `epoch`.
-fn counted(i: u64, epoch: u64) -> Vec<u8> {
+/// The offsets of the records on the input stream. On a cluster a
+/// generation-start record can take offset 0.
+async fn input_offsets(t: &common::TestFelix) -> Vec<u64> {
+    t.read_all(INPUT).await.iter().map(|(o, _)| *o).collect()
+}
+
+/// What the counter writes for the `i`th input, at offset `at[i]`, stamped
+/// with `epoch`.
+fn counted(at: &[u64], i: usize, epoch: u64) -> Vec<u8> {
     let header = OutputHeader {
-        input_offset: i,
+        input_offset: at[i],
         index: 0,
     };
-    output::encode(header, epoch, &count(i + 1))
+    output::encode(header, epoch, &count(i as u64 + 1))
 }
 
 /// The epoch of every record on the output stream, and whether it is a claim.
@@ -55,7 +63,8 @@ async fn a_claim_alone_fences_a_frozen_holder_of_an_idle_workload() {
     .await;
     let (stale, _) = t.lease(ID).await.expect("the frozen node's lease");
 
-    let _next = t.start_agent_with_faults("drop-input=19");
+    let last_input = input_offsets(&t).await[19];
+    let _next = t.start_agent_with_faults(&format!("drop-input={last_input}"));
     let (owner, _) = eventually(
         "the next owner's claim",
         Duration::from_secs(60),
@@ -97,6 +106,50 @@ async fn a_claim_alone_fences_a_frozen_holder_of_an_idle_workload() {
     assert_eq!(t.spec().await.state, WorkloadState::Running);
 }
 
+/// A holder is frozen after taking its epoch and before writing its claim,
+/// and its lease ends. The next owner claims and writes. When the first
+/// wakes, its claim goes to the tail it read with its epoch floor, so it is
+/// refused, it finds the later claim and stops without writing anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holder_frozen_before_its_claim_never_claims_after_a_later_owner() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    let mut frozen =
+        t.start_node_with_ttl("holder", "freeze-before-claim=1", Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        frozen.stopped().then_some(())
+    })
+    .await;
+    let (stale, version) = t.lease(ID).await.expect("the frozen node's lease");
+    assert!(stale.epoch > 0, "the frozen node took no epoch");
+    // Its lease ends early, and its long TTL keeps its own renewal from
+    // noticing before it tries to claim.
+    t.felix
+        .cache_delete_if(names::LEASES, ID, version)
+        .await
+        .unwrap();
+
+    let _next = t.start_agent();
+    eventually(
+        "the next owner's output",
+        Duration::from_secs(60),
+        || async { (t.outputs(OUTPUT).await.len() >= 10).then_some(()) },
+    )
+    .await;
+    frozen.resume();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    t.publish_all(INPUT, (10..15).map(count)).await;
+    assert_uninterrupted(&t, &module, 15).await;
+    let found = records(&t).await;
+    assert!(
+        found.iter().all(|&(e, _)| e != stale.epoch),
+        "the frozen node wrote at epoch {}: {found:?}",
+        stale.epoch
+    );
+    assert!(frozen.alive(), "the frozen node exited");
+}
+
 /// Several earlier owners left claims between their outputs and after them.
 /// A new owner restores the snapshot, skips and checks the outputs past it
 /// with the claims passed over, and carries on.
@@ -105,6 +158,7 @@ async fn a_resume_passes_over_claims_between_outputs() {
     let Some(t) = test_felix().await else { return };
     let module = t.submit("counter", &["--snapshot-every", "1000"]).await;
     t.publish_all(INPUT, (0..10).map(count)).await;
+    let at = input_offsets(&t).await;
     let mut workload = Runtime::new()
         .unwrap()
         .load(&module, Limits::default())
@@ -115,15 +169,17 @@ async fn a_resume_passes_over_claims_between_outputs() {
     let state = workload.snapshot().unwrap();
 
     let mut stream = vec![output::encode_claim(1)];
-    stream.extend((0..5).map(|i| counted(i, 1)));
+    stream.extend((0..5).map(|i| counted(&at, i, 1)));
     stream.extend([output::encode_claim(2), output::encode_claim(3)]);
-    stream.extend((5..7).map(|i| counted(i, 3)));
+    stream.extend((5..7).map(|i| counted(&at, i, 3)));
     stream.push(output::encode_claim(4));
     t.publish_all(OUTPUT, stream).await;
-    // Covers inputs 0 to 3, whose outputs sit at offsets 1 to 4.
+    // Covers the first four inputs, whose outputs are the four records after
+    // the first claim.
+    let fourth = t.read_all(OUTPUT).await[4].0;
     let header = SnapshotHeader {
-        input_offset: 3,
-        output_tail: 5,
+        input_offset: at[3],
+        output_tail: fourth + 1,
     };
     t.publish_all(SNAPSHOTS, [snapshot::encode(header, 1, &state)])
         .await;
@@ -146,10 +202,11 @@ async fn check_passes_on_a_stream_with_claims() {
     let Some(t) = test_felix().await else { return };
     t.submit("counter", &[]).await;
     t.publish_all(INPUT, (0..5).map(count)).await;
+    let at = input_offsets(&t).await;
     let mut stream = vec![output::encode_claim(1)];
-    stream.extend((0..3).map(|i| counted(i, 1)));
+    stream.extend((0..3).map(|i| counted(&at, i, 1)));
     stream.push(output::encode_claim(2));
-    stream.extend((3..5).map(|i| counted(i, 2)));
+    stream.extend((3..5).map(|i| counted(&at, i, 2)));
     stream.push(output::encode_claim(3));
     t.publish_all(OUTPUT, stream).await;
     let (ok, report) = t.check(&["--id", ID, "--complete"]);
