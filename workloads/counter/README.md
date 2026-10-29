@@ -22,9 +22,15 @@ Run these from the repository root. The workloads are a separate cargo workspace
 cargo build --manifest-path workloads/Cargo.toml --release --target wasm32-unknown-unknown --package counter
 ```
 
-That produces a core module at `wasm32-unknown-unknown/release/counter.wasm` in the target directory.
-`felixd run` takes a component, so the module must be wrapped with `wit-component`, as
-`felixd_testkit::workload("counter")` does. The tests call that function and need no manual step.
+That produces a core module at `workloads/target/wasm32-unknown-unknown/release/counter.wasm`, unless
+`CARGO_TARGET_DIR` is set. `felixd run` takes a component, so wrap the module with
+[wasm-tools](https://github.com/bytecodealliance/wasm-tools) (`cargo install wasm-tools`):
+
+```
+wasm-tools component new workloads/target/wasm32-unknown-unknown/release/counter.wasm -o counter.wasm
+```
+
+The tests do the same through `felixd_testkit::workload("counter")`, so they need no manual step.
 
 ## Tests that use it
 

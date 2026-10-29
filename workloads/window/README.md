@@ -28,9 +28,15 @@ Run these from the repository root. The workloads are a separate cargo workspace
 cargo build --manifest-path workloads/Cargo.toml --release --target wasm32-unknown-unknown --package window
 ```
 
-That produces a core module at `wasm32-unknown-unknown/release/window.wasm` in the target directory.
-`felixd run` takes a component, so the module must be wrapped with `wit-component`, as
-`felixd_testkit::workload("window")` does. The tests call that function and need no manual step.
+That produces a core module at `workloads/target/wasm32-unknown-unknown/release/window.wasm`, unless
+`CARGO_TARGET_DIR` is set. `felixd run` takes a component, so wrap the module with
+[wasm-tools](https://github.com/bytecodealliance/wasm-tools) (`cargo install wasm-tools`):
+
+```
+wasm-tools component new workloads/target/wasm32-unknown-unknown/release/window.wasm -o window.wasm
+```
+
+The tests do the same through `felixd_testkit::workload("window")`, so they need no manual step.
 
 ## Tests that use it
 

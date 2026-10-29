@@ -38,9 +38,15 @@ Run from the repository root. `rust-toolchain.toml` installs the `wasm32-unknown
 cargo build --manifest-path workloads/Cargo.toml --release --target wasm32-unknown-unknown --package faulty
 ```
 
-That produces a core module at `wasm32-unknown-unknown/release/faulty.wasm` in the target directory. The
-host needs a component, which `felixd_testkit::workload("faulty")` builds and wraps with
-`wit-component`. The tests call it, so there is no manual step.
+That produces a core module at `workloads/target/wasm32-unknown-unknown/release/faulty.wasm`, unless
+`CARGO_TARGET_DIR` is set. `felixd run` takes a component, so wrap the module with
+[wasm-tools](https://github.com/bytecodealliance/wasm-tools) (`cargo install wasm-tools`):
+
+```
+wasm-tools component new workloads/target/wasm32-unknown-unknown/release/faulty.wasm -o faulty.wasm
+```
+
+The tests do the same through `felixd_testkit::workload("faulty")`, so they need no manual step.
 
 ## Tests that use it
 
