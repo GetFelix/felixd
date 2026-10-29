@@ -732,8 +732,10 @@ dependencies = [
  "felixd-core",
  "felixd-runtime",
  "felixd-testkit",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

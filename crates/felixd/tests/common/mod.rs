@@ -53,7 +53,7 @@ pub(crate) async fn test_felix() -> Option<TestFelix> {
         .unwrap()
         .as_nanos();
     let settings = Settings {
-        brokers: vec![brokers.parse().unwrap()],
+        brokers: brokers.split(',').map(|b| b.parse().unwrap()).collect(),
         server_name: "localhost".into(),
         tenant: var("FELIX_AUTH_TENANT"),
         namespace: format!("t{nanos:x}"),
@@ -145,12 +145,14 @@ impl TestFelix {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{workload}.wasm"));
         std::fs::write(&path, &module).unwrap();
+        let replicas = replication_factor();
         let kind = StreamKind {
-            replication_factor: 1,
+            replication_factor: replicas,
         };
         ensure_stream(&self.settings, INPUT, kind).await.unwrap();
         let status = self
             .felixd(&["run", "--id", id, "--input", INPUT])
+            .args(["--replication-factor", &replicas.to_string()])
             .args(args)
             .arg(&path)
             .status()
@@ -219,6 +221,16 @@ impl TestFelix {
 }
 
 /// The lease TTL test agents run with.
+/// Streams get three replicas against the three-broker cluster
+/// (`FELIXD_CLUSTER` is set), one otherwise.
+pub(crate) fn replication_factor() -> u32 {
+    if std::env::var_os("FELIXD_CLUSTER").is_some() {
+        3
+    } else {
+        1
+    }
+}
+
 pub(crate) const LEASE_TTL: Duration = Duration::from_secs(2);
 
 static NEXT_NODE: AtomicU32 = AtomicU32::new(0);

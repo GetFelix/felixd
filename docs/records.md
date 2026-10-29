@@ -48,6 +48,10 @@ inputs and drops the outputs, after `resume::check_skipped` has compared each wi
 place. `Resume::replaying` says when the owner is still before the last written input, which is when
 it must not snapshot.
 
+It takes the last output record's offset as well as the stream's next offset,
+because Felix's generation-start records take offsets that hold no output.
+Whether outputs exist past the snapshot is decided by that offset.
+
 It refuses a stream that is shorter than the snapshot expects, or whose newest output belongs to an
 input the snapshot already covers, because a correct owner never produces either. Any of these
 errors fails the workload.

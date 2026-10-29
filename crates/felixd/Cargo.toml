@@ -22,6 +22,8 @@ felixd-agent = { workspace = true, features = ["faults"] }
 bytes = { workspace = true }
 felixd-testkit = { workspace = true }
 felix-client = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use felix_client::{ConditionalWrite, StreamRecord};
 use felixd_core::output::{self, OutputHeader};
-use felixd_core::resume::{self, Found, Resume};
+use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, SnapshotHeader};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{MAX_WRITE_BYTES, module, names};
@@ -244,15 +244,18 @@ async fn run(
         None => None,
     };
     let output_tail = felix.tail(&spec.output).await?;
+    // Reads return events only, so this is the last output even when a new
+    // shard leader's generation-start record sits at the tail.
     let last_output = match felix.last_record(&spec.output, output_tail).await? {
-        Some(record) => Some(
+        Some(record) => Some((
+            record.offset,
             output::decode(&record.payload)
                 .map_err(|e| poison(format!("output at {}:{}: {e}", spec.output, record.offset)))?
                 .0,
-        ),
+        )),
         None => None,
     };
-    if let Some(last) = last_output.filter(|last| last.epoch > fence.epoch()) {
+    if let Some((_, last)) = last_output.filter(|(_, last)| last.epoch > fence.epoch()) {
         tracing::info!(
             workload = id,
             epoch = last.epoch,
@@ -260,7 +263,10 @@ async fn run(
         );
         return Err(Superseded(last.epoch).into());
     }
-    let last_output = last_output.map(|last| last.header);
+    let last_output = last_output.map(|(offset, last)| LastOutput {
+        offset,
+        header: last.header,
+    });
     let resume = resume::fold(Found {
         snapshot: snapshot.as_ref().map(|(header, _)| *header),
         last_output,

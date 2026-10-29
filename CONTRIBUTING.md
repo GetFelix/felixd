@@ -28,6 +28,21 @@ crash the agent at chosen points with `FELIXD_FAULTS`, described in `crates/agen
 tests' build of the binary reads it: the `faults` feature is turned on by a dev-dependency, and
 `scripts/check-no-faults.sh` (run in `unit`) fails if a normal build still carries it.
 
+The `cluster` job runs `tests/cluster.rs` against three brokers with three-replica `Quorum` streams, and
+kills the broker that leads a workload's output stream. To run it locally:
+
+```
+docker compose -f tests/felix/cluster.yaml up -d --wait broker-1 broker-2 broker-3
+docker compose -f tests/felix/cluster.yaml run --rm felix-fleet
+tests/felix/credentials.sh /tmp/felix cluster
+export FELIX_BROKERS=127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300 \
+  FELIX_OPERATOR_TOKEN_FILE=/tmp/felix/operator.jwt FELIXD_CLUSTER=$PWD/tests/felix/cluster.yaml
+cargo test -p felixd --test cluster
+```
+
+plus the other `FELIX_*` variables the README lists. With Podman, set `COMPOSE` and `FELIXD_COMPOSE` to
+`podman compose`. The test leaves the killed broker running again at the end.
+
 ## Comments and docs
 
 - Only comment where the code is unclear, such as a constraint the code can't show.
