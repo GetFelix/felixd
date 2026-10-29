@@ -257,3 +257,17 @@ fn a_skipped_output_must_match_the_record_in_its_place() {
         Err(ResumeError::Diverged { offset: 9 })
     );
 }
+
+#[test]
+fn claims_after_the_outputs_a_snapshot_covers_skip_nothing() {
+    // Offsets 40 and 41 hold claims, the snapshot was taken after the first.
+    let resume = fold(Found {
+        snapshot: Some(snap(99, 41)),
+        last_output: Some(at(39, 95, 0)),
+        output_tail: 42,
+    })
+    .unwrap();
+    assert_eq!(resume.next_input, 100);
+    assert_eq!(resume.output_from, 41);
+    assert!(!resume.already_written(100, 0));
+}

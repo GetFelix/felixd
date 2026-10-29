@@ -194,6 +194,13 @@ impl TestFelix {
             .collect()
     }
 
+    /// The output records on `stream`, without claims.
+    pub(crate) async fn outputs(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
+        let mut records = self.read_all(stream).await;
+        records.retain(|(_, r)| !output::is_claim(r));
+        records
+    }
+
     pub(crate) async fn spec(&self) -> WorkloadSpec {
         let value = self.felix.cache_get(names::WORKLOADS, ID).await.unwrap();
         WorkloadSpec::decode(&value.expect("the workload has a spec")).unwrap()
@@ -368,27 +375,27 @@ pub(crate) async fn assert_uninterrupted_on(
     assert_eq!(inputs_found.len() as u64, inputs);
     let want = expected(module, &inputs_found);
     eventually("all output", Duration::from_secs(60), || async {
-        let got = t.read_all(output).await;
-        (got.len() >= want.len()).then_some(())
+        (t.outputs(output).await.len() >= want.len()).then_some(())
     })
     .await;
     // Give a duplicate time to show up before comparing.
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let got: Vec<Vec<u8>> = t.read_all(output).await.into_iter().map(|r| r.1).collect();
+    let records: Vec<Vec<u8>> = t.read_all(output).await.into_iter().map(|r| r.1).collect();
+    let epochs: Vec<u64> = records
+        .iter()
+        .map(|r| output::decode(r).unwrap().epoch())
+        .collect();
+    assert!(
+        epochs.is_sorted(),
+        "two owners took turns on {output}: {epochs:?}"
+    );
+    let got: Vec<&Vec<u8>> = records.iter().filter(|r| !output::is_claim(r)).collect();
     assert_eq!(got.len(), want.len(), "output length of {output}");
     assert!(
         got.iter()
             .zip(&want)
             .all(|(g, w)| output::same_output(g, w)),
         "{output} differs from an uninterrupted run"
-    );
-    let epochs: Vec<u64> = got
-        .iter()
-        .map(|r| output::decode(r).unwrap().0.epoch)
-        .collect();
-    assert!(
-        epochs.is_sorted(),
-        "two owners took turns on {output}: {epochs:?}"
     );
     let id = output
         .strip_prefix("wl.")

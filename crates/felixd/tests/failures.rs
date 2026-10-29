@@ -70,7 +70,7 @@ async fn a_different_record_at_the_tail_fails_the_workload() {
     t.publish_all(INPUT, (0..5).map(count)).await;
     let _agent = t.start_agent();
     eventually("the first outputs", Duration::from_secs(30), || async {
-        (t.felix.tail(OUTPUT).await.unwrap() >= 5).then_some(())
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
     })
     .await;
     // Something else writes where input 5's output goes.

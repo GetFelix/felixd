@@ -20,7 +20,7 @@ async fn a_running_workload_restarts_under_a_changed_spec() {
     let _agent = t.start_agent();
     t.publish_all(INPUT, (0..5).map(count)).await;
     eventually("output", Duration::from_secs(60), || async {
-        (t.felix.tail(OUTPUT).await.unwrap() >= 5).then_some(())
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
     })
     .await;
     // Too little fuel for any step: only a task that took the new spec fails.
@@ -43,7 +43,7 @@ async fn a_new_module_is_refused_once_the_workload_has_output() {
     let _agent = t.start_agent();
     t.publish_all(INPUT, (0..3).map(count)).await;
     eventually("output", Duration::from_secs(60), || async {
-        (t.felix.tail(OUTPUT).await.unwrap() >= 3).then_some(())
+        (t.outputs(OUTPUT).await.len() >= 3).then_some(())
     })
     .await;
     let before = t.spec().await.module;

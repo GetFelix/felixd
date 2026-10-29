@@ -15,6 +15,8 @@
 //! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
 //!   its Nth output append, after the lease was checked. It carries on when
 //!   the test sends `SIGCONT`, as a node out of a long GC pause would.
+//! - `freeze-before-claim=N`: stop the process with `SIGSTOP` just before its
+//!   Nth claim append, after the lease was checked. It carries on at `SIGCONT`.
 //! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
 //!   workload's spec and writing the failure into it, as a slow broker would.
 //! - `freeze-before-failure-record=1`: stop the process with `SIGSTOP` at the
@@ -41,6 +43,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static APPENDS: AtomicU64 = AtomicU64::new(0);
 static SKIPPED: AtomicU64 = AtomicU64::new(0);
+static CLAIMS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(not(feature = "faults"))]
 fn fault(_name: &str) -> Option<u64> {
@@ -113,6 +116,13 @@ pub(crate) fn drop_input(offset: u64) -> bool {
 pub(crate) fn before_append() {
     let n = APPENDS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-append") == Some(n) {
+        freeze();
+    }
+}
+
+pub(crate) fn before_claim() {
+    let n = CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-claim") == Some(n) {
         freeze();
     }
 }

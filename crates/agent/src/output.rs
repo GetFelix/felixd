@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use felix_client::ConditionalWrite;
-use felixd_core::output::{self, Reconciled};
+use felixd_core::output::{self, Reconciled, Record};
 
 use crate::faults;
 use crate::felix::Felix;
@@ -26,6 +26,96 @@ impl<'a> OutputLog<'a> {
             fence,
             tail,
         }
+    }
+
+    /// Claims the stream for this owner: appends a claim record with
+    /// `publish_if`, so any later append of a lower epoch is refused, and
+    /// returns a log at the tail after it.
+    ///
+    /// `from` is the tail read with the epoch floor when the lease was
+    /// claimed. Writing there rather than at a fresh tail means that anything
+    /// appended since, such as a later owner's claim, refuses this one. A
+    /// refused claim reads the records past the tail: a later epoch means this
+    /// owner is superseded, its own claim means an earlier attempt landed, and
+    /// anything else is claimed after. Once the claim is on the stream `from`
+    /// is cleared, and later resumes only check that no later owner wrote.
+    pub(crate) async fn claim(
+        felix: &'a Felix,
+        stream: &'a str,
+        fence: &'a Fence,
+        from: &mut Option<u64>,
+    ) -> Result<OutputLog<'a>> {
+        let Some(start) = *from else {
+            let log = OutputLog::new(felix, stream, fence, felix.tail(stream).await?);
+            if let Some(last) = felix.last_record(stream, log.tail).await? {
+                let epoch = log.decode(&last.payload, last.offset)?.epoch();
+                if epoch > fence.epoch() {
+                    return Err(Superseded(epoch).into());
+                }
+            }
+            return Ok(log);
+        };
+        let mut log = OutputLog::new(felix, stream, fence, start);
+        let mut failures = 0;
+        loop {
+            if !fence.holds() {
+                return Err(LostLease.into());
+            }
+            faults::before_claim();
+            let sent = felix
+                .publish_if(stream, vec![output::encode_claim(fence.epoch())], log.tail)
+                .await;
+            let seen_tail = match sent {
+                Ok(ConditionalWrite::Written { offset }) if offset == log.tail => {
+                    log.tail += 1;
+                    *from = None;
+                    return Ok(log);
+                }
+                Ok(ConditionalWrite::Written { offset }) => {
+                    return Err(poison(format!(
+                        "{stream} wrote a claim at {offset}, expected {}",
+                        log.tail
+                    )));
+                }
+                Ok(ConditionalWrite::Refused { tail }) => tail,
+                Err(error) => {
+                    failures += 1;
+                    if failures >= MAX_ATTEMPTS {
+                        return Err(error.context(format!("claim {stream}")));
+                    }
+                    tracing::warn!(stream, %error, "claim failed, checking the tail");
+                    felix.tail(stream).await?
+                }
+            };
+            if seen_tail < log.tail {
+                return Err(poison(format!(
+                    "{stream} ends at {seen_tail}, before the {} already read",
+                    log.tail
+                )));
+            }
+            let mut ours = false;
+            for record in felix.read_range(stream, log.tail, seen_tail).await? {
+                let found = log.decode(&record.payload, record.offset)?;
+                if found.epoch() > fence.epoch() {
+                    tracing::info!(stream, epoch = found.epoch(), "a later owner claimed first");
+                    return Err(Superseded(found.epoch()).into());
+                }
+                ours |= found
+                    == Record::Claim {
+                        epoch: fence.epoch(),
+                    };
+            }
+            log.tail = seen_tail;
+            if ours {
+                *from = None;
+                return Ok(log);
+            }
+        }
+    }
+
+    fn decode<'r>(&self, record: &'r [u8], offset: u64) -> Result<Record<'r>> {
+        output::decode(record)
+            .map_err(|e| poison(format!("output at {}:{offset}: {e}", self.stream)))
     }
 
     /// The stream's next offset, as far as this owner knows.

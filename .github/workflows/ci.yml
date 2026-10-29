@@ -72,7 +72,7 @@ jobs:
           docker compose -f tests/felix/cluster.yaml up -d --wait broker-1 broker-2 broker-3
           docker compose -f tests/felix/cluster.yaml run --rm felix-fleet
           tests/felix/credentials.sh /tmp/felix cluster
-      - run: FELIXD_CLUSTER=$PWD/$FELIXD_CLUSTER cargo test -p felixd --test cluster --locked -- --test-threads=1
+      - run: FELIXD_CLUSTER=$PWD/$FELIXD_CLUSTER cargo test -p felixd --test cluster --test fence --locked -- --test-threads=1
       - name: Felix logs
         if: failure()
         run: docker compose -f tests/felix/cluster.yaml logs --no-color

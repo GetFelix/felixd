@@ -7,6 +7,8 @@ pub enum DecodeError {
     Truncated { need: usize, got: usize },
     #[error("unknown record version {0}")]
     UnknownVersion(u8),
+    #[error("unknown record kind {0}")]
+    UnknownKind(u8),
     #[error("invalid JSON value: {0}")]
     Json(String),
 }

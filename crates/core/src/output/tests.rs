@@ -7,14 +7,15 @@ fn h(input_offset: u64, index: u32) -> OutputHeader {
     }
 }
 
+fn out(header: OutputHeader, epoch: u64, payload: &[u8]) -> Record<'_> {
+    Record::Output(Written { header, epoch }, payload)
+}
+
 #[test]
 fn a_record_round_trips() {
     let header = h(0x0102_0304_0506_0708, 9);
     let record = encode(header, 42, b"payload");
-    assert_eq!(
-        decode(&record),
-        Ok((Written { header, epoch: 42 }, &b"payload"[..]))
-    );
+    assert_eq!(decode(&record), Ok(out(header, 42, b"payload")));
 }
 
 #[test]
@@ -23,25 +24,50 @@ fn the_layout_is_fixed() {
     assert_eq!(
         record,
         [
-            2, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 5, b'x'
+            3, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 2, b'x'
         ]
     );
+    assert_eq!(encode_claim(5), [3, 1, 0, 0, 0, 0, 0, 0, 0, 5]);
+}
+
+#[test]
+fn a_claim_round_trips_and_holds_no_output() {
+    let record = encode_claim(9);
+    assert_eq!(decode(&record), Ok(Record::Claim { epoch: 9 }));
+    assert_eq!(decode(&record).unwrap().epoch(), 9);
+    assert_eq!(decode(&record).unwrap().output(), None);
+    assert!(is_claim(&record));
+    assert!(!is_claim(&encode(h(1, 0), 9, b"")));
+    assert!(!same_output(&record, &record));
+}
+
+#[test]
+fn a_version_2_record_still_reads() {
+    let record = [
+        2, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 5, b'x',
+    ];
+    assert_eq!(decode(&record), Ok(out(h(7, 2), 5, b"x")));
 }
 
 #[test]
 fn an_empty_payload_is_allowed() {
     let header = h(1, 0);
-    assert_eq!(
-        decode(&encode(header, 1, b"")),
-        Ok((Written { header, epoch: 1 }, &b""[..]))
-    );
+    assert_eq!(decode(&encode(header, 1, b"")), Ok(out(header, 1, b"")));
 }
 
 #[test]
 fn a_short_record_is_refused() {
     assert_eq!(
         decode(&[]),
-        Err(DecodeError::Truncated { need: 21, got: 0 })
+        Err(DecodeError::Truncated { need: 10, got: 0 })
+    );
+    assert_eq!(
+        decode(&[3, 0, 0]),
+        Err(DecodeError::Truncated { need: 22, got: 3 })
+    );
+    assert_eq!(
+        decode(&[3, 1, 0]),
+        Err(DecodeError::Truncated { need: 10, got: 3 })
     );
     assert_eq!(
         decode(&[2, 0, 0]),
@@ -50,10 +76,13 @@ fn a_short_record_is_refused() {
 }
 
 #[test]
-fn an_unknown_version_is_refused() {
+fn an_unknown_version_or_kind_is_refused() {
     let mut record = encode(h(1, 0), 1, b"");
-    record[0] = 1;
-    assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(1)));
+    record[0] = 4;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(4)));
+    record[0] = 3;
+    record[1] = 2;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(2)));
 }
 
 #[test]
@@ -135,4 +164,25 @@ fn different_records_are_a_divergence() {
     let theirs = batch(3, &[11]);
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Diverged);
     assert_eq!(reconcile(7, &ours, &[b"junk"]), Reconciled::Diverged);
+}
+
+#[test]
+fn a_later_claim_stops_this_owner() {
+    let ours = batch(3, &[10]);
+    let theirs = [encode_claim(7)];
+    assert_eq!(
+        reconcile(3, &ours, &refs(&theirs)),
+        Reconciled::Superseded { epoch: 7 }
+    );
+}
+
+#[test]
+fn earlier_claims_are_passed_over() {
+    let ours = batch(7, &[10, 11]);
+    let mut theirs = vec![encode_claim(2)];
+    theirs.extend(batch(3, &[10]));
+    theirs.push(encode_claim(3));
+    assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(1));
+    let theirs = [encode_claim(7)];
+    assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(0));
 }

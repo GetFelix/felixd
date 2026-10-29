@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use felix_client::CacheWatchItem;
 use felixd_core::check::{self, Expected, Finding};
-use felixd_core::output::OutputHeader;
+use felixd_core::output::{self, OutputHeader};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
@@ -17,7 +17,7 @@ use crate::settings::Settings;
 pub struct Report {
     pub workload: String,
     pub output: String,
-    /// Output records on the stream.
+    /// Output records on the stream, claims not counted.
     pub records: usize,
     pub findings: Vec<Finding>,
 }
@@ -69,8 +69,12 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let output_tail = felix.tail(&spec.output).await?;
     let records = felix.read_range(&spec.output, 0, output_tail).await?;
     let input_tail = felix.tail(&spec.input).await?;
+    let skip_claims = names::is_output_stream(&spec.input);
     let mut expected = Vec::new();
     for input in felix.read_range(&spec.input, 0, input_tail).await? {
+        if skip_claims && output::is_claim(&input.payload) {
+            continue;
+        }
         // A step that fails ends the workload there, on every node.
         let Ok(outputs) = workload.step(&input.payload) else {
             break;
@@ -98,7 +102,10 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     Ok(Report {
         workload: id.to_owned(),
         output: spec.output.clone(),
-        records: records.len(),
+        records: records
+            .iter()
+            .filter(|r| !output::is_claim(&r.payload))
+            .count(),
         findings,
     })
 }

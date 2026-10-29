@@ -104,8 +104,9 @@ The hard parts, besides determinism at the effect boundary:
   never coordinate. Programs that span shards need a recorded merge order
   (#25).
 - **Secrets on the record.** A replicated history of everything includes
-  every secret that passed through it, so records need encryption, and
-  history needs redaction.
+  every secret that passed through it. Secrets stay out of the log
+  ([Credentials](#credentials)), and records that are sensitive anyway need
+  encryption and redaction.
 
 ### Lessons from Plan 9
 
@@ -116,37 +117,61 @@ what to avoid. It's discussed in
 What to do, as Plan 9 did:
 
 - **One small protocol for everything.** Every resource is reached the same
-  way. For us that's Felix's wire protocol, and possibly 9P at the edge so
-  Linux tools can browse the namespace.
+  way. For us that's Felix's wire protocol. A read-only 9P or FUSE view for
+  Linux tools is a later idea, kept off the data path (#78).
 - **Names, not addresses.** A program names its inputs and outputs and doesn't
   know which machine serves them. That's what lets a workload move.
 - **Per-program views of the namespace.** Isolation comes from what a program
   can see, backed by grants on its token.
 - **History you can browse.** Plan 9's dump file system showed each past day.
-  The log shows any past offset.
+  The log shows any past offset, and [history stays readable](#history-without-recomputation)
+  without rerunning old code.
+- **Programs never hold keys.** Plan 9's factotum ran authentication for
+  programs. Here [credentials](#credentials) stay with executors and never
+  enter the log.
+- **Content addressing.** Venti stored blocks by the hash of their contents.
+  Modules and snapshot chunks share [one such store](#content-addressed-storage).
 
 What not to do, where Plan 9 went wrong:
 
 - **Don't ask people to leave everything behind.** Plan 9 ran little existing
-  software and lost to Unix being good enough. felixd runs beside Linux, and
-  native programs have a place on the path.
+  software and lost to Unix being good enough. felixd runs beside an ordinary
+  host OS, and the [native tier](#native-programs-and-the-bootstrap-boundary)
+  runs existing programs unmodified.
 - **Don't be distributed without being fault tolerant.** A dead Plan 9 file
-  server hung every mount of it. Here, a workload's state lives in the log,
-  not on its server.
+  server hung every mount of it, and a lost root server meant a reboot. Here,
+  a workload's state lives in the log, not on its server, and a node that
+  loses Felix [stops and says so](#native-programs-and-the-bootstrap-boundary).
+- **Don't make a remote effect look like a local call.** 9P made a remote read
+  look like a local one, so a lost server had nowhere to show up but as a hang.
+  [Effects](#effects) are requests with typed outcomes, and "unknown" is one of
+  them.
 - **Don't let interfaces become untyped strings.** Plan 9's `ctl` files each
-  invented their own text commands. Records here have schemas and negotiated
-  versions.
+  invented their own text commands and errors were strings. Records here have
+  schemas and negotiated versions, and [errors have classes](#system-records-and-errors).
 - **Don't hide latency behind a familiar interface.** 9P's request-reply
   style suffered over slow links. Every recorded effect costs a round trip
-  through the log, and that cost gets measured from the start.
+  through the log, so effects never block and that cost gets measured from
+  the start.
 - **Don't make a program's view of the world hard to see.** Per-process
   namespaces made "which `/net` is this?" a debugging question. A workload's
-  bindings are on the record and shown by `ps` and replay.
+  bindings [name the stream incarnation](#names-and-incarnations) it reads,
+  are on the record, and are shown by `ps` and replay.
 - **Don't keep everything forever by accident.** Venti never forgot anything.
   Retention, compaction and redaction are designed in.
+- **Don't fix one protocol version for good.** 9P forked into 9P2000.u and
+  9P2000.L, and 9front had to replace Plan 9's DES tickets in place. Record
+  formats, effect kinds and authentication are negotiated, as Felix's wire
+  protocol is.
 - **Don't make the system all-or-nothing.** Plan 9's ideas that survived (UTF-8,
   `/proc`, 9P in Linux, QEMU and WSL) could be adopted one at a time. Each part
   of felixd should be useful on its own.
+
+Sources: Pike, Thompson and others, "Plan 9 from Bell Labs" (1995); Pike, TUHS
+mailing list, 2023-01-31; Raymond, *The Art of Unix Programming*, ch. 20;
+Guardiola, Cox and Van Hensbergen, "Persistent 9P Sessions for Plan 9" (2006);
+Van Hensbergen and Minnich, "Grave Robbers from Outer Space" (2005); the 9front
+dp9ik design notes. Each decision below cites its own.
 
 ## What felixd has to demonstrate
 
@@ -249,10 +274,13 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
+Claim records on another workload's `.out` are not inputs: the owner and
+`felixd check` pass over them, so only outputs reach `step`.
 
 Each output record carries a small header: the input offset that produced it,
 its index among that step's outputs, and the lease epoch of the owner that
-wrote it. Each snapshot carries the input offset it covers and the output tail
+wrote it. The output stream also holds claim records, one per takeover, which
+carry only the new owner's epoch. Each snapshot carries the input offset it covers and the output tail
 at that point.
 
 `felixd run` creates the workload's streams through the control plane's REST
@@ -362,23 +390,39 @@ without touching the lease code.
 
 ## Exactly-once output
 
-The owner appends a step's outputs as one batch with `publish_if`, at the
-offset it expects to be the output stream's tail. `publish_if` is a
-compare-and-set on the whole shard (`crates/sdk/felix-client/src/client/commit.rs:162-181`
-in Felix), and every `.out` stream has one shard and one writer at a time, so:
+Every write to the output stream is a `publish_if` at the offset the writer
+expects to be the tail. `publish_if` is a compare-and-set on the whole shard
+(`crates/sdk/felix-client/src/client/commit.rs:162-181` in Felix), and every
+`.out` stream has one shard.
 
-- If a stale owner wakes up and writes, the write is refused as soon as the
-  new owner has appended anything. The records it finds at its expected tail
-  carry a later epoch, so it stops without writing anything more.
-- If the stale owner writes first, the new owner's write is refused, and it
-  rereads the tail. Because the workload is deterministic, the stale owner
-  wrote exactly what the new owner would have, so the new owner skips past it.
-  If the stale owner got further than the new owner's batch, the new owner
-  resumes from the streams again.
+The claim fences the stream. Before a new owner reads anything to resume
+from, it appends a claim record carrying its epoch at the output tail it read
+along with the epoch floor when it took the lease, not at a fresh tail. A
+claimer frozen between taking its epoch and writing the claim would otherwise
+land its claim after a later owner's. Once the claim is on the stream, a
+resume after an error does not claim again. A refused claim means someone
+else appended first, and the records past that tail decide: one from a later epoch means this owner is
+superseded and stops, its own claim means an earlier attempt whose answer was
+lost landed, and anything else is claimed after. Then:
 
-Either way each input offset's outputs appear once, in order, and the epochs
-on the stream never decrease: once a later owner has written, no earlier one
-writes again. Without the epoch, a stale owner that finds the new owner's
+- If a stale owner wakes up and writes, the write is refused, because the
+  claim moved the tail past what the stale owner expects. The records it finds
+  at its expected tail include the claim, from a later epoch, so it stops
+  without writing anything more. This holds when the new owner has written no
+  output, for example because its input is idle.
+- If the stale owner writes before the claim lands, the claim is refused and
+  lands after it. The new owner then resumes past those outputs like any
+  others, and because the workload is deterministic they are what it would
+  have written.
+
+The safety argument has two layers. The fence alone guarantees that nothing
+from a lower epoch lands after a claim, so the epochs on the stream never
+decrease and two owners never take turns. Determinism adds that what a stale
+owner wrote before the claim equals what the new owner would have written.
+Anything recorded that is not a deterministic function of the input, such as
+a merge order (#58) or an effect (#27), may rely only on the first.
+
+Each input offset's outputs appear once, in order. Without the epoch, a stale owner that finds the new owner's
 identical records would skip them and write after them, and the two would take
 turns on the stream. A new owner that finds a later epoch already on the
 output stream when it resumes stops too. A lost answer to
@@ -395,11 +439,12 @@ not wrongly.
 
 A new owner:
 
-1. Reads the latest record on `wl.<id>.snap` and calls `restore`. With no
+1. Appends its claim to `wl.<id>.out`, as described above.
+2. Reads the latest record on `wl.<id>.snap` and calls `restore`. With no
    snapshot it starts from the workload's initial state at input offset 0.
-2. Reads the last output record. It names the input offset `k` that
-   produced it.
-3. Subscribes to the input with `subscribe_from(snapshot offset + 1)`. For
+3. Reads the last output record, passing over claims. It names the input
+   offset `k` that produced it.
+4. Subscribes to the input with `subscribe_from(snapshot offset + 1)`. For
    inputs up to `k` it runs `step` and drops the outputs, which are already on
    the stream, after checking each against the record in its place. From
    `k + 1` on it writes them.
@@ -451,8 +496,11 @@ snapshot from a later epoch means this owner is superseded and stops; ones
 from its own epoch or earlier are a stale owner's that landed first, which
 determinism makes correct, so it writes after them. A new owner that finds a
 snapshot from an epoch above its own stops at once, as it does for an output
-record, rather than ignoring it: a later owner exists, and the output fence
-would stop this one at its first write anyway.
+record, rather than ignoring it: a later owner exists, and that owner's claim
+on the output stream would stop this one at its next output anyway. The
+snapshot stream has no claim of its own, so a stale owner can still append a
+snapshot after the new owner's claim until the new owner writes one. That
+snapshot is of a correct state, by determinism.
 
 ## Checking output
 
@@ -464,7 +512,8 @@ replayed output. It reports:
 - a gap: a replayed output missing from the stream while a later one is there;
 - a duplicate: a second record for the same input offset and index;
 - a record out of order: one for an output before one already on the stream;
-- an epoch regression: a record whose epoch is below an earlier record's;
+- an epoch regression: a record, output or claim, whose epoch is below an
+  earlier record's;
 - a record that differs from the replay, or that the replay did not produce,
   or that does not decode;
 - a snapshot whose output tail does not split the output stream at its input
@@ -472,7 +521,9 @@ replayed output. It reports:
   X, and every record from it on an output of a later input. A resume from
   such a snapshot would skip or repeat outputs.
 
-With `--complete` it also reports outputs missing from the end of the stream.
+Claims are not outputs, so they are matched to nothing; only their epochs
+are checked. With `--complete` it also reports outputs missing from the end of
+the stream.
 Without it those are not a finding, since a running workload may not have
 caught up. The snapshot stream is read first, then the output stream, then
 the input, so every output a snapshot counts is on the stream read and every
@@ -519,8 +570,8 @@ grants.
 | Viewer (`ps`, `replay`, `check`) | Read everything, write nothing |
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
-but a compromised node could write garbage. Per-workload grants are a later
-question.
+but a compromised node could write garbage. Per-lease tokens close that
+([Credentials](#credentials)).
 
 ## Retention
 
@@ -534,7 +585,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 |---|---|---|
 | 0 | One node, one workload | A counter workload runs against a local Felix; killing and restarting felixd resumes at the right offset with no repeated output |
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
-| 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing; a fault-injection test runs this in CI |
+| 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
 | 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
@@ -560,7 +611,7 @@ Anything Felix doesn't do yet that felixd needs gets an issue labelled
 ## Determinism
 
 A workload must produce the same outputs on any node, after any history of
-failovers. Four rules hold that:
+failovers. Three rules hold that:
 
 - **Snapshot points are a function of input offsets**, never of when a node
   happened to start. After a snapshot point, execution always continues from a
@@ -633,9 +684,202 @@ Agents still claim through the lease, so the scheduler decides where work runs,
 never whether output is correct. First claim wins stays as the fallback when an
 assignment is missing or stale. A scheduler outside felixd is not planned.
 
+## Effects
+
+A workload reaches the outside world by asking, never by calling. These rules
+settle #27 and are tracked in #71:
+
+- **An effect is a request written as an output, and its response is an
+  input.** There are no blocking host calls inside `step`. The response comes
+  back on the workload's response stream and enters the fold through the
+  recorded merge order (#58), so replay reads the recorded response and never
+  performs the effect again.
+- **The effect id is the output header**: workload, input offset, output index
+  and epoch. It is unique and deterministic, so executors pass it on as the
+  idempotency key.
+- **Every response has a typed outcome**: `ok`, `error` with a code,
+  `timeout`, or `unknown` when the executor was lost after it may have acted.
+  The workload decides what `unknown` means for it. The runtime never guesses.
+- **Executors check epochs.** An executor refuses a request whose epoch is below
+  the highest it has seen for that workload. That only holds if a claim fences
+  the workload's streams before the new owner runs anything, so effects wait
+  for that fence.
+- **Guarantees are per effect kind**, and the kind's WIT type states which one:
+  idempotent (the target dedupes on the effect id), fenced (the target refuses
+  a lower epoch), at-most-once or at-least-once. Nothing promises "exactly
+  once" with a target that doesn't help.
+- **WASI only as a shim inside the guest.** A ported program that makes WASI
+  calls links a guest-side layer that turns each call into a request and
+  suspends the step until the response arrives. When WASI's async support is
+  stable, the shim uses it rather than a hand-made blocking bridge.
+- A workload may have many requests outstanding at once, and executors
+  advertise the effect kinds and versions they serve, so a node never claims a
+  workload whose effects nobody can execute. Per-effect latency is a metric
+  from the first version.
+
+Plan 9 made a remote file look like a local one, and most of its clients did
+not plan for a lost server: programs had to be restarted. Octopus replaced 9P
+with Op because 9P took too many round trips for interactive use at WAN
+latency.
+
+Sources: Waldo, Wyant, Wollrath and Kendall, "A Note on Distributed Computing"
+(1994); Ballesteros et al., Octopus Op protocol, `O/0intro`; Guardiola, Cox and
+Van Hensbergen, "Persistent 9P Sessions for Plan 9" (2006).
+
+## Names and incarnations
+
+A name is resolved once, when a spec is written, and the result is recorded
+(#72):
+
+- A spec stores each input stream's name and the Felix incarnation it resolved
+  to. A stream deleted and created again under the same name is a different
+  stream. A node refuses to resume a workload whose input's incarnation has
+  changed and records it as needing an operator.
+- The output stream is derived from the workload id (`wl.<id>.out`), so the
+  spec's `output` field goes away.
+- Every spec change that can affect results (module, inputs, limits,
+  determinism ABI) is a versioned record that takes effect at a stated input
+  offset. Spec history is kept as those records, not as the latest cache
+  value, so `check` and replay judge each output under the spec that applied.
+  `felixd ps` shows the bindings.
+
+Plan 9 resolved a name at every `open`, so a rebind silently changed what a
+program read. Felix fixed the same class of bug for forwards in #1324.
+
+Sources: Pike, Presotto, Thompson, Trickey and Winterbottom, "The Use of Name
+Spaces in Plan 9" (1993); Pike, "Lexical File Names in Plan 9" (2000).
+
+## System records and errors
+
+Payloads stay opaque bytes. The system's own records do not (#73):
+
+- Specs, leases, failures, effect requests and effect responses are versioned
+  typed records, defined once in WIT with the workload contract and generated
+  into `core`. Today's JSON cache values and the free-text `failure` field are
+  replaced.
+- Every error has a class: **transient** (retried while the lease is held),
+  **needs operator** (a missing module, an input past retention, a changed
+  incarnation) or **poison** (an input the workload deterministically fails on).
+  The [trap classes](#determinism) map onto these. The text is detail, never
+  what a program compares.
+- A workload stuck on a transient error past a bound releases its lease and is
+  recorded `degraded` with its class and reason, so it is visible instead of
+  retrying silently on one node.
+- A divergence record carries the node, its determinism ABI, the input offset,
+  the snapshot it started from, and the digests of both the expected and the
+  actual output, so `felixd replay` can reproduce it.
+- Metrics and traces use OpenTelemetry: input lag, last output offset, epoch,
+  takeovers, replay time and per-effect latency per workload.
+
+Plan 9's `ctl` files each had their own text commands and `errstr` returned a
+string that callers matched by text. Linux sysfs had to impose one value per
+file to keep the same idea readable.
+
+Sources: Plan 9 `errstr(2)`; Linux `Documentation/filesystems/sysfs.rst`.
+
+## Credentials
+
+Tracked in #74.
+
+- **Secrets never enter the log.** A workload names a credential in an effect
+  request; the executor resolves the name through a credential agent on its
+  own node and runs the authentication itself. Response records exclude
+  credentials by construction.
+- **Tokens are per lease.** A claim gets a short-lived token scoped to that
+  workload's streams and epoch, so a node can write only the outputs it holds.
+  This closes the v0 grant that lets any node write any output, and needs
+  scoped token minting from Felix.
+- **Workload identity in the SPIFFE style.** Nodes and workloads have
+  identities that executors and grants check, issued by the cluster rather than
+  configured by hand. Authentication stays negotiable, so a weak scheme can be
+  replaced without a flag day.
+
+Plan 9's factotum held each user's keys and ran authentication protocols on
+behalf of programs, so programs never saw secrets. Its original DES tickets
+later had to be swapped out in place.
+
+Sources: Cox, Grosse, Pike, Presotto and Quinlan, "Security in Plan 9" (2002);
+the 9front dp9ik design notes and `authsrv(6)`; the SPIFFE specification.
+
+## Native programs and the bootstrap boundary
+
+Deterministic Wasm is not the only tier (#75). Programs that can't be made
+deterministic run as **supervised native processes** beside Wasm workloads.
+They fail over through the same lease and fence, but felixd makes no replay
+promise for them: a new owner restarts the program, or restores a checkpoint
+where the host supports one, and their I/O is recorded at the stream boundary.
+The first native goal is running an unmodified existing program, such as a
+database, from an OCI image through an OCI runtime (runc or crun, for example).
+Images are referenced by digest and their signatures are checked before they
+run.
+
+Some things are not felixd workloads, because felixd depends on them: the Felix
+brokers and control plane, felixd itself, each node's credentials and the base
+image they come in. They are installed and upgraded with the image. felixd
+release binaries are built reproducibly and signed (#23).
+
+When a node can't reach Felix, it stops stepping every workload, native ones
+included, once two thirds of the lease TTL have passed (as in
+[Leases](#leases-and-failure-detection)). It reports itself `degraded` locally,
+marks nothing failed, and claims again when Felix is back. Recovery is resume
+from an offset, which is the normal path. If the whole Felix quorum is gone,
+every workload stalls until it returns, and that is visible on every node.
+
+Plan 9 lost to Unix being good enough. Its POSIX layer, APE, could not emulate
+much of what existing programs needed, and losing the root file server meant
+rebooting the machine.
+
+Sources: Pike, TUHS mailing list, 2023-01-31; Raymond, *The Art of Unix
+Programming*, ch. 20; Trickey, "APE: The ANSI/POSIX Environment"; the OCI
+runtime and image specifications.
+
+## History without recomputation
+
+Tracked in #76.
+
+- **Each snapshot carries a plain rendering beside it**, the output of
+  `inspect()` at that point, which can be read without the module or the
+  runtime.
+- **Two tiers.** Frequent ephemeral snapshots exist for resume and are trimmed
+  quickly. A sparser archive tier is kept for time travel. Each tier states its
+  own retention (#63).
+- **Runtimes are kept per determinism ABI** (#62), in the
+  [content-addressed store](#content-addressed-storage), for as long as
+  retained inputs need them, so old history stays replayable after felixd
+  moves on.
+- Looking at a past state should be an everyday command (`fx at`), not a
+  debugging session.
+
+Plan 9's dump showed each past day as a directory that `cat` could read years
+later, without the file server that wrote it. Fossil kept frequent local
+snapshots and archived a subset to Venti.
+
+Sources: Quinlan, McKie and Cox, "Fossil, an Archival File Server"; Plan 9
+`yesterday(1)`.
+
+## Content-addressed storage
+
+Modules, snapshot chunks and archived runtimes live in one content-addressed
+chunk store (#77):
+
+- **Retention is by reference count.** A chunk is kept while a module, a
+  snapshot manifest or a runtime still in retention refers to it, so trimming
+  and redaction actually free data.
+- **Addresses are keyed per tenant**: a keyed hash of the contents with a
+  per-tenant secret. Two tenants storing the same bytes get different
+  addresses, so the store leaks no equality across tenants, and deleting a
+  tenant's key and chunks removes its data.
+- Large modules are chunked the same way, which answers the module-size
+  question under [Risks](#risks-and-what-this-surfaces-in-felix) (#21).
+
+Venti never deleted a block, which made it simple and made deletion
+impossible. Plain content hashes also let anyone who can probe the store
+confirm that someone else stored a known file.
+
+Sources: Quinlan and Dorward, "Venti: a new approach to archival storage"
+(FAST 2002).
+
 ## Open questions
 
-These are still open:
-
-- Which effect system for step 4 of the path: WASI with every response
-  recorded, or a narrower set of host calls?
+- A read-only 9P or FUSE view of the namespace, so `ls`, `cat` and `tail -f`
+  can browse streams (#78). For people and tools, not a data path.
