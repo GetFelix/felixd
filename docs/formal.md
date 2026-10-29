@@ -54,7 +54,7 @@ effect stream would need.
 
 `FelixdFailWindow` pins a gap PR #68 names: the confirm and the spec write are two calls, and a
 suspend or a broker clock jump between them lets a node fail a workload another node now holds.
-Closing it needs the failure write fenced by epoch (design review finding 4).
+Closing it needs the failure write fenced by epoch (#70).
 
 `FelixdRecreateAnytime` pins the one assumption design.md states for epochs.
 
