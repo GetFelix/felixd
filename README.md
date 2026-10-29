@@ -286,6 +286,17 @@ owner knows which outputs already exist and does not write them again.
 | 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Planned |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
+## Crates
+
+| Crate | What it is |
+|---|---|
+| [`crates/core`](crates/core/README.md) | Record formats, names, lease and placement rules and the resume fold. No I/O. |
+| [`crates/runtime`](crates/runtime/README.md) | The wasmtime host that runs a workload component under fuel and memory limits. |
+| [`crates/agent`](crates/agent/README.md) | The node loop: leases, fencing, resume, output and snapshots. |
+| [`crates/felixd`](crates/felixd/README.md) | The `felixd` command line. |
+| [`crates/testkit`](crates/testkit/README.md) | Test helpers that build the example workloads. |
+| [`workloads`](workloads/README.md) | The example workloads, [`counter`](workloads/counter/README.md) and [`window`](workloads/window/README.md), and the test fixture [`faulty`](workloads/faulty/README.md). |
+
 ## Documentation
 
 - [docs/design.md](docs/design.md): goals, design, data model and build order
