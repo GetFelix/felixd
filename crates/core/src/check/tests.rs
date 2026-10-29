@@ -204,6 +204,7 @@ fn snap(input_offset: u64, output_tail: u64) -> Vec<u8> {
             input_offset,
             output_tail,
         },
+        1,
         b"state",
     )
 }

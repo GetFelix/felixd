@@ -72,7 +72,10 @@ finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
 should have caught up. It needs only read grants.
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in
-its spec, so every node runs it under the same ones. A workload that traps, runs
+its spec, so every node runs it under the same ones. Running `felixd run`
+again for the same id restarts the workload under the new spec, but a new
+module or input is refused once the workload has written anything; use a new
+id for new code. A workload that traps, runs
 out of fuel or finds its streams in a state it can't resume from is marked
 `failed` in its spec, with the reason.
 

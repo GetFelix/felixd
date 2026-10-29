@@ -1,7 +1,7 @@
 # Record formats
 
-The formats live in `felixd-core`, which does no I/O. Binary records start with a version byte, now
-`1`. A reader refuses a version it does not know. Integers are big endian.
+The formats live in `felixd-core`, which does no I/O. Binary records start with a version byte: `1`
+for output records, `2` for snapshots. A reader refuses a version it does not know. Integers are big endian.
 
 ## Output records
 
@@ -23,7 +23,10 @@ On `wl.<id>.snap`.
 | 1 | version |
 | 8 | offset of the last input the state includes |
 | 8 | the output stream's next offset when the snapshot was taken |
+| 8 | the writer's lease epoch |
 | rest | what the workload's `snapshot` returned |
+
+The version is 2. A version 1 record has no epoch field and reads as epoch 0.
 
 ## Caches
 

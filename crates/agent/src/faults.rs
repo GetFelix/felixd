@@ -9,6 +9,9 @@
 //!   sent, before its answer is acted on. The write may have landed.
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
+//! - `freeze-before-snapshot-write=N`: stop the process with `SIGSTOP` once
+//!   its Nth snapshot is taken, after the lease was checked and before it is
+//!   written. It carries on at `SIGCONT`.
 //! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
 //!   its Nth output append, after the lease was checked. It carries on when
 //!   the test sends `SIGCONT`, as a node out of a long GC pause would.
@@ -71,6 +74,12 @@ pub(crate) fn before_snapshot() {
     }
 }
 
+pub(crate) fn before_snapshot_write() {
+    if fault("freeze-before-snapshot-write") == Some(SNAPSHOTS.load(Ordering::Relaxed)) {
+        freeze();
+    }
+}
+
 pub(crate) fn after_snapshot() {
     if fault("crash-after-snapshot") == Some(SNAPSHOTS.load(Ordering::Relaxed)) {
         crash("crash-after-snapshot");
@@ -100,12 +109,16 @@ pub(crate) fn drop_input(offset: u64) -> bool {
 pub(crate) fn before_append() {
     let n = APPENDS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-append") == Some(n) {
-        tracing::warn!("injected freeze");
-        // Stopping ourselves stops every thread at once, renewals included.
-        let _ = std::process::Command::new("kill")
-            .args(["-STOP", &std::process::id().to_string()])
-            .status();
+        freeze();
     }
+}
+
+fn freeze() {
+    tracing::warn!("injected freeze");
+    // Stopping ourselves stops every thread at once, renewals included.
+    let _ = std::process::Command::new("kill")
+        .args(["-STOP", &std::process::id().to_string()])
+        .status();
 }
 
 pub(crate) async fn before_failure_record() {

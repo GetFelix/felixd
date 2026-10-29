@@ -100,7 +100,7 @@ async fn a_snapshot_with_the_wrong_output_tail_fails_the_check() {
         input_offset: 1,
         output_tail: 5,
     };
-    t.publish_all(SNAPSHOTS, [snapshot::encode(wrong, &count(2))])
+    t.publish_all(SNAPSHOTS, [snapshot::encode(wrong, 1, &count(2))])
         .await;
     assert_finds(&t, "snapshot at offset 0 covers input 1 with output tail 5");
 }

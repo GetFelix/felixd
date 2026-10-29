@@ -17,10 +17,10 @@ use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
 use felixd_core::placement::{FirstClaimWins, Placement};
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
-use felixd_core::{names, output};
+use felixd_core::{names, output, snapshot};
 use felixd_runtime::Runtime;
 use tokio::sync::futures::Notified;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::faults;
@@ -74,6 +74,7 @@ enum Seen {
 struct Task {
     stop: watch::Sender<bool>,
     handle: JoinHandle<()>,
+    spec: WorkloadSpec,
 }
 
 /// Runs until `shutdown` completes, then releases the leases it holds.
@@ -352,7 +353,8 @@ fn apply(
         _ => None,
     };
     if let Some(task) = tasks.get(&id) {
-        if !task.handle.is_finished() && wanted.is_some() {
+        // A changed spec restarts the task, which resumes under it.
+        if !task.handle.is_finished() && wanted.as_ref() == Some(&task.spec) {
             return;
         }
         let _ = task.stop.send(true);
@@ -361,8 +363,8 @@ fn apply(
     if let Some(spec) = wanted {
         let (stop, stopped) = watch::channel(false);
         let lease = seen_for(seen, &id).subscribe();
-        let handle = tokio::spawn(own(node.clone(), id.clone(), spec, lease, stopped));
-        tasks.insert(id, Task { stop, handle });
+        let handle = tokio::spawn(own(node.clone(), id.clone(), spec.clone(), lease, stopped));
+        tasks.insert(id, Task { stop, handle, spec });
     }
 }
 
@@ -383,14 +385,11 @@ async fn own(
         if slot.is_none() {
             continue;
         }
-        let floor = output_epoch(&node.felix, &spec.output);
+        let floor = written_epoch(&node.felix, &id, &spec.output);
         match lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await {
             Ok(Some(mut held)) => {
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
-                let ended = tokio::select! {
-                    ended = run_held(&node, &id, &spec, &mut held) => ended,
-                    _ = stop.wait_for(|stop| *stop) => Ended::Stopped,
-                };
+                let ended = run_held(&node, &id, &spec, &mut held, &mut stop).await;
                 match ended {
                     Ended::Failed | Ended::Stopped => {
                         lease::release(&node.felix, &held).await;
@@ -502,15 +501,21 @@ fn now_millis() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// The epoch of the last record on `stream`, or 0 if it has none. A record
-/// that does not decode counts as 0: the runner fails the workload for it,
-/// which only a holder may do.
-async fn output_epoch(felix: &Felix, stream: &str) -> Result<u64> {
-    let tail = felix.tail(stream).await?;
-    Ok(match felix.last_record(stream, tail).await? {
-        Some(record) => output::decode(&record.payload).map_or(0, |(last, _)| last.epoch),
-        None => 0,
-    })
+/// The larger epoch of the last records on the output and snapshot streams,
+/// or 0 if they have none. A record that does not decode counts as 0: the
+/// runner fails the workload for it, which only a holder may do.
+async fn written_epoch(felix: &Felix, id: &str, output: &str) -> Result<u64> {
+    let last = async |stream: &str| -> Result<Option<Bytes>> {
+        let tail = felix.tail(stream).await?;
+        Ok(felix.last_record(stream, tail).await?.map(|r| r.payload))
+    };
+    let output = last(output)
+        .await?
+        .map_or(0, |r| output::decode(&r).map_or(0, |(w, _)| w.epoch));
+    let snapshot = last(&names::snapshot_stream(id))
+        .await?
+        .map_or(0, |r| snapshot::decode(&r).map_or(0, |(t, _)| t.epoch));
+    Ok(output.max(snapshot))
 }
 
 enum Ended {
@@ -520,10 +525,30 @@ enum Ended {
 }
 
 /// Runs the workload, and records its failure if it fails, while renewing the
-/// lease. Renewing goes on until the failure is recorded, so a slow write
-/// does not let the lease lapse with the workload still `running`.
-async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -> Ended {
+/// lease, until `stop` is set. Renewing goes on until the failure is
+/// recorded, so a slow write does not let the lease lapse with the workload
+/// still `running`. It runs in its own task so that nothing the workload
+/// does can delay it. `held` comes back with the version the last renewal
+/// wrote, which a release needs.
+async fn run_held(
+    node: &Arc<Node>,
+    id: &str,
+    spec: &WorkloadSpec,
+    held: &mut Held,
+    stop: &mut watch::Receiver<bool>,
+) -> Ended {
     let (deadline, fence) = held.fence();
+    let (end_renewals, ended) = oneshot::channel::<()>();
+    let mut renewals = AbortOnDrop(tokio::spawn({
+        let (node, mut held) = (node.clone(), held.clone());
+        async move {
+            let lost = tokio::select! {
+                lost = lease::hold(&node.felix, &mut held, &deadline) => Some(lost),
+                _ = ended => None,
+            };
+            (held, lost)
+        }
+    }));
     let (me, epoch) = (held.node.clone(), held.epoch);
     let work = async {
         let outcome = loop {
@@ -566,12 +591,30 @@ async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -
             Ended::Lost
         }
     };
-    tokio::select! {
-        lost = lease::hold(&node.felix, held, &deadline) => {
-            tracing::warn!(workload = %id, ?lost, "lost the lease");
-            Ended::Lost
+    let ended = tokio::select! {
+        renewed = &mut renewals.0 => {
+            if let Ok((renewed, lost)) = renewed {
+                tracing::warn!(workload = %id, ?lost, "lost the lease");
+                *held = renewed;
+            }
+            return Ended::Lost;
         }
         ended = work => ended,
+        _ = stop.wait_for(|stop| *stop) => Ended::Stopped,
+    };
+    let _ = end_renewals.send(());
+    if let Ok((renewed, _)) = (&mut renewals.0).await {
+        *held = renewed;
+    }
+    ended
+}
+
+/// Aborts the task when dropped, so renewals end with the workload's task.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

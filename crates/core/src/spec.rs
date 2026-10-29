@@ -61,6 +61,21 @@ fn default_snapshot_every() -> u64 {
 }
 
 impl WorkloadSpec {
+    /// Why `next` cannot replace this spec on streams that already hold its
+    /// output or snapshots, if it cannot. Another module or input would not
+    /// reproduce what is written, and the next owner would find the stream
+    /// diverged. The other fields may change: a running workload restarts
+    /// under the new spec.
+    pub fn conflicts_with_history(&self, next: &WorkloadSpec) -> Option<String> {
+        if self.module != next.module {
+            Some(format!("it runs module {}", self.module))
+        } else if self.input != next.input {
+            Some(format!("it reads input {}", self.input))
+        } else {
+            None
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("a spec is always valid JSON")
     }

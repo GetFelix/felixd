@@ -1,64 +1,122 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
-use std::sync::Mutex;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use felix_client::StreamRecord;
+use bytes::Bytes;
+use felix_client::{ConditionalWrite, StreamRecord};
 use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, Resume};
 use felixd_core::snapshot::{self, SnapshotHeader};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{MAX_WRITE_BYTES, module, names};
 use felixd_runtime::{Compiled, Runtime, Workload, WorkloadError};
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
 use crate::output::OutputLog;
 
-/// A node's runtime and the modules it has compiled, by hash.
+/// A node's runtime, the modules it has compiled, by hash, and the limits on
+/// blocking work.
 pub(crate) struct Modules {
     pub(crate) runtime: Runtime,
-    compiled: Mutex<HashMap<String, Compiled>>,
+    compiled: Once<Compiled>,
+    compiles: Semaphore,
+    calls: Semaphore,
 }
 
 impl Modules {
     pub(crate) fn new(runtime: Runtime) -> Modules {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         Modules {
             runtime,
-            compiled: Mutex::new(HashMap::new()),
+            compiled: Once::default(),
+            compiles: Semaphore::new(cores),
+            calls: Semaphore::new(cores),
         }
     }
 
-    /// The module `hash`, compiled once per node. Compiling takes long
-    /// enough to starve the lease renewals that share this task, so it runs
-    /// on a blocking thread.
+    /// The module `hash`, compiled once per node however many workloads ask
+    /// for it at once.
     async fn compiled(&self, felix: &Felix, hash: &str) -> Result<Compiled> {
-        if let Some(compiled) = self.lock().get(hash) {
-            return Ok(compiled.clone());
-        }
-        let bytes = felix
-            .cache_get(names::MODULES, hash)
-            .await?
-            .with_context(|| format!("module {hash} is not in the modules cache"))?;
-        if module::hash(&bytes) != hash {
-            return Err(poison(format!("module {hash} does not match its hash")));
-        }
-        let runtime = self.runtime.clone();
-        let compiled = tokio::task::spawn_blocking(move || {
-            faults::during_compile();
-            runtime.compile(&bytes)
-        })
-        .await?
-        .map_err(poison)?;
-        self.lock().insert(hash.to_owned(), compiled.clone());
-        Ok(compiled)
+        self.compiled
+            .get(hash, || async {
+                let bytes = felix
+                    .cache_get(names::MODULES, hash)
+                    .await?
+                    .with_context(|| format!("module {hash} is not in the modules cache"))?;
+                if module::hash(&bytes) != hash {
+                    return Err(poison(format!("module {hash} does not match its hash")));
+                }
+                let _permit = self.compiles.acquire().await?;
+                let runtime = self.runtime.clone();
+                tokio::task::spawn_blocking(move || {
+                    faults::during_compile();
+                    runtime.compile(&bytes)
+                })
+                .await?
+                .map_err(poison)
+            })
+            .await
     }
+}
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Compiled>> {
-        self.compiled.lock().unwrap_or_else(|e| e.into_inner())
+/// Values built once per key. Callers that ask while one is being built wait
+/// for it; a build that fails is tried again by the next caller.
+pub(crate) struct Once<T> {
+    cells: Mutex<HashMap<String, Arc<OnceCell<T>>>>,
+}
+
+impl<T> Default for Once<T> {
+    fn default() -> Self {
+        Once {
+            cells: Mutex::new(HashMap::new()),
+        }
     }
+}
+
+impl<T: Clone> Once<T> {
+    pub(crate) async fn get<F, Fut>(&self, key: &str, build: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let cell = {
+            let mut cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+            cells.entry(key.to_owned()).or_default().clone()
+        };
+        cell.get_or_try_init(build).await.cloned()
+    }
+}
+
+/// Runs `call` on the value in `slot` on a blocking thread, taking one of
+/// `permits`. A step can run for as long as its fuel allows, and run inline it
+/// would hold a runtime worker that other workloads' lease renewals need.
+/// The slot is empty only if an earlier call panicked or was cancelled.
+pub(crate) async fn blocking<W, T>(
+    permits: &Semaphore,
+    slot: &mut Option<W>,
+    call: impl FnOnce(&mut W) -> T + Send + 'static,
+) -> Result<T>
+where
+    W: Send + 'static,
+    T: Send + 'static,
+{
+    let _permit = permits.acquire().await?;
+    let mut value = slot
+        .take()
+        .context("the workload was lost by an earlier call")?;
+    let (value, out) = tokio::task::spawn_blocking(move || {
+        let out = call(&mut value);
+        (value, out)
+    })
+    .await?;
+    *slot = Some(value);
+    Ok(out)
 }
 
 /// How [`run_workload`] ended. It only returns when the workload cannot go on
@@ -160,18 +218,28 @@ async fn run(
     fence: &Fence,
 ) -> Result<Infallible> {
     let compiled = runtime.compiled(felix, &spec.module).await?;
-    let mut workload = runtime
-        .runtime
-        .instantiate(&compiled, spec.limits)
-        .map_err(poison)?;
+    let mut workload = Some(
+        runtime
+            .runtime
+            .instantiate(&compiled, spec.limits)
+            .map_err(poison)?,
+    );
 
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let snapshot = match felix.last_record(&snap_stream, snap_tail).await? {
         Some(record) => {
-            let (header, state) = snapshot::decode(&record.payload)
+            let (taken, state) = snapshot::decode(&record.payload)
                 .map_err(|e| poison(format!("snapshot at {snap_stream}:{}: {e}", record.offset)))?;
-            Some((header, state.to_vec()))
+            if taken.epoch > fence.epoch() {
+                tracing::info!(
+                    workload = id,
+                    epoch = taken.epoch,
+                    "a later owner took a snapshot"
+                );
+                return Err(Superseded(taken.epoch).into());
+            }
+            Some((taken.header, state.to_vec()))
         }
         None => None,
     };
@@ -199,15 +267,19 @@ async fn run(
         output_tail,
     })
     .map_err(poison)?;
-    if let Some((_, state)) = snapshot.as_ref().filter(|_| resume.restore) {
-        workload.restore(state).map_err(failed)?;
+    if let Some((_, state)) = snapshot.filter(|_| resume.restore) {
+        blocking(&runtime.calls, &mut workload, move |w| w.restore(&state))
+            .await?
+            .map_err(failed)?;
     }
     tracing::info!(workload = id, from = resume.next_input, "resumed");
 
     let mut steps = Steps {
         felix,
+        modules: runtime,
         spec,
         snap_stream: &snap_stream,
+        snap_tail,
         fence,
         workload,
         resume,
@@ -240,12 +312,12 @@ async fn run(
             // too, so read the gap back to see which it was.
             for record in felix.read_range(&spec.input, next_input, offset).await? {
                 if record.offset >= next_input {
-                    steps.step(record.offset, &record.payload).await?;
+                    steps.step(record.offset, record.payload).await?;
                     next_input = record.offset + 1;
                 }
             }
         }
-        steps.step(offset, &event.payload).await?;
+        steps.step(offset, event.payload).await?;
         next_input = offset + 1;
     }
 }
@@ -253,10 +325,13 @@ async fn run(
 /// Runs inputs through the workload in order, writing what they produce.
 struct Steps<'a> {
     felix: &'a Felix,
+    modules: &'a Modules,
     spec: &'a WorkloadSpec,
     snap_stream: &'a str,
+    /// The snapshot stream's next offset, as far as this owner knows.
+    snap_tail: u64,
     fence: &'a Fence,
-    workload: Workload,
+    workload: Option<Workload>,
     resume: Resume,
     log: OutputLog<'a>,
     written: Written<'a>,
@@ -264,8 +339,12 @@ struct Steps<'a> {
 }
 
 impl Steps<'_> {
-    async fn step(&mut self, offset: u64, input: &[u8]) -> Result<()> {
-        let outputs = self.workload.step(input).map_err(failed)?;
+    async fn step(&mut self, offset: u64, input: Bytes) -> Result<()> {
+        let outputs = blocking(&self.modules.calls, &mut self.workload, move |w| {
+            w.step(&input)
+        })
+        .await?
+        .map_err(failed)?;
         let mut batch = Vec::new();
         for (index, payload) in outputs.iter().enumerate() {
             let index = index as u32;
@@ -304,21 +383,59 @@ impl Steps<'_> {
         if !self.fence.holds() {
             return Err(LostLease.into());
         }
-        let state = self.workload.snapshot().map_err(failed)?;
+        let state = blocking(&self.modules.calls, &mut self.workload, Workload::snapshot)
+            .await?
+            .map_err(failed)?;
         let header = SnapshotHeader {
             input_offset,
             output_tail: self.log.tail(),
         };
-        let record = snapshot::encode(header, &state);
+        let record = snapshot::encode(header, self.fence.epoch(), &state);
         if record.len() > MAX_WRITE_BYTES {
             return Err(poison(format!(
                 "the snapshot at input {input_offset} is {} bytes, more than the {MAX_WRITE_BYTES} one write may hold",
                 record.len()
             )));
         }
-        self.felix.publish(self.snap_stream, record).await?;
+        faults::before_snapshot_write();
+        self.write_snapshot(record).await?;
         faults::after_snapshot();
         Ok(())
+    }
+
+    /// Appends `record` at the snapshot stream's tail with `publish_if`, so a
+    /// stale owner cannot write a snapshot after a later owner's. Snapshots
+    /// found at the tail from epochs up to this owner's are a stale owner's
+    /// that landed first, which determinism makes correct, so it writes after
+    /// them. One from a later epoch means this owner is superseded.
+    async fn write_snapshot(&mut self, record: Vec<u8>) -> Result<()> {
+        loop {
+            if !self.fence.holds() {
+                return Err(LostLease.into());
+            }
+            let seen_tail = match self
+                .felix
+                .publish_if(self.snap_stream, vec![record.clone()], self.snap_tail)
+                .await?
+            {
+                ConditionalWrite::Written { offset } => {
+                    self.snap_tail = offset + 1;
+                    return Ok(());
+                }
+                ConditionalWrite::Refused { tail } => tail,
+            };
+            let found = self
+                .felix
+                .read_range(self.snap_stream, self.snap_tail, seen_tail)
+                .await?;
+            for found in &found {
+                let epoch = snapshot::decode(&found.payload).map_or(0, |(t, _)| t.epoch);
+                if epoch > self.fence.epoch() {
+                    return Err(Superseded(epoch).into());
+                }
+            }
+            self.snap_tail = seen_tail.max(self.snap_tail);
+        }
     }
 }
 
@@ -348,3 +465,6 @@ impl Written<'_> {
             .map_err(poison)
     }
 }
+
+#[cfg(test)]
+mod tests;
