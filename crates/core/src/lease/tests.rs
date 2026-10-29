@@ -40,3 +40,15 @@ fn a_holder_renews_at_a_third_and_stops_at_two_thirds() {
 fn garbage_is_refused() {
     assert!(matches!(Lease::decode(b"{"), Err(DecodeError::Json(_))));
 }
+
+#[test]
+fn a_claim_is_tried_when_the_lease_expires_and_at_least_every_ttl() {
+    let timing = LeaseTiming {
+        ttl: Duration::from_secs(10),
+    };
+    assert_eq!(timing.claim_wait(8_000, 5_000), Duration::from_secs(3));
+    assert_eq!(timing.claim_wait(4_000, 5_000), Duration::ZERO);
+    // This node's clock is far behind the broker's.
+    assert_eq!(timing.claim_wait(60_000, 5_000), Duration::from_secs(10));
+    assert_eq!(timing.claim_wait(0, 5_000), Duration::from_secs(10));
+}

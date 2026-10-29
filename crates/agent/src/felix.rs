@@ -75,6 +75,27 @@ impl Felix {
         .await
     }
 
+    /// Stores `value` under `key` until `ttl_ms` passes without another put.
+    pub async fn cache_put_ttl(
+        &self,
+        cache: &str,
+        key: &str,
+        value: Bytes,
+        ttl_ms: u64,
+    ) -> Result<()> {
+        until_ready(|| {
+            self.client.cache_put(
+                &self.tenant,
+                &self.namespace,
+                cache,
+                key,
+                value.clone(),
+                Some(ttl_ms),
+            )
+        })
+        .await
+    }
+
     pub async fn cache_delete(&self, cache: &str, key: &str) -> Result<()> {
         until_ready(|| {
             self.client

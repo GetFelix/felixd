@@ -149,11 +149,12 @@ async fn a_holder_stops_at_the_first_record_of_a_later_epoch() {
 
     holder.resume();
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(
-        t.felix.tail(OUTPUT).await.unwrap(),
-        20,
-        "the holder wrote after a later epoch: {:?}",
-        epochs(&t).await
+    // The lease is free, so the holder may claim again, but only at an epoch
+    // above the one it found.
+    let epochs = epochs(&t).await;
+    assert!(
+        epochs[20..].iter().all(|&e| e > 1 << 40),
+        "the holder wrote at its old epoch after a later one: {epochs:?}"
     );
     assert!(holder.alive());
     assert_eq!(t.spec().await.state, WorkloadState::Running);

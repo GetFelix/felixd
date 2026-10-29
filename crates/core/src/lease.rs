@@ -1,7 +1,5 @@
 //! The value in the `leases` cache, and the timing rules a holder follows.
 //!
-//! The value in the `leases` cache, and the timing rules a holder follows.
-//!
 //! A claim takes its epoch from the `epochs` cache, one more than the larger
 //! of the last epoch handed out and the epoch on the output stream's tail. The
 //! counter makes epochs unique and growing; the output tail keeps them above
@@ -65,7 +63,6 @@ impl Lease {
     }
 }
 
-/// When a holder renews and when it gives up.
 /// The value in the `epochs` cache: the last epoch handed out.
 pub fn encode_epoch(epoch: u64) -> Vec<u8> {
     epoch.to_string().into_bytes()
@@ -75,6 +72,7 @@ pub fn decode_epoch(bytes: &[u8]) -> Result<u64, DecodeError> {
     serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
 }
 
+/// When a holder renews and when it gives up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaseTiming {
     pub ttl: Duration,
@@ -96,6 +94,21 @@ impl LeaseTiming {
 
     pub fn ttl_millis(&self) -> u64 {
         u64::try_from(self.ttl.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// How long a node waits before trying to claim a lease it last saw
+    /// expiring at `expires_at_millis` (broker time, 0 for never).
+    ///
+    /// This only decides when to try. A claim succeeds only once the broker
+    /// counts the lease as gone, so a wrong clock here costs a refused claim,
+    /// never a second owner. The wait is never longer than a TTL, so a node
+    /// whose clock runs behind still tries, and a delete it missed is still
+    /// noticed.
+    pub fn claim_wait(&self, expires_at_millis: u64, now_millis: u64) -> Duration {
+        match expires_at_millis {
+            0 => self.ttl,
+            at => Duration::from_millis(at.saturating_sub(now_millis)).min(self.ttl),
+        }
     }
 }
 

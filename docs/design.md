@@ -230,7 +230,7 @@ Everything lives in one Felix tenant, in a namespace per cluster.
 | `workloads` | cache | workload id | spec: module hash, input stream, output stream, snapshot interval, fuel and memory limits, state (`running`, `stopped`, `failed`) | `felixd run`, the owner on failure |
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
-| `nodes` | cache, TTL | node id | address, capacity, version | each agent |
+| `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
 | `modules` | cache | sha256 of the module | the module bytes | `felixd run` |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
@@ -304,9 +304,21 @@ Agents watch `leases` with retained values. When an entry expires or is
 deleted, any agent may claim it, after a random delay so that one node does
 not grab everything. Takeover doesn't rely on the broker sending an
 expiry event: each agent also knows `expires_at_millis` from the watch and
-tries a claim after it passes.
+tries a claim after it passes. It waits at most one TTL between tries, so a
+local clock behind the broker's, or a delete the watch missed, costs at most
+a TTL. A clock ahead of the broker's costs a refused claim, never a second
+owner, since only the broker decides that a lease is gone.
 
-v0 placement is "first claim wins" with a per-node cap (`max_workloads`).
+Each agent writes itself to `nodes` every TTL/3 with a TTL, so a dead node's
+entry goes away about when its leases do. Nothing reads `nodes` to make
+decisions yet; it says which agents are up and how full they are.
+
+v0 placement is "first claim wins" with a per-node cap: an agent holding
+`--max-workloads` (default 64) claims nothing more until one of its
+workloads ends, and every claim waits a random time of up to
+`--claim-delay-ms` (default 1 s). The agent sees placement only through the
+`Placement` trait in `core`, so the open question below (#26) can be settled
+without touching the lease code.
 `felixd drain` makes a node delete its own leases and stop claiming.
 
 ## Exactly-once output

@@ -4,7 +4,7 @@
 //! - [`settings`] and [`felix`]: how to reach Felix, and the calls felixd makes.
 //! - [`admin`]: the control plane's REST API, used to create streams and caches.
 //! - [`submit`]: what `felixd run` does.
-//! - [`agent`]: watches the workloads cache and runs each one.
+//! - [`agent`]: watches the workloads and leases caches and runs what it claims.
 //! - [`lease`]: claims, renews and releases a workload's lease.
 //! - [`runner`]: runs one workload: resume, then step, append and snapshot.
 //! - [`output`]: appends a step's outputs exactly once.

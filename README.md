@@ -5,9 +5,9 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 1 in progress. Agents hold a lease per workload and
-> another agent takes a workload over when its holder dies. Spreading
-> workloads across nodes and the three-node failover test are next. The plan is in
+> **Status:** milestone 1 in progress. Agents hold a lease per workload,
+> spread workloads across nodes, and take a dead node's workloads over within
+> one lease TTL. The output checker and the three-node failover test are next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -45,7 +45,11 @@ felixd agent
 the lease holds. Start a second agent and kill the first: within one lease TTL
 (10 s by default and at least 2 s, `--lease-ttl-ms`) the second carries on from the right input,
 with nothing missing and nothing repeated. Each agent needs its own
-`--node-id`; the default is the host name and process id.
+`--node-id`; the default is the host name and process id. An agent holds at
+most `--max-workloads` (default 64) and waits a random time of up to
+`--claim-delay-ms` (default 1000) before claiming a free workload, so that the
+first agent to see it does not take everything. Each agent also writes itself
+to the `nodes` cache, with the same TTL as its leases.
 The connection settings are the environment variables `felixctl` reads, plus
 `FELIX_NAMESPACE` (default `default`).
 `felixd run --fuel --max-memory` sets the workload's limits. They are stored in
@@ -212,7 +216,7 @@ owner knows which outputs already exist and does not write them again.
 | M | Milestone | What it proves | State |
 |---|---|---|---|
 | 0 | One node, one workload | The workload contract works; a restart resumes where it stopped | Done |
-| 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Planned |
+| 1 | Leases and failover | Kill a node and its workloads continue elsewhere | In progress |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Planned |
 | 3 | Replay | Rebuild any workload at any offset or time | Planned |
 | 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Planned |
