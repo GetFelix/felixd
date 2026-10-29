@@ -13,6 +13,8 @@
 //! - `drop-watch=MS`: when the key `drop-watch` is written to the workloads
 //!   cache, end the workloads watch and wait MS milliseconds before opening a
 //!   new one.
+//! - `slow-compile=MS`: block the thread compiling a module for MS
+//!   milliseconds, as a slow machine would.
 //! - `ignore-lease-deletes=1`: ignore every delete the leases watch delivers,
 //!   including the broker's expiry events, so takeover has to go by the
 //!   lease's expiry time alone.
@@ -101,4 +103,10 @@ pub(crate) fn drop_watch(key: &str, written: bool) -> Option<std::time::Duration
 
 pub(crate) fn ignore_lease_delete() -> bool {
     fault("ignore-lease-deletes") == Some(1)
+}
+
+pub(crate) fn during_compile() {
+    if let Some(ms) = fault("slow-compile") {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
 }

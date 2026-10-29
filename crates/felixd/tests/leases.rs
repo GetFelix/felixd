@@ -79,6 +79,19 @@ async fn another_node_takes_over_when_the_holder_dies() {
     assert_eq!(written.len(), 2, "{written:?}");
 }
 
+/// Compiling a module can take longer than a TTL on a slow machine. The
+/// holder keeps renewing meanwhile, so it keeps the lease it took.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_compile_does_not_cost_the_lease() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    let _agent = t.start_agent_with_faults("slow-compile=3000");
+    assert_uninterrupted(&t, &module, 10).await;
+    let written: BTreeSet<u64> = epochs(&t).await.into_iter().collect();
+    assert_eq!(written, BTreeSet::from([1]), "the first claim was lost");
+}
+
 /// The holder is stopped with `SIGSTOP` after it checked its lease and before
 /// it appends, which is what a long GC pause or a frozen VM looks like. By
 /// the time it carries on, another node has claimed the workload and written.

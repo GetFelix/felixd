@@ -1,6 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use felix_client::StreamRecord;
@@ -9,12 +10,56 @@ use felixd_core::resume::{self, Found, Resume};
 use felixd_core::snapshot::{self, SnapshotHeader};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{MAX_WRITE_BYTES, module, names};
-use felixd_runtime::{Runtime, Workload, WorkloadError};
+use felixd_runtime::{Compiled, Runtime, Workload, WorkloadError};
 
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
 use crate::output::OutputLog;
+
+/// A node's runtime and the modules it has compiled, by hash.
+pub(crate) struct Modules {
+    pub(crate) runtime: Runtime,
+    compiled: Mutex<HashMap<String, Compiled>>,
+}
+
+impl Modules {
+    pub(crate) fn new(runtime: Runtime) -> Modules {
+        Modules {
+            runtime,
+            compiled: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The module `hash`, compiled once per node. Compiling takes long
+    /// enough to starve the lease renewals that share this task, so it runs
+    /// on a blocking thread.
+    async fn compiled(&self, felix: &Felix, hash: &str) -> Result<Compiled> {
+        if let Some(compiled) = self.lock().get(hash) {
+            return Ok(compiled.clone());
+        }
+        let bytes = felix
+            .cache_get(names::MODULES, hash)
+            .await?
+            .with_context(|| format!("module {hash} is not in the modules cache"))?;
+        if module::hash(&bytes) != hash {
+            return Err(poison(format!("module {hash} does not match its hash")));
+        }
+        let runtime = self.runtime.clone();
+        let compiled = tokio::task::spawn_blocking(move || {
+            faults::during_compile();
+            runtime.compile(&bytes)
+        })
+        .await?
+        .map_err(poison)?;
+        self.lock().insert(hash.to_owned(), compiled.clone());
+        Ok(compiled)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Compiled>> {
+        self.compiled.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 /// How [`run_workload`] ended. It only returns when the workload cannot go on
 /// here.
@@ -86,7 +131,7 @@ fn failed(error: WorkloadError) -> anyhow::Error {
 /// the streams.
 pub(crate) async fn run_workload(
     felix: &Felix,
-    runtime: &Runtime,
+    runtime: &Modules,
     id: &str,
     spec: &WorkloadSpec,
     fence: &Fence,
@@ -109,22 +154,16 @@ pub(crate) async fn run_workload(
 
 async fn run(
     felix: &Felix,
-    runtime: &Runtime,
+    runtime: &Modules,
     id: &str,
     spec: &WorkloadSpec,
     fence: &Fence,
 ) -> Result<Infallible> {
-    let bytes = felix
-        .cache_get(names::MODULES, &spec.module)
-        .await?
-        .with_context(|| format!("module {} is not in the modules cache", spec.module))?;
-    if module::hash(&bytes) != spec.module {
-        return Err(poison(format!(
-            "module {} does not match its hash",
-            spec.module
-        )));
-    }
-    let mut workload = runtime.load(&bytes, spec.limits).map_err(poison)?;
+    let compiled = runtime.compiled(felix, &spec.module).await?;
+    let mut workload = runtime
+        .runtime
+        .instantiate(&compiled, spec.limits)
+        .map_err(poison)?;
 
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;

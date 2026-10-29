@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::{self, Fence, Held};
-use crate::runner::{Outcome, run_workload};
+use crate::runner::{Modules, Outcome, run_workload};
 use crate::settings::Settings;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -44,7 +44,7 @@ pub struct AgentConfig {
 
 struct Node {
     felix: Felix,
-    runtime: Runtime,
+    modules: Modules,
     node_id: String,
     timing: LeaseTiming,
     max_workloads: usize,
@@ -92,7 +92,7 @@ pub async fn run(
         ^ (u64::from(std::process::id()) << 32);
     let node = Arc::new(Node {
         felix: Felix::connect(settings).await?,
-        runtime: Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?,
+        modules: Modules::new(Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?),
         node_id: config.node_id,
         timing: config.lease,
         max_workloads: config.placement.max_workloads,
@@ -475,7 +475,7 @@ async fn run_held(node: &Node, id: &str, spec: &WorkloadSpec, held: &mut Held) -
     let (me, epoch) = (held.node.clone(), held.epoch);
     let work = async {
         let outcome = loop {
-            match run_workload(&node.felix, &node.runtime, id, spec, &fence).await {
+            match run_workload(&node.felix, &node.modules, id, spec, &fence).await {
                 Ok(outcome) => break outcome,
                 Err(error) => {
                     tracing::warn!(workload = %id, error = %format!("{error:#}"), "retrying");
