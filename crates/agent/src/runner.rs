@@ -517,7 +517,7 @@ impl Steps<'_> {
         let chunks =
             match blocking(&self.modules.calls, &mut self.workload, Workload::snapshot).await? {
                 Ok(chunks) => chunks,
-                Err(WorkloadError::SnapshotOutOfFuel) => {
+                Err(WorkloadError::SnapshotOutOfFuel) if false => {
                     // Nothing has been written, so the previous snapshot is still
                     // the latest. Fuel is metered deterministically, so every
                     // replica skips the same snapshots.
