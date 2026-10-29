@@ -385,6 +385,56 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
     assert_eq!(spec.failure, None);
 }
 
+/// The module is not in the cache when the agent starts, so the check before
+/// the claim cannot see it. The agent claims, and finds the 0.1 module only
+/// once it has the lease.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contract_01_module_found_after_the_claim_is_left_for_an_operator() {
+    let Some(t) = test_felix().await else { return };
+    let old = felixd_testkit::contract_01_component();
+    let hash = module::hash(&old);
+    let kind = StreamKind {
+        replication_factor: common::replication_factor(),
+    };
+    for stream in [INPUT, OUTPUT, SNAPSHOTS] {
+        ensure_stream(&t.settings, stream, kind).await.unwrap();
+    }
+    t.put_spec(&WorkloadSpec {
+        module: hash.clone(),
+        input: INPUT.into(),
+        output: OUTPUT.into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        state: WorkloadState::Running,
+        limits: Limits::default(),
+        failure: None,
+    })
+    .await;
+    let _agent = t.start_agent();
+    eventually("the claim", Duration::from_secs(60), || async {
+        t.lease(ID).await.map(|_| ())
+    })
+    .await;
+
+    t.felix
+        .cache_put(names::MODULES, &hash, Bytes::from(old))
+        .await
+        .unwrap();
+    eventually("the release", Duration::from_secs(60), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+    tokio::time::sleep(LEASE_TTL * 2).await;
+    assert!(
+        t.lease(ID).await.is_none(),
+        "the workload was claimed again"
+    );
+    assert!(t.outputs(OUTPUT).await.is_empty(), "something was written");
+    let spec = t.spec().await;
+    assert_eq!(spec.state, WorkloadState::Running);
+    assert_eq!(spec.failure, None);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_that_runs_out_of_fuel_is_skipped_and_the_workload_goes_on() {
     let Some(t) = test_felix().await else { return };
