@@ -173,6 +173,69 @@ Guardiola, Cox and Van Hensbergen, "Persistent 9P Sessions for Plan 9" (2006);
 Van Hensbergen and Minnich, "Grave Robbers from Outer Space" (2005); the 9front
 dp9ik design notes. Each decision below cites its own.
 
+### Lessons from Barrelfish
+
+Barrelfish (ETH Zurich and Microsoft Research, 2009) treated one machine as a
+distributed system: a kernel per core, no shared kernel state, and OS state
+kept as replicas that change by agreement. It never caught on as an operating
+system, but its authors wrote down what worked and what didn't, and the parts
+that apply to felixd are these.
+
+- **The scheduler's input is a recorded stream of node facts.** Barrelfish's
+  System Knowledge Base held three kinds of fact: discovered (ACPI, PCI,
+  CPUID), measured (message latency between core pairs), and asserted by hand,
+  including quirks that correct wrong discovered data. Here the scheduler is a
+  deterministic workload, so what it reads has to be on the record for its
+  assignments to replay. Agents and operators append typed node facts:
+  discovered ones (instruction set, determinism ABI, cores, memory, NUMA nodes,
+  accelerators, effect kinds served), measured ones (broker round trip, step
+  throughput, input lag) and asserted ones (failure domain, rack, drain intent,
+  overrides). An asserted fact wins over a discovered one. `nodes` stays the
+  liveness signal. There is no logic engine: the SKB's Prolog-based engine
+  cost about 6,000 cycles for a trivial query and its authors saw "a tradeoff
+  between expressiveness and performance", and our queries are filters plus
+  a score (#60).
+- **Policy stays off the mechanism path.** The SKB "is not directly involved
+  in the underlying mechanisms", and the system ran without it, with a worse
+  allocation. [Placement](#placement) already has this shape: first claim wins
+  is the fallback. Barrelfish's device manager did end up booting devices
+  through the SKB, which is the failure to avoid.
+- **Every piece of state has a class.** Barrelfish chose a protocol per
+  operation: one phase for unmap, two phases only for capability retype. It
+  let closely coupled cores share a replica and centralised services that were
+  not worth replicating. See [State classes](#state-classes) (#81).
+- **Heterogeneity is a CI result.** The multikernel paper was evaluated only
+  on x86, and its authors say reviewers caught that. Mixed-ISA boot stayed
+  "in principle". Cross-ISA replay is checked in CI, not claimed
+  ([Determinism](#determinism), #62).
+- **Don't build a distributed capability system.** Barrelfish's capability
+  operations needed a blocking two-phase protocol, about 8,000 lines, and one
+  of its authors calls the capability model "by far the biggest distraction".
+  See [Credentials](#credentials) (#74).
+- **Queues decide performance.** Barrelfish found "extreme sensitivity to
+  message queue lengths". Outstanding effect requests are bounded and queue
+  depth is a metric ([Effects](#effects), #71).
+- **A machine is one failure domain, and a move can be temporary.** Barrelfish
+  said outright that "the complete system is a failure unit", and its later
+  work parked a core's state elsewhere during an upgrade and moved it back. See
+  [Placement](#placement) and [Upgrading felixd and scale](#upgrading-felixd-and-scale)
+  (#82).
+
+What this confirms: placement as policy with a fallback, pinning by instruction
+set, per-lease credentials that expire instead of being revoked, effects as
+asynchronous requests, and keeping memory and syscall traffic off the log in
+the native tier (Arrakis made the same split, the OS as control plane and
+applications on the data path). Barrelfish's agreement was cheap because it
+assumed the whole machine fails together; felixd pays for fault-tolerant
+agreement on every log write, so the classes below matter more here.
+
+Sources: Baumann et al., "The Multikernel", SOSP 2009; Schüpbach et al.,
+"Embracing diversity in the Barrelfish manycore operating system" (2008);
+Baumann, "Fish in a Barrel", SIGOPS blog (2021); Zellweger, Octopus MSc thesis
+(ETH, 2012); Gerber, PhD thesis (ETH, 2018); Zellweger et al., "Decoupling
+Cores, Kernels, and Operating Systems", OSDI 2014; Bhardwaj et al., "NrOS",
+OSDI 2021; Peter et al., "Arrakis", OSDI 2014 (abstract only).
+
 ## What felixd has to demonstrate
 
 - **Failover:** kill a node mid-run, and each of its workloads continues on
@@ -623,7 +686,10 @@ failovers. Three rules hold that:
   instruction set while stack depth still depends on it. It is recorded in the
   spec, in each snapshot header and in `nodes`. A node never claims a workload
   pinned to an ABI it doesn't implement. Until stack depth is deterministic,
-  mixed x86_64 and aarch64 clusters pin workloads by instruction set.
+  mixed x86_64 and aarch64 clusters pin workloads by instruction set. The pin
+  comes off only when CI replays the same recorded inputs on x86_64 and aarch64
+  and the output and snapshot digests match; native workloads stay pinned
+  regardless (#62).
 - **Trap classes.** A trap that depends only on the inputs (a guest panic,
   running out of fuel) is a poison input and fails the workload. A trap that
   can depend on the host (stack overflow, a host resource failure) is retried
@@ -658,6 +724,39 @@ The control plane must not grow as nodes times workloads. Nodes hold one
 session lease each, and assignments (from the scheduler in #60) replace every
 agent watching every workload lease.
 
+### State classes
+
+Agreement costs a quorum round trip, so only state that needs it pays for it.
+Each piece of system state has one class (#81):
+
+| State | Class | Why |
+|---|---|---|
+| Workload inputs, outputs, snapshots | Log record | Replay and exactly-once output depend on one order |
+| Epochs, claims, fences, grants | Log record (conditional write) | Two nodes must not both believe they hold a lease |
+| Placement assignments, node facts | Log record | The scheduler is a workload and has to replay |
+| Spec history, stream incarnations | Log record | Inputs bind to them |
+| Node presence and versions in `nodes` | TTL cache entry | Stale means absent; nothing replays from it |
+| Per-workload lease renewals beyond the node session | Avoid | Replaced by one session lease per node |
+| Instance pools, compiled modules, local metrics | Node-local, never agreed | Derived from the log and rebuilt after a restart |
+| Credentials | Node-local, outside the log | Secrets never enter the log |
+
+A new feature picks a row before it picks a mechanism. The default is not the
+log.
+
+### One machine, one failure domain
+
+A machine runs one agent and holds one session lease. Several agents on a
+machine would look like independent failure domains and are not. NUMA nodes and
+accelerators are node facts for the scheduler and for the agent's instance
+pools, which pin an instance to a NUMA node over local shared memory, never
+over Felix. A GPU or DPU host is an effect executor that advertises its effect
+kinds like any other.
+
+A planned upgrade records a drain with a return intent as an asserted node
+fact. When the node rejoins, the scheduler sends its workloads back instead of
+leaving them where first claim put them. This is a scheduler input, not lease
+machinery (#82).
+
 ## Several inputs
 
 A workload reads one input stream. Replay is deterministic because the input's
@@ -683,6 +782,10 @@ records, so placement is replayable and survives failover like any workload.
 Agents still claim through the lease, so the scheduler decides where work runs,
 never whether output is correct. First claim wins stays as the fallback when an
 assignment is missing or stale. A scheduler outside felixd is not planned.
+
+The scheduler reads a recorded stream of node facts (discovered, measured and
+operator-asserted, with asserted winning), not the `nodes` cache, so its view
+replays. See [Lessons from Barrelfish](#lessons-from-barrelfish).
 
 ## Effects
 
@@ -716,6 +819,11 @@ settle #27 and are tracked in #71:
   advertise the effect kinds and versions they serve, so a node never claims a
   workload whose effects nobody can execute. Per-effect latency is a metric
   from the first version.
+- **Outstanding requests are bounded.** The spec sets a limit per workload,
+  which is a determinism input because hitting it changes when requests are
+  issued. Each executor has its own limit and answers an excess request with a
+  typed backpressure outcome. Queue depth is a metric per workload and per
+  executor. Barrelfish found its performance anomalies in queue lengths.
 
 Plan 9 made a remote file look like a local one, and most of its clients did
 not plan for a lost server: programs had to be restarted. Octopus replaced 9P
@@ -793,13 +901,19 @@ Tracked in #74.
   identities that executors and grants check, issued by the cluster rather than
   configured by hand. Authentication stays negotiable, so a weak scheme can be
   replaced without a flag day.
+- **Tokens are not delegable.** A token is never copied or handed to another
+  workload. A stale one is refused by expiry and by the epoch fence, so there
+  is no revocation protocol. Delegation is a grant record written at the
+  control plane, the one authority. Barrelfish's distributed capabilities
+  needed agreement for every copy and revocation.
 
 Plan 9's factotum held each user's keys and ran authentication protocols on
 behalf of programs, so programs never saw secrets. Its original DES tickets
 later had to be swapped out in place.
 
 Sources: Cox, Grosse, Pike, Presotto and Quinlan, "Security in Plan 9" (2002);
-the 9front dp9ik design notes and `authsrv(6)`; the SPIFFE specification.
+the 9front dp9ik design notes and `authsrv(6)`; the SPIFFE specification;
+Gerber, PhD thesis (ETH, 2018), ch. 4; Baumann, "Fish in a Barrel" (2021).
 
 ## Native programs and the bootstrap boundary
 
