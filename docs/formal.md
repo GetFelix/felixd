@@ -4,11 +4,14 @@
 epoch from `epochs`, and fold its input into `wl.<id>.out` and `wl.<id>.snap` with
 `publish_if`. TLC checks it under each `.cfg` beside it. `scripts/check_tla.sh` runs them all
 and holds each to its registered outcome; the `tla` job in CI runs the script.
+`specs/FelixdSpecs.tla` models spec history on the same stream, and the `tla-specs` job checks
+it ([Spec history](#spec-history)).
 
 ```bash
 scripts/check_tla.sh                 # every configuration (needs Java 11+)
 scripts/check_tla.sh FelixdNoMarker  # one
 TLC_SIMULATE=100000 scripts/check_tla.sh FelixdFull  # random behaviours, not every state
+TLA_MODULE=FelixdSpecs scripts/check_tla.sh          # the spec history model
 ```
 
 ## What it checks
@@ -161,6 +164,73 @@ they are several reads after the claim has won.
 - **Cache calls** are atomic and answered. Only stream appends are delayed, reordered, or left
   unanswered.
 
+## Spec history
+
+`specs/FelixdSpecs.tla` models which spec each owner runs. Spec records are numbered in
+`sys.specs` order, and each has a module and input. A node reads the spec through its own
+`workloads` view, which moves only forward and may lag, so a stale node holds an older spec.
+Three kinds of record land on `.out`: claims, which carry the spec their owner runs and the
+floor, the highest spec claimed so far including its own; needs-operator records, which name
+their writer's spec; and outputs. Leases and epochs are reduced to the claim's fence, which
+`Felixd.tla` checks: a claim lands only at the tail its owner read, and an owner writes only
+while its claim is the last claim or needs-operator record. Any node may begin a claim at any
+time, as if the lease had expired.
+
+A node checks the spec before the lease claim (`refuse_stale_or_foreign`) and writes nothing
+if it is stale. A spec whose module or input differ from the first claim's is recorded as
+needing an operator, as is any other problem found before the claim. Otherwise it claims at the
+tail it read, carrying the floor below that tail. A refused claim reads the records past the
+tail, raises its floor from their claims and needs-operator records, and claims again. Once the
+claim is on, the node checks again and either runs or leaves the claim there and stops. The
+check passes over needs-operator records when it finds the first claim, and counts them toward
+the floor.
+
+| Invariant | Says |
+|---|---|
+| `OutputLineage` | Every output was written under the first claim's module and input. |
+| `FloorMonotone` | Claim floors never decrease along the stream. |
+| `RanMonotone` | The specs of claims whose owner ran them never decrease along the stream. |
+| `NoRunBelowFloor` | No owner runs, and no output is written under, a spec below the highest spec claimed or recorded before its claim. |
+| `CheckMatchesRun` | `felixd check` (`specs_applied` and `judged_under`) replays each output under the module, input and spec its writer ran, counts every claim that ran, and passes over every claim its owner refused for a reason on the stream at or before it. |
+
+A claim refused only for a record that landed after it, or whose owner stopped before checking
+it, is left out of `CheckMatchesRun`: the stream cannot say whether it ran, and such a claim
+never governs an output, since the next claim that runs replaces it. It can still decide the
+limits `felixd check` replays the inputs after the last output under.
+
+| Configuration | Expected | Model | Distinct states | Time |
+|---|---|---|---|---|
+| `FelixdSpecs` | pass | two nodes, an edit and then a module change, three claims, a needs-operator record, two inputs | 2,450,721 | 53 s |
+| `FelixdSpecsStale` | pass | three nodes, an edit and then an input change, three claims, one input | 7,286,048 | 2 min 50 s |
+| `FelixdSpecsNoFloorCarry` | `RanMonotone` | a claim carries only its own spec | about 3,400 | under 3 s |
+| `FelixdSpecsNoRetryFloor` | `FloorMonotone` | a refused claim does not raise its floor from the records past the tail | about 1,900 | under 3 s |
+| `FelixdSpecsNoNopFloor` | `NoRunBelowFloor` | needs-operator records do not count toward the floor (#127, second defect) | about 1,300 | under 3 s |
+| `FelixdSpecsNopFirst` | `OutputLineage` | the first claim is the first record, needs-operator records included (#127, first defect) | about 11,000 | under 3 s |
+| `FelixdSpecsNoHistory` | `OutputLineage` | no refusal of a changed module or input | about 4,300 | under 3 s |
+| `FelixdSpecsNoPostCheck` | `RanMonotone` | the refusals only before the lease claim | about 2,600 | under 3 s |
+| `FelixdSpecsCheckNopFirst` | `CheckMatchesRun` | `felixd check` takes the first record as the first claim | about 1,800 | under 3 s |
+| `FelixdSpecsCheckNoNopFloor` | `CheckMatchesRun` | `felixd check` does not raise the floor on needs-operator records | about 1,300 | under 3 s |
+| `FelixdSpecsCheckNoRefusal` | `CheckMatchesRun` | `felixd check` counts a claim below the floor before it | about 1,300 | under 3 s |
+| `FelixdSpecsCheckNoLineage` | `CheckMatchesRun` | `felixd check` counts a claim with another module or input | about 2,100 | under 3 s |
+
+The twins have two nodes, two claims, a needs-operator record and two inputs. Counts and times
+are from the `tla-specs` job on the CI runner. `FelixdSpecsFull` has three nodes, four claims,
+a needs-operator record and two inputs; it passed 13.8 million distinct states in six minutes
+without finishing, so the `TLA nightly` workflow walks it with `TLC_SIMULATE` instead.
+
+| Action | Code |
+|---|---|
+| `Learn` | a node's `workloads` read moving forward: `specs::project` and `moves_forward` |
+| `Begin` | `refuse_stale_or_foreign` before the lease claim, and the pending problem: `crates/agent/src/agent.rs` |
+| `Start`, `ClaimLand` | `OutputLog::claim`: the floor from `specs::claim_floor` and the records past the tail: `crates/agent/src/output.rs`; `encode_claim_under`: `crates/core/src/output.rs` |
+| `Recheck` | `refuse_stale_or_foreign` once the claim is on: `crates/agent/src/runner.rs` |
+| `Record` | `record_needs_operator`: `crates/agent/src/agent.rs` |
+| `Emit` | `OutputLog::append`, fenced by the claim |
+| `Stop` | a crash, a lost lease, or a superseded owner |
+
+Not in this model: failures, snapshots, epochs (`Felixd.tla`), inputs with no output, and
+`felixd run`'s own history check, which the agent's refusal backs.
+
 ## Not modelled
 
 - Lost answers to cache calls, and the renewal read-back (`crates/agent/src/lease.rs:341-355`).
@@ -173,13 +243,9 @@ they are several reads after the claim has won.
   written. The epoch floor reads it like any other record, so later claims stay above it.
 - Stale cache reads of the spec version. The code reads again when it sees a version below the
   record's.
-- Spec edits and spec records: the agent's refusal of a spec whose module or input differ from
-  the first claim's, and of a spec record below the last claim's floor, the highest spec record
-  claimed so far, which every claim carries forward, a refused one included. Each is checked before the
-  lease claim, where it writes nothing, and again after the owner's claim is on the stream, where
-  that claim stays and the lease is released, like the 0.1-module check after a claim. Tracked in
-  [#121](https://github.com/GetFelix/felixd/issues/121).
-- Several inputs, pipelines, `felixd run`'s history check, `felixd check` itself, and drain.
+- Spec edits and spec records in `Felixd.tla`. `FelixdSpecs.tla` models them
+  ([Spec history](#spec-history)).
+- Several inputs, pipelines, `felixd check` beyond which spec each input ran under, and drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
