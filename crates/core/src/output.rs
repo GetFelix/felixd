@@ -8,7 +8,8 @@
 //! so a new owner can tell what its predecessor already wrote. A claim has no
 //! body. A new owner appends one before it runs anything, so a stale owner's
 //! next conditional append is refused even if the new owner never writes an
-//! output.
+//! output. A failure's body is `spec_version (8) | reason`: the workload
+//! failed under that version of its spec. It is the last record of that run.
 //!
 //! Version 2 records are outputs without a kind byte, with the epoch after the
 //! index, and still read.
@@ -19,6 +20,7 @@ const VERSION: u8 = 3;
 const OUTPUTS_ONLY: u8 = 2;
 const OUTPUT: u8 = 0;
 const CLAIM: u8 = 1;
+const FAILURE: u8 = 2;
 const COMMON_BYTES: usize = 1 + 8;
 const OUTPUT_BYTES: usize = 8 + 4;
 
@@ -46,6 +48,13 @@ pub enum Record<'a> {
     Output(Written, &'a [u8]),
     /// An owner at `epoch` took the workload over here. It holds no output.
     Claim { epoch: u64 },
+    /// The owner at `epoch` failed the workload while it ran under spec
+    /// version `spec_version`. It holds no output.
+    Failure {
+        epoch: u64,
+        spec_version: u64,
+        reason: &'a [u8],
+    },
 }
 
 impl<'a> Record<'a> {
@@ -53,15 +62,15 @@ impl<'a> Record<'a> {
     pub fn epoch(&self) -> u64 {
         match self {
             Record::Output(written, _) => written.epoch,
-            Record::Claim { epoch } => *epoch,
+            Record::Claim { epoch } | Record::Failure { epoch, .. } => *epoch,
         }
     }
 
-    /// The output, unless this is a claim.
+    /// The output, unless this is a claim or a failure.
     pub fn output(self) -> Option<(Written, &'a [u8])> {
         match self {
             Record::Output(written, payload) => Some((written, payload)),
-            Record::Claim { .. } => None,
+            Record::Claim { .. } | Record::Failure { .. } => None,
         }
     }
 }
@@ -86,6 +95,17 @@ pub fn encode_claim(epoch: u64) -> Vec<u8> {
     out
 }
 
+/// Builds the record an owner at `epoch` appends when the workload fails
+/// under spec version `spec_version`.
+pub fn encode_failure(epoch: u64, spec_version: u64, reason: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + COMMON_BYTES + 8 + reason.len());
+    out.extend([VERSION, FAILURE]);
+    out.extend(epoch.to_be_bytes());
+    out.extend(spec_version.to_be_bytes());
+    out.extend(reason.as_bytes());
+    out
+}
+
 /// Reads an output stream record.
 pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     match record.first() {
@@ -105,6 +125,7 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     let need = match kind {
         OUTPUT => 1 + COMMON_BYTES + OUTPUT_BYTES,
         CLAIM => 1 + COMMON_BYTES,
+        FAILURE => 1 + COMMON_BYTES + 8,
         other => return Err(DecodeError::UnknownKind(other)),
     };
     let Some((epoch, body)) = rest.split_first_chunk::<8>() else {
@@ -113,6 +134,16 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     let epoch = u64::from_be_bytes(*epoch);
     if kind == CLAIM {
         return Ok(Record::Claim { epoch });
+    }
+    if kind == FAILURE {
+        let Some((spec_version, reason)) = body.split_first_chunk::<8>() else {
+            return Err(truncated(need, record));
+        };
+        return Ok(Record::Failure {
+            epoch,
+            spec_version: u64::from_be_bytes(*spec_version),
+            reason,
+        });
     }
     let Some((fields, payload)) = body.split_first_chunk::<OUTPUT_BYTES>() else {
         return Err(truncated(need, record));
@@ -156,14 +187,18 @@ fn truncated(need: usize, record: &[u8]) -> DecodeError {
     }
 }
 
-/// Whether `record` is a claim. A workload reading another's output stream
-/// skips claims, so only outputs reach its `step`.
-pub fn is_claim(record: &[u8]) -> bool {
-    matches!(decode(record), Ok(Record::Claim { .. }))
+/// Whether `record` is a claim or a failure, which hold no output. A workload
+/// reading another's output stream skips them, so only outputs reach its
+/// `step`.
+pub fn is_marker(record: &[u8]) -> bool {
+    matches!(
+        decode(record),
+        Ok(Record::Claim { .. } | Record::Failure { .. })
+    )
 }
 
 /// Whether two records hold the same output, whichever owner wrote them.
-/// A record that does not decode, or is a claim, is the same as nothing.
+/// A record that does not decode, or holds no output, is the same as nothing.
 pub fn same_output(a: &[u8], b: &[u8]) -> bool {
     let output = |r| decode(r).ok().and_then(Record::output);
     match (output(a), output(b)) {
@@ -187,6 +222,8 @@ pub enum Reconciled {
     Behind,
     /// What is there is not this workload's output.
     Diverged,
+    /// A failure record is there, written under `spec_version`.
+    Failed { spec_version: u64, reason: String },
 }
 
 /// Decides what to do about records found at the expected tail.
@@ -194,8 +231,8 @@ pub enum Reconciled {
 /// A record from a later epoch, a claim included, wins over everything else.
 /// Without that rule a stale owner that finds the new owner's identical
 /// records would skip them and write after them, and two owners would take
-/// turns on the stream. Claims from earlier epochs hold no output and are
-/// passed over.
+/// turns on the stream. Then a failure record ends the run. Claims from
+/// earlier epochs hold no output and are passed over.
 pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconciled {
     let mut found = Vec::with_capacity(existing.len());
     for &record in existing {
@@ -211,6 +248,19 @@ pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconcile
         .max()
     {
         return Reconciled::Superseded { epoch: later };
+    }
+    if let Some((spec_version, reason)) = found.iter().find_map(|(r, _)| match r {
+        Record::Failure {
+            spec_version,
+            reason,
+            ..
+        } => Some((*spec_version, String::from_utf8_lossy(reason).into_owned())),
+        _ => None,
+    }) {
+        return Reconciled::Failed {
+            spec_version,
+            reason,
+        };
     }
     let outputs: Vec<&[u8]> = found
         .iter()

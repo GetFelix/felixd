@@ -36,8 +36,8 @@ fn a_claim_round_trips_and_holds_no_output() {
     assert_eq!(decode(&record), Ok(Record::Claim { epoch: 9 }));
     assert_eq!(decode(&record).unwrap().epoch(), 9);
     assert_eq!(decode(&record).unwrap().output(), None);
-    assert!(is_claim(&record));
-    assert!(!is_claim(&encode(h(1, 0), 9, b"")));
+    assert!(is_marker(&record));
+    assert!(!is_marker(&encode(h(1, 0), 9, b"")));
     assert!(!same_output(&record, &record));
 }
 
@@ -81,8 +81,8 @@ fn an_unknown_version_or_kind_is_refused() {
     record[0] = 4;
     assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(4)));
     record[0] = 3;
-    record[1] = 2;
-    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(2)));
+    record[1] = 3;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(3)));
 }
 
 #[test]
@@ -185,4 +185,41 @@ fn earlier_claims_are_passed_over() {
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(1));
     let theirs = [encode_claim(7)];
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(0));
+}
+
+#[test]
+fn a_failure_round_trips_and_holds_no_output() {
+    let record = encode_failure(4, 12, "out of fuel");
+    assert_eq!(&record[..2], [3, 2]);
+    assert_eq!(
+        decode(&record),
+        Ok(Record::Failure {
+            epoch: 4,
+            spec_version: 12,
+            reason: b"out of fuel",
+        })
+    );
+    assert_eq!(decode(&record).unwrap().epoch(), 4);
+    assert_eq!(decode(&record).unwrap().output(), None);
+    assert!(is_marker(&record));
+    assert!(!same_output(&record, &record));
+    assert!(decode(&record[..17]).is_err());
+}
+
+#[test]
+fn a_failure_ends_the_run_unless_a_later_owner_wrote() {
+    let ours = batch(7, &[10]);
+    let theirs = [encode_failure(5, 3, "trap")];
+    assert_eq!(
+        reconcile(7, &ours, &refs(&theirs)),
+        Reconciled::Failed {
+            spec_version: 3,
+            reason: "trap".to_owned()
+        }
+    );
+    let theirs = [encode_failure(5, 3, "trap"), encode_claim(8)];
+    assert_eq!(
+        reconcile(7, &ours, &refs(&theirs)),
+        Reconciled::Superseded { epoch: 8 }
+    );
 }

@@ -194,16 +194,26 @@ impl TestFelix {
             .collect()
     }
 
-    /// The output records on `stream`, without claims.
+    /// The output records on `stream`, without claims and failures.
     pub(crate) async fn outputs(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
         let mut records = self.read_all(stream).await;
-        records.retain(|(_, r)| !output::is_claim(r));
+        records.retain(|(_, r)| !output::is_marker(r));
         records
     }
 
     pub(crate) async fn spec(&self) -> WorkloadSpec {
         let value = self.felix.cache_get(names::WORKLOADS, ID).await.unwrap();
         WorkloadSpec::decode(&value.expect("the workload has a spec")).unwrap()
+    }
+
+    /// The cache version of the workload's spec.
+    pub(crate) async fn spec_version(&self) -> u64 {
+        let found = self
+            .felix
+            .cache_get_versioned(names::WORKLOADS, ID)
+            .await
+            .unwrap();
+        found.expect("the workload has a spec").version
     }
 
     pub(crate) async fn put_spec(&self, spec: &WorkloadSpec) {
@@ -389,7 +399,7 @@ pub(crate) async fn assert_uninterrupted_on(
         epochs.is_sorted(),
         "two owners took turns on {output}: {epochs:?}"
     );
-    let got: Vec<&Vec<u8>> = records.iter().filter(|r| !output::is_claim(r)).collect();
+    let got: Vec<&Vec<u8>> = records.iter().filter(|r| !output::is_marker(r)).collect();
     assert_eq!(got.len(), want.len(), "output length of {output}");
     assert!(
         got.iter()

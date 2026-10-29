@@ -44,3 +44,19 @@ async fn shutdown_ends_a_wait_that_never_finishes() {
     tokio::pin!(shutdown);
     assert_eq!(unless(shutdown, std::future::pending::<()>()).await, None);
 }
+
+#[test]
+fn a_failed_spec_read_below_the_record_is_read_again() {
+    // A stale read of an earlier run's failed spec is not the record's spec.
+    assert_eq!(spec_write(2, WorkloadState::Failed, 3), SpecWrite::Stale);
+    assert_eq!(spec_write(2, WorkloadState::Running, 3), SpecWrite::Stale);
+    assert_eq!(spec_write(3, WorkloadState::Running, 3), SpecWrite::Write);
+    assert_eq!(
+        spec_write(4, WorkloadState::Failed, 3),
+        SpecWrite::Done(true)
+    );
+    assert_eq!(
+        spec_write(4, WorkloadState::Running, 3),
+        SpecWrite::Done(false)
+    );
+}

@@ -337,13 +337,14 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
-Claim records on another workload's `.out` are not inputs: the owner and
-`felixd check` pass over them, so only outputs reach `step`.
+Claim and failure records on another workload's `.out` are not inputs: the
+owner and `felixd check` pass over them, so only outputs reach `step`.
 
 Each output record carries a small header: the input offset that produced it,
 its index among that step's outputs, and the lease epoch of the owner that
 wrote it. The output stream also holds claim records, one per takeover, which
-carry only the new owner's epoch. Each snapshot carries the input offset it covers and the output tail
+carry only the new owner's epoch, and a failure record when the workload
+fails. Each snapshot carries the input offset it covers and the output tail
 at that point.
 
 `felixd run` creates the workload's streams through the control plane's REST
@@ -417,11 +418,22 @@ An agent never adopts a lease it finds under its own name. A restarted agent
 waits for its old leases to expire, so two processes configured with the same
 node id can't both believe they hold a workload. On a clean shutdown an agent
 deletes its leases with `cache_delete_if`, so another node can claim at once.
-Only a holder marks a workload failed in its spec. Right before the write it
-renews its lease the same way, and writes nothing if that renewal is refused,
-so a node that was frozen while another took over can't fail the workload the
-other node now runs. The write itself is a `cache_put_if` on the spec version
-it read. It keeps renewing the lease until the
+Only a holder fails a workload, and the failure is fenced by epoch like an
+output. The holder renews its lease the same way first, and gives up if that
+renewal is refused. Then it appends a failure record to the output stream
+with `publish_if` at the tail it just read, unless the last record there is
+from a later epoch. Everything below a later owner's claim is from earlier
+epochs, so the record lands only before any later owner has begun. A node
+frozen after the renewal, while another took over, therefore can't fail the
+workload the other node now runs: its append is refused and it finds the new
+owner's claim. The record names the spec version the workload failed under
+and the reason. `failed` in the spec follows from it, written with
+`cache_put_if` on that version, so a later edit is not overwritten. An owner
+that finds a failure record for its own spec version, while claiming or at
+its expected tail, writes `failed` into the spec instead of running, which
+covers a holder that crashed between the two writes. A failure record under
+an older spec version is from a run before `felixd run` wrote the spec
+again, and is passed over. The holder keeps renewing the lease until the
 failure is recorded, so a slow write doesn't let the lease lapse with the
 spec still `running`.
 
