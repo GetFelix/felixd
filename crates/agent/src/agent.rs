@@ -442,7 +442,7 @@ async fn own(
         // Before the lease claim, so a spec every node refuses does not
         // take an epoch on each of them. The runner looks again after its
         // claim is on the stream.
-        match specs::refuse_stale_or_foreign(&node.felix, &id, &spec, None).await {
+        match specs::refuse_stale_or_foreign(&node.felix, &id, &spec).await {
             Ok(()) => {}
             Err(error) => {
                 if let Some(reason) = error.downcast_ref::<NeedsOperator>() {

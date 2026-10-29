@@ -312,3 +312,41 @@ async fn a_snapshot_frozen_past_a_takeover_is_safe_to_resume_from() {
         .collect();
     assert!(epochs[5..].iter().all(|&e| e > stale), "{epochs:?}");
 }
+
+/// A claim naming a later spec is more than one look back, behind forty
+/// outputs. A node holding an older spec must still find its floor and
+/// refuse.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_floor_far_back_is_found_page_by_page() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let stale = t.spec().await;
+    t.put_spec(&stale).await;
+    let newer = t.spec().await.record.unwrap();
+    t.put_cache_spec(&stale).await;
+    t.publish_all(INPUT, (0..40).map(count)).await;
+    let at = input_offsets(&t).await;
+    let mut stream = vec![output::encode_claim_under(1, newer, newer, "newer")];
+    stream.extend((0..40).map(|i| counted(&at, i, 1)));
+    t.publish_all(OUTPUT, stream).await;
+    let _agent = t.start_agent();
+    t.publish_all(INPUT, (40..45).map(count)).await;
+    tokio::time::sleep(common::LEASE_TTL * 3).await;
+    assert_eq!(records(&t).await.len(), 41, "the stale spec ran");
+}
+
+/// The last claim predates spec records and is more than one look back. The
+/// backward read pages to it, finds no floor, and the owner carries on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_whose_last_claim_names_no_spec_is_read_back_to_it() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..40).map(count)).await;
+    let at = input_offsets(&t).await;
+    let mut stream = vec![output::encode_claim(1, "")];
+    stream.extend((0..40).map(|i| counted(&at, i, 1)));
+    t.publish_all(OUTPUT, stream).await;
+    let _agent = t.start_agent();
+    t.publish_all(INPUT, (40..45).map(count)).await;
+    assert_uninterrupted(&t, &module, 45).await;
+}

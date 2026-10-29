@@ -369,9 +369,11 @@ the next owner's claim names the new record. A new module or input stream
 would not reproduce what the streams already hold, so `felixd run` refuses
 that change once the output or snapshot stream has a record, and an agent
 refuses to run a spec whose module or input differ from the spec the output
-stream's first claim names. Claims only move forward too: an agent refuses a
-spec record below one a claim on the stream already names, which is what a
-node with a stale watch holds. It checks both before its lease claim, so a
+stream's first claim names. Claims only move forward too: each claim carries
+the highest spec record claimed so far, like the epoch floor, and an agent
+refuses a spec record below the last claim's floor, which is what a node with
+a stale watch holds. Finding the last claim pages back from the tail a few
+records at a time. It checks both before its lease claim, so a
 refused spec takes no epoch, and again once its own claim is on the stream,
 when no other claim can still land first. Either way the workload is left to
 an operator. `felixd run` refuses to point `workloads` at its record if the

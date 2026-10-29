@@ -27,7 +27,7 @@ Behaviour that matters:
   another node can claim.
 - **Spec records.** An agent runs a `workloads` value only when the `sys.specs` record it names
   says the same. It refuses a spec whose module or input differ from the one the output stream's
-  first claim names, or whose record is below one a claim already names, before its lease claim
+  first claim names, or whose record is below the last claim's floor (the highest spec record claimed so far, carried by every claim), before its lease claim
   and again after its own claim is on the stream. Either refusal leaves the workload to an
   operator. A record past the tail of `sys.specs` is waited for 30 s, then left to an operator too.
 - **Fence.** A new owner appends a claim record, naming its spec record, to the output stream before it resumes. Every

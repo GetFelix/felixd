@@ -6,6 +6,7 @@ use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
 use crate::runner::{FailedOnStream, LostLease, Superseded, poison};
+use crate::specs;
 
 /// Consecutive failed attempts to write one batch before giving up.
 const MAX_ATTEMPTS: u32 = 5;
@@ -160,6 +161,9 @@ impl<'a> OutputLog<'a> {
         if from.is_none() {
             return Ok(log);
         }
+        // The highest spec claimed before this claim, which it carries
+        // forward even if its owner then refuses its own older spec.
+        let mut floor = specs::claim_floor(felix, stream, start).await?.unwrap_or(0);
         let mut failures = 0;
         loop {
             if !fence.holds() {
@@ -169,6 +173,7 @@ impl<'a> OutputLog<'a> {
             let claim = vec![output::encode_claim_under(
                 fence.epoch(),
                 spec_record,
+                floor,
                 fence.node(),
             )];
             let sent = send(felix, stream, claim, log.tail, faults::Write::Claim).await;
@@ -203,12 +208,18 @@ impl<'a> OutputLog<'a> {
             let mut ours = false;
             for record in felix.read_range(stream, log.tail, seen_tail).await? {
                 let found = log.check_found(&record.payload, record.offset)?;
-                ours |= found
-                    == Record::Claim {
-                        epoch: fence.epoch(),
-                        node: fence.node().as_bytes(),
-                        spec: Some(spec_record),
-                    };
+                if let Record::Claim {
+                    floor: Some(claimed),
+                    ..
+                } = found
+                {
+                    floor = floor.max(claimed);
+                }
+                // An earlier attempt that landed may carry an older floor.
+                ours |= matches!(found, Record::Claim { epoch, node, spec, .. }
+                    if epoch == fence.epoch()
+                        && node == fence.node().as_bytes()
+                        && spec == Some(spec_record));
             }
             log.tail = seen_tail;
             if ours {

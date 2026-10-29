@@ -123,17 +123,13 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     Ok(hash)
 }
 
-/// The workload's latest spec: its last record, or for one written before
-/// specs were records, its cache value. `None` for a workload with no
-/// `workloads` entry, which no agent has run.
+/// The spec the `workloads` entry projects. Not the last record on
+/// `sys.specs`, which may be one that lost to a later one and never ran. The
+/// entry carries the spec, and agents run it only when its record agrees.
+/// `None` for a workload with no entry, which no agent has run.
 async fn previous_spec(felix: &Felix, id: &str) -> Result<Option<WorkloadSpec>> {
-    let Some(cached) = felix.cache_get(names::WORKLOADS, id).await? else {
-        return Ok(None);
-    };
-    if let Some((_, spec)) = specs::history(felix, id).await?.latest() {
-        return Ok(Some(spec.clone()));
-    }
-    Ok(WorkloadSpec::decode(&cached).ok())
+    let cached = felix.cache_get(names::WORKLOADS, id).await?;
+    Ok(cached.and_then(|c| WorkloadSpec::decode(&c).ok()))
 }
 
 /// Whether `stream` holds any record. Its tail alone does not say: a new

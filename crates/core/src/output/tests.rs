@@ -55,10 +55,12 @@ fn the_layout_is_fixed() {
 
 #[test]
 fn a_claim_under_a_spec_names_it() {
-    let record = encode_claim_under(5, 3, "n");
+    let record = encode_claim_under(5, 3, 7, "n");
     assert_eq!(
         record,
-        [4, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3, b'n']
+        [
+            4, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 7, b'n'
+        ]
     );
     assert_eq!(
         decode(&record),
@@ -66,8 +68,14 @@ fn a_claim_under_a_spec_names_it() {
             epoch: 5,
             node: b"n",
             spec: Some(3),
+            floor: Some(7),
         })
     );
+    // The floor never falls below the claim's own spec.
+    assert!(matches!(
+        decode(&encode_claim_under(5, 9, 2, "n")),
+        Ok(Record::Claim { floor: Some(9), .. })
+    ));
     assert!(is_marker(&record));
     // Version 3 never had it.
     let mut old = record.clone();
@@ -84,6 +92,7 @@ fn a_claim_round_trips_and_holds_no_output() {
             epoch: 9,
             node: b"",
             spec: None,
+            floor: None,
         })
     );
     assert_eq!(
@@ -92,6 +101,7 @@ fn a_claim_round_trips_and_holds_no_output() {
             epoch: 9,
             node: b"node-a",
             spec: None,
+            floor: None,
         })
     );
     assert_eq!(decode(&record).unwrap().epoch(), 9);
@@ -114,6 +124,7 @@ fn a_version_3_record_reads_as_out_with_no_key() {
             epoch: 5,
             node: b"n",
             spec: None,
+            floor: None,
         })
     );
     let failure = [3, 2, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, b'r'];

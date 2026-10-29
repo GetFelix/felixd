@@ -118,7 +118,7 @@ async fn an_owner_refuses_after_its_claim_when_an_older_spec_claimed_first() {
     })
     .await;
     let (lease, _) = t.lease(ID).await.expect("the frozen node's lease");
-    let claim = output::encode_claim_under(lease.epoch - 1, older.record.unwrap(), "older");
+    let claim = output::encode_claim_under(lease.epoch - 1, older.record.unwrap(), 0, "older");
     t.publish_if(OUTPUT, vec![claim], 0).await;
     frozen.resume();
     t.publish_all(INPUT, (0..3).map(count)).await;
@@ -153,7 +153,7 @@ async fn an_agent_refuses_a_spec_older_than_one_already_claimed() {
     let newer = t.spec().await.record.unwrap();
     t.publish_if(
         OUTPUT,
-        vec![output::encode_claim_under(1, newer, "newer")],
+        vec![output::encode_claim_under(1, newer, newer, "newer")],
         0,
     )
     .await;
@@ -216,4 +216,64 @@ async fn a_new_module_is_refused_once_the_workload_has_output() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("already has output"), "{stderr}");
     assert_eq!(t.spec().await.module, before);
+}
+
+/// Claims 10 and 12 are on the stream when a node holding 11 passed its
+/// look before 12 landed. Its own claim must carry 12 forward as the floor
+/// and it refuses; a second node holding 11 then sees that floor and refuses
+/// before claiming, although the last claim names 11.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_claim_carries_the_floor_so_the_next_stale_node_refuses() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let stale = t.spec().await;
+    t.put_spec(&stale).await;
+    let newer = t.spec().await.record.unwrap();
+    t.put_cache_spec(&stale).await;
+    let mut first =
+        t.start_node_with_ttl("stale-1", "freeze-before-claim=1", Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        first.stopped().then_some(())
+    })
+    .await;
+    let (lease, _) = t.lease(ID).await.expect("the frozen node's lease");
+    let claim = output::encode_claim_under(lease.epoch - 1, newer, newer, "newer");
+    t.publish_if(OUTPUT, vec![claim], 0).await;
+    first.resume();
+    let floor = eventually(
+        "the stale node's claim",
+        Duration::from_secs(30),
+        || async {
+            t.read_all(OUTPUT)
+                .await
+                .iter()
+                .find_map(|(_, r)| match output::decode(r) {
+                    Ok(Record::Claim {
+                        epoch, spec, floor, ..
+                    }) if epoch == lease.epoch => Some((spec, floor)),
+                    _ => None,
+                })
+        },
+    )
+    .await;
+    assert_eq!(floor, (stale.record, Some(newer)));
+    eventually(
+        "the lease to be released",
+        Duration::from_secs(30),
+        || async { t.lease(ID).await.is_none().then_some(()) },
+    )
+    .await;
+
+    let _second = t.start_agent();
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    tokio::time::sleep(LEASE_TTL * 3).await;
+    assert!(t.outputs(OUTPUT).await.is_empty(), "the stale spec ran");
+    let claims = t
+        .read_all(OUTPUT)
+        .await
+        .iter()
+        .filter(|(_, r)| matches!(output::decode(r), Ok(Record::Claim { .. })))
+        .count();
+    assert_eq!(claims, 2, "the second stale node claimed");
+    assert!(first.alive(), "the first stale node exited");
 }

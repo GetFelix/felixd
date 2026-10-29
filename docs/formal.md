@@ -171,7 +171,8 @@ they are several reads after the claim has won.
 - Stale cache reads of the spec version. The code reads again when it sees a version below the
   record's.
 - Spec edits and spec records: the agent's refusal of a spec whose module or input differ from
-  the first claim's, and of a spec record below one already claimed. Each is checked before the
+  the first claim's, and of a spec record below the last claim's floor, the highest spec record
+  claimed so far, which every claim carries forward, a refused one included. Each is checked before the
   lease claim, where it writes nothing, and again after the owner's claim is on the stream, where
   that claim stays and the lease is released, like the 0.1-module check after a claim. Tracked in
   [#121](https://github.com/GetFelix/felixd/issues/121).

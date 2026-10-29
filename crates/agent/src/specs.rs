@@ -6,7 +6,7 @@ use bytes::Bytes;
 use felix_client::{CacheCondition, ConditionalWrite};
 use felixd_core::names;
 use felixd_core::output::{self, Record};
-use felixd_core::spec::{History, SpecRecord, WorkloadSpec, moves_forward};
+use felixd_core::spec::{SpecRecord, WorkloadSpec, moves_forward};
 
 use crate::felix::Felix;
 use crate::runner::NeedsOperator;
@@ -89,16 +89,6 @@ pub(crate) async fn check_record(felix: &Felix, id: &str, spec: &WorkloadSpec) -
     Ok(())
 }
 
-/// Every spec record of workload `id`.
-pub(crate) async fn history(felix: &Felix, id: &str) -> Result<History> {
-    let tail = felix.tail(names::SPECS).await?;
-    let records = felix.read_range(names::SPECS, 0, tail).await?;
-    Ok(History::read(
-        id,
-        records.iter().map(|r| (r.offset, r.payload.as_ref())),
-    )?)
-}
-
 /// Writes `spec`, the cache value of the record at `spec.record`, into
 /// `workloads`, unless the entry already names that record or a later one
 /// ([`moves_forward`]). Returns `None` if it wrote, or the record the entry
@@ -134,6 +124,10 @@ pub(crate) async fn project(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Res
     }
 }
 
+/// Records a backward or forward look at an output stream reads at once, so
+/// memory stays bounded however long the stream or large its records.
+const LOOK_RECORDS: u64 = 16;
+
 /// The spec the first claim on workload `id`'s output stream names. Owners
 /// refuse a spec whose module or input differ from it, so everything on the
 /// stream was written under that module and input. `None` for a stream with
@@ -143,7 +137,8 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
     let tail = felix.tail(&stream).await?;
     let mut next = 0;
     while next < tail {
-        let (page, after) = felix.read_page(&stream, next, tail).await?;
+        let end = tail.min(next + LOOK_RECORDS);
+        let (page, after) = felix.read_page(&stream, next, end).await?;
         if let Some(first) = page.first() {
             return match output::decode(&first.payload) {
                 Ok(Record::Claim {
@@ -160,16 +155,16 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
 
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
 /// was written under another module or input, which `spec` would not
-/// reproduce, or when a claim there names a later spec record, which means
-/// this node's view of the spec is stale. `own_epoch` is this owner's epoch
-/// once its claim is on the stream, so its own claim is passed over. Both are
-/// [`NeedsOperator`]; a stale node is restarted by its watch when it catches
-/// up.
+/// reproduce, or when the last claim's floor is above `spec`'s record, which
+/// means a later spec has been claimed and this node's view is stale. Called
+/// before the lease claim and again once this owner's claim is on the
+/// stream, when the last claim is its own and its floor still says whether a
+/// later spec was claimed before it. Both are [`NeedsOperator`]; a stale node
+/// is restarted by its watch when it catches up.
 pub(crate) async fn refuse_stale_or_foreign(
     felix: &Felix,
     id: &str,
     spec: &WorkloadSpec,
-    own_epoch: Option<u64>,
 ) -> Result<()> {
     if let Some(written) = written_under(felix, id).await?
         && let Some(conflict) = written.conflicts_with_history(spec)
@@ -180,40 +175,35 @@ pub(crate) async fn refuse_stale_or_foreign(
         .into());
     }
     let ours = spec.record.context("the spec names no spec record")?;
-    if let Some(later) = latest_claimed(felix, id, own_epoch)
+    let stream = names::output_stream(id);
+    let tail = felix.tail(&stream).await?;
+    if let Some(floor) = claim_floor(felix, &stream, tail)
         .await?
-        .filter(|&claimed| claimed > ours)
+        .filter(|&floor| floor > ours)
     {
         return Err(NeedsOperator(format!(
-            "spec record {later} has already run, and this node has {ours}"
+            "spec record {floor} has already been claimed, and this node has {ours}"
         ))
         .into());
     }
     Ok(())
 }
 
-/// The spec record the latest claim on workload `id`'s output stream names,
-/// passing over claims at `skip_epoch` and claims that name none. It reads
-/// back from the tail, past every output since that claim.
-async fn latest_claimed(felix: &Felix, id: &str, skip_epoch: Option<u64>) -> Result<Option<u64>> {
-    let stream = names::output_stream(id);
-    let mut end = felix.tail(&stream).await?;
-    let mut window = 16;
+/// The floor of the last claim on `stream` below `end`: the highest spec
+/// record claimed on it so far. `None` if that claim predates spec records or
+/// there is none. It pages back from `end` a few records at a time and stops
+/// at the first claim of any kind, so it reads every output since the last
+/// takeover but holds only one page.
+pub(crate) async fn claim_floor(felix: &Felix, stream: &str, end: u64) -> Result<Option<u64>> {
+    let mut end = end;
     while end > 0 {
-        let from = end.saturating_sub(window);
-        for record in felix.read_range(&stream, from, end).await?.iter().rev() {
-            if let Ok(Record::Claim {
-                epoch,
-                spec: Some(spec),
-                ..
-            }) = output::decode(&record.payload)
-                && Some(epoch) != skip_epoch
-            {
-                return Ok(Some(spec));
+        let from = end.saturating_sub(LOOK_RECORDS);
+        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+            if let Ok(Record::Claim { floor, .. }) = output::decode(&record.payload) {
+                return Ok(floor);
             }
         }
         end = from;
-        window = window.saturating_mul(8);
     }
     Ok(None)
 }

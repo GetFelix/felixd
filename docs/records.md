@@ -34,7 +34,11 @@ A claim continues with the new owner's node id, in UTF-8, to the end of the reco
 tell which node wrote each epoch. Claims written before that end after the epoch, and a reader takes
 their node as unknown. A new owner appends one before it resumes, so a stale owner's next
 `publish_if` is refused. A claim under a spec, which this build writes, continues with the
-`sys.specs` offset (8) of the spec record the owner runs, then the node id as above. Kind 1 claims
+`sys.specs` offset (8) of the spec record the owner runs, the floor (8), then the node id as above.
+The floor is the highest spec record claimed on the stream so far, this claim's own included. An
+owner takes it from the last claim before its own, and from any claim it finds past the tail when
+its claim is refused, so the last claim alone says whether an older spec is being run, even when
+that claim's owner refused its spec. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
 judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
 run a spec whose module or input differ from the one the stream's first claim names, or whose
