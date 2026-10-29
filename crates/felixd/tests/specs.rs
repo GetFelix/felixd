@@ -9,9 +9,9 @@ mod common;
 use std::time::Duration;
 
 use common::{ID, INPUT, LEASE_TTL, OUTPUT, eventually, test_felix};
-use felixd_core::module;
 use felixd_core::output::{self, Record};
 use felixd_core::spec::WorkloadState;
+use felixd_core::{module, names};
 
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
@@ -96,8 +96,17 @@ async fn an_agent_refuses_a_spec_record_with_a_new_module_once_there_is_output()
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_refuses_after_its_claim_when_an_older_spec_claimed_first() {
     let Some(t) = test_felix().await else { return };
-    let window = t.submit_as("other", "window", &[]).await;
     t.submit("counter", &[]).await;
+    // Only the module: a second workload would take the node's one freeze.
+    let window = felixd_testkit::workload("window");
+    t.felix
+        .cache_put(
+            names::MODULES,
+            &module::hash(&window),
+            window.clone().into(),
+        )
+        .await
+        .unwrap();
     let older = t.spec().await;
     let mut newer = older.clone();
     newer.module = module::hash(&window);
