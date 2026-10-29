@@ -550,10 +550,11 @@ FailRetry(n) ==
 \* No node of this build can run the workload until an operator acts: found
 \* before the claim (a module refused or missing, a spec not in the history
 \* or conflicting with the output), when the node claims only to record it,
-\* or while running (a restore out of fuel). It is recorded like a failure.
+\* or once its claim is on the stream (the spec checked again, or a restore
+\* out of fuel). It is recorded like a failure.
 NeedsOperator(n) ==
     /\ FailRecord /\ LocalFaults
-    /\ nd[n].pc \in {"marker", "run", "post"}
+    /\ nd[n].pc \in {"marker", "rsnap"}
     /\ nd' = [nd EXCEPT ![n].pc = "failing", ![n].nop = TRUE]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
