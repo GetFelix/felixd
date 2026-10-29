@@ -200,8 +200,8 @@ limits `felixd check` replays the inputs after the last output under.
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdSpecs` | pass | two nodes, an edit and then a module change, three claims, a needs-operator record, two inputs | 2,450,721 | 1 min 6 s |
-| `FelixdSpecsStale` | pass | three nodes, an edit and then an input change, three claims, one input | STATES | TIME |
+| `FelixdSpecs` | pass | two nodes, an edit and then a module change, three claims, a needs-operator record, two inputs | 2,450,721 | 53 s |
+| `FelixdSpecsStale` | pass | three nodes, an edit and then an input change, three claims, one input | 7,286,048 | 2 min 50 s |
 | `FelixdSpecsNoFloorCarry` | `RanMonotone` | a claim carries only its own spec | about 3,400 | under 3 s |
 | `FelixdSpecsNoRetryFloor` | `FloorMonotone` | a refused claim does not raise its floor from the records past the tail | about 1,900 | under 3 s |
 | `FelixdSpecsNoNopFloor` | `NoRunBelowFloor` | needs-operator records do not count toward the floor (#127, second defect) | about 1,300 | under 3 s |
