@@ -98,9 +98,21 @@ impl TestFelix {
     }
 
     pub(crate) fn start_node_with_ttl(&self, node_id: &str, faults: &str, ttl: Duration) -> Agent {
+        self.start_node_with_args(node_id, faults, ttl, &[])
+    }
+
+    /// Starts an agent with more `felixd agent` arguments.
+    pub(crate) fn start_node_with_args(
+        &self,
+        node_id: &str,
+        faults: &str,
+        ttl: Duration,
+        args: &[&str],
+    ) -> Agent {
         let ttl = ttl.as_millis().to_string();
         let child = self
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
+            .args(args)
             .env("FELIXD_FAULTS", faults)
             .spawn()
             .expect("start felixd agent");
@@ -123,6 +135,11 @@ impl TestFelix {
     /// Creates the input stream and submits example workload `workload` as
     /// [`ID`] with `felixd run <args>`. Returns the module.
     pub(crate) async fn submit(&self, workload: &str, args: &[&str]) -> Vec<u8> {
+        self.submit_as(ID, workload, args).await
+    }
+
+    /// As [`Self::submit`], as workload `id`.
+    pub(crate) async fn submit_as(&self, id: &str, workload: &str, args: &[&str]) -> Vec<u8> {
         let module = felixd_testkit::workload(workload);
         let dir = std::env::temp_dir().join(format!("felixd-{}", self.settings.namespace));
         std::fs::create_dir_all(&dir).unwrap();
@@ -133,7 +150,7 @@ impl TestFelix {
         };
         ensure_stream(&self.settings, INPUT, kind).await.unwrap();
         let status = self
-            .felixd(&["run", "--id", ID, "--input", INPUT])
+            .felixd(&["run", "--id", id, "--input", INPUT])
             .args(args)
             .arg(&path)
             .status()
@@ -199,6 +216,11 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
+    /// Asks the agent to shut down cleanly, as Ctrl-C does.
+    pub(crate) fn interrupt(&self) {
+        self.signal("INT");
+    }
+
     pub(crate) fn kill(&mut self) {
         self.signal("CONT");
         let _ = self.child.kill();
@@ -293,27 +315,40 @@ pub(crate) fn expected(module: &[u8], inputs: &[(u64, Vec<u8>)]) -> Vec<Vec<u8>>
 /// Waits for the output of every input on the input stream, then checks the
 /// output stream holds exactly that.
 pub(crate) async fn assert_uninterrupted(t: &TestFelix, module: &[u8], inputs: u64) {
+    assert_uninterrupted_on(t, module, inputs, OUTPUT).await;
+}
+
+/// As [`assert_uninterrupted`], for the output stream `output`.
+pub(crate) async fn assert_uninterrupted_on(
+    t: &TestFelix,
+    module: &[u8],
+    inputs: u64,
+    output: &str,
+) {
     let inputs_found = t.read_all(INPUT).await;
     assert_eq!(inputs_found.len() as u64, inputs);
     let want = expected(module, &inputs_found);
     eventually("all output", Duration::from_secs(60), || async {
-        let got = t.read_all(OUTPUT).await;
+        let got = t.read_all(output).await;
         (got.len() >= want.len()).then_some(())
     })
     .await;
     // Give a duplicate time to show up before comparing.
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let got: Vec<Vec<u8>> = t.read_all(OUTPUT).await.into_iter().map(|r| r.1).collect();
-    assert_eq!(got.len(), want.len(), "output length");
+    let got: Vec<Vec<u8>> = t.read_all(output).await.into_iter().map(|r| r.1).collect();
+    assert_eq!(got.len(), want.len(), "output length of {output}");
     assert!(
         got.iter()
             .zip(&want)
             .all(|(g, w)| output::same_output(g, w)),
-        "output differs from an uninterrupted run"
+        "{output} differs from an uninterrupted run"
     );
     let epochs: Vec<u64> = got
         .iter()
         .map(|r| output::decode(r).unwrap().0.epoch)
         .collect();
-    assert!(epochs.is_sorted(), "two owners took turns: {epochs:?}");
+    assert!(
+        epochs.is_sorted(),
+        "two owners took turns on {output}: {epochs:?}"
+    );
 }

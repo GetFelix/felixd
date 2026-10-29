@@ -9,5 +9,5 @@ mod runtime;
 mod workload;
 
 pub use felixd_core::spec::Limits;
-pub use runtime::{LoadError, Runtime};
+pub use runtime::{Compiled, LoadError, Runtime};
 pub use workload::{Failure, FailureKind, Workload, WorkloadError};

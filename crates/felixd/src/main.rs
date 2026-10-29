@@ -11,6 +11,7 @@ use connection::Connection;
 use felixd_agent::agent::AgentConfig;
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
+use felixd_core::placement::{self, FirstClaimWins};
 use felixd_runtime::Limits;
 
 /// Runs deterministic WebAssembly workloads on a Felix log.
@@ -40,6 +41,13 @@ enum Command {
             value_parser = clap::value_parser!(u64).range(felixd_core::lease::MIN_TTL.as_millis() as u64..),
         )]
         lease_ttl_ms: u64,
+        /// The most workloads this node holds at once.
+        #[arg(long, default_value_t = placement::DEFAULT_MAX_WORKLOADS)]
+        max_workloads: usize,
+        /// The longest random wait, in milliseconds, before claiming a free
+        /// workload, so that the first node to see it does not take everything.
+        #[arg(long, default_value_t = placement::DEFAULT_CLAIM_DELAY.as_millis() as u64)]
+        claim_delay_ms: u64,
     },
     /// Submit a workload: store its module, create its streams and start it.
     Run {
@@ -83,6 +91,8 @@ async fn main() -> Result<()> {
             connection,
             node_id,
             lease_ttl_ms,
+            max_workloads,
+            claim_delay_ms,
         } => {
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
@@ -91,6 +101,10 @@ async fn main() -> Result<()> {
                 node_id: node_id.unwrap_or_else(default_node_id),
                 lease: LeaseTiming {
                     ttl: Duration::from_millis(lease_ttl_ms),
+                },
+                placement: FirstClaimWins {
+                    max_workloads,
+                    max_delay: Duration::from_millis(claim_delay_ms),
                 },
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
