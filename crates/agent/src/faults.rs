@@ -196,12 +196,30 @@ pub(crate) fn before_claim() {
     }
 }
 
+/// Stops the whole process, renewals included, and returns once it is
+/// continued.
 fn freeze() {
     tracing::warn!("injected freeze");
-    // Stopping ourselves stops every thread at once, renewals included.
-    let _ = std::process::Command::new("kill")
-        .args(["-STOP", &std::process::id().to_string()])
-        .status();
+    until_continued(|| {
+        let _ = std::process::Command::new("kill")
+            .args(["-STOP", &std::process::id().to_string()])
+            .status();
+    });
+}
+
+/// Runs `stop`, then blocks until `SIGCONT`. `kill -STOP` is aimed at the
+/// process, so the kernel may hand it to another thread, and this one can
+/// return from `stop` and run on until that thread stops the group. That is
+/// long enough to send the write the freeze was meant to hold back. It
+/// blocks rather than awaits so the task cannot be dropped in between, as by
+/// a select on the renewals, and the frozen write is still sent on waking.
+fn until_continued(stop: impl FnOnce()) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut continued = signal(SignalKind::from_raw(libc::SIGCONT)).expect("listen for SIGCONT");
+    stop();
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(continued.recv());
+    });
 }
 
 pub(crate) async fn before_failure_record() {
@@ -242,3 +260,6 @@ pub(crate) fn during_compile() {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
+
+#[cfg(test)]
+mod tests;

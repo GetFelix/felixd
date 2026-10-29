@@ -748,6 +748,7 @@ dependencies = [
  "felix-client",
  "felixd-core",
  "felixd-runtime",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",
