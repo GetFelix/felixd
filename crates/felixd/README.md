@@ -33,8 +33,9 @@ Flags of `agent`: `--node-id` (`FELIXD_NODE_ID`; host name and process id by def
 `--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64)
 and `--claim-delay-ms` (1000).
 
-Flags of `check`: `--id` (repeat for several; every workload by default) and `--complete`, which
-also reports outputs missing from the end of a stream.
+Flags of `check`: `--id` (repeat for several; every workload by default), `--complete`, which
+also reports outputs missing from the end of a stream, and `--upstream`, which also checks every
+workload whose output a checked one reads, up the pipeline. Stages are checked upstream first.
 
 Flags of `replay`: `--id`, `--to` (an input offset, or an RFC 3339 time such as
 `2026-10-29T14:02:00Z`), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
@@ -71,5 +72,5 @@ FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test restart -- --test-threads=1
 
 Without `FELIX_BROKERS` those tests print a skip message and pass, unless `FELIXD_REQUIRE_FELIX`
 is set. The `cluster` test runs against three brokers and is skipped unless `FELIXD_CLUSTER` names
-`tests/felix/cluster.yaml`; CI runs it with `fence`, `batches` and `answers` on that cluster.
+`tests/felix/cluster.yaml`; CI runs it with `fence`, `batches`, `answers` and `pipeline` on that cluster.
 The tests build the example workloads on demand through `felixd-testkit`.

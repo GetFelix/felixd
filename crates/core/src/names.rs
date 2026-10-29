@@ -39,10 +39,15 @@ pub fn output_stream(id: &str) -> String {
 
 /// Whether `stream` is a workload's output stream, by its name.
 pub fn is_output_stream(stream: &str) -> bool {
+    output_of(stream).is_some()
+}
+
+/// The id of the workload whose output stream `stream` is, by its name.
+pub fn output_of(stream: &str) -> Option<&str> {
     stream
         .strip_prefix("wl.")
         .and_then(|s| s.strip_suffix(".out"))
-        .is_some_and(|id| validate_id(id).is_ok())
+        .filter(|id| validate_id(id).is_ok())
 }
 
 /// The stream a workload writes its snapshots to.

@@ -89,3 +89,6 @@ pub(crate) fn produced(stepped: Stepped) -> Vec<Produced> {
         }],
     }
 }
+
+#[cfg(test)]
+mod tests;

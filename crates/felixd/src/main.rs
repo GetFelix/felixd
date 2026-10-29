@@ -65,6 +65,10 @@ enum Command {
         /// workloads should have caught up with their input.
         #[arg(long)]
         complete: bool,
+        /// Also check every workload whose output stream a checked one
+        /// reads, up the whole pipeline. Stages are checked upstream first.
+        #[arg(long)]
+        upstream: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
     /// what its `inspect` returns, or with `--diff` compare the outputs a
@@ -167,12 +171,16 @@ async fn main() -> Result<()> {
             connection,
             ids,
             complete,
+            upstream,
         } => {
-            let reports = check(&connection.settings()?, &ids, complete).await?;
+            let reports = check(&connection.settings()?, &ids, complete, upstream).await?;
             let mut found = false;
             for report in &reports {
                 if report.findings.is_empty() {
-                    println!("{}: {} records, ok", report.output, report.records);
+                    println!(
+                        "{}: {} records, ok, from {}",
+                        report.output, report.records, report.input
+                    );
                 }
                 for finding in &report.findings {
                     println!("{}: {finding}", report.output);

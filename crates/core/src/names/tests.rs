@@ -5,6 +5,8 @@ fn streams_are_named_after_the_workload() {
     assert_eq!(output_stream("counter-1"), "wl.counter-1.out");
     assert_eq!(snapshot_stream("counter-1"), "wl.counter-1.snap");
     assert!(is_output_stream("wl.counter-1.out"));
+    assert_eq!(output_of("wl.counter-1.out"), Some("counter-1"));
+    assert_eq!(output_of("wl.counter-1.snap"), None);
     for other in ["in", "wl.counter-1.snap", "wl..out", "wl.Up.out"] {
         assert!(!is_output_stream(other), "{other}");
     }

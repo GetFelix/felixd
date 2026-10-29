@@ -623,3 +623,30 @@ fn a_needs_operator_record_raises_the_floor() {
         [(0, 10)]
     );
 }
+
+fn stage(id: &str, input: &str) -> (String, String) {
+    (id.to_owned(), input.to_owned())
+}
+
+#[test]
+fn a_pipeline_is_checked_upstream_first() {
+    let workloads = [
+        stage("c", "wl.b.out"),
+        stage("a", "in"),
+        stage("other", "in"),
+        stage("b", "wl.a.out"),
+    ];
+    assert_eq!(upstream_first(&workloads), ["a", "b", "c", "other"]);
+}
+
+#[test]
+fn an_upstream_not_being_checked_changes_nothing() {
+    let workloads = [stage("c", "wl.b.out"), stage("a", "in")];
+    assert_eq!(upstream_first(&workloads), ["c", "a"]);
+}
+
+#[test]
+fn a_cycle_still_checks_each_workload_once() {
+    let workloads = [stage("a", "wl.b.out"), stage("b", "wl.a.out")];
+    assert_eq!(upstream_first(&workloads), ["b", "a"]);
+}

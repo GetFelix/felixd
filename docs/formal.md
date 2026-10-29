@@ -231,6 +231,19 @@ without finishing, so the `TLA nightly` workflow walks it with `TLC_SIMULATE` in
 Not in this model: failures, snapshots, epochs (`Felixd.tla`), inputs with no output, and
 `felixd run`'s own history check, which the agent's refusal backs.
 
+## Pipelines
+
+A pipeline needs no new model. `Felixd.tla` takes the input as a fixed sequence of records, each
+read when an owner gets to it, so an input that arrives late looks like an owner that is slow. Every
+invariant is about one workload's `.out` and `.snap` given that input. A downstream's input is an upstream's `.out`. Felix never rewrites a
+record on it, and the upstream's fence makes its outputs land once and in order, which is what
+`OutputsExact` and `EpochMonotone` check for the upstream. Which records a downstream steps is a
+function of each record alone (`crates/agent/src/input.rs`), so a claim, even one that lands
+between the halves of a batch, is an offset the downstream skips, like an offset that holds no
+record. A two-stage model would be two copies of this one with the first's output fed to the
+second, and would check nothing the one-stage model does not. `tests/pipeline.rs` tests the
+composition.
+
 ## Not modelled
 
 - Lost answers to cache calls, and the renewal read-back (`crates/agent/src/lease.rs:341-355`).
@@ -245,7 +258,7 @@ Not in this model: failures, snapshots, epochs (`Felixd.tla`), inputs with no ou
   record's.
 - Spec edits and spec records in `Felixd.tla`. `FelixdSpecs.tla` models them
   ([Spec history](#spec-history)).
-- Several inputs, pipelines, `felixd check` beyond which spec each input ran under, and drain.
+- Several inputs, `felixd check` beyond which spec each input ran under, and drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
