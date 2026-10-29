@@ -65,7 +65,7 @@ impl Modules {
                 .await?
                 .map_err(|error| match error {
                     LoadError::Contract01 => {
-                        NeedsOperator(format!("module {hash}: {error}")).into()
+                        poison(error)
                     }
                     error => poison(error),
                 })
