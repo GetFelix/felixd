@@ -14,9 +14,10 @@
 (* later time, or after the sender has crashed, timed out or lost the     *)
 (* workload. Cache calls are atomic.                                       *)
 (*                                                                         *)
-(* The claim-time marker (ClaimMarker) is the intended design: after the  *)
-(* claim has its epoch, the owner appends a claim record to `.out` at the *)
-(* tail it read the epoch floor at, before it resumes. docs/formal.md      *)
+(* The claim record (ClaimMarker) is as built (#80): once the claim has   *)
+(* its epoch, the owner appends a claim record to `.out` at the tail it   *)
+(* read the epoch floor at, before it resumes. A later resume does not    *)
+(* claim again; it only checks the last record (Probe). docs/formal.md     *)
 (* maps each action to the code.                                           *)
 (*                                                                         *)
 (* Knobs, each turned off in a twin configuration that TLC finds a        *)
@@ -173,10 +174,7 @@ CheckSkipped(recs, j, k, w, e) ==
             ELSE CheckSkipped(recs, j + 1, k, p + 1, e)
 
 \* The node gives the workload up.
-Left(n) ==
-    [nd EXCEPT ![n].pc = "idle", ![n].ok = FALSE, ![n].desync = FALSE,
-               ![n].await = NoMsg, ![n].rep = "none", ![n].batch = <<>>,
-               ![n].skip = NoSkip]
+Left(n) == [nd EXCEPT ![n] = [NodeInit EXCEPT !.up = nd[n].up]]
 
 \* The streams cannot be resumed from. In this model every such state is a
 \* bug, since the workload is deterministic.
@@ -218,7 +216,8 @@ PutEpoch(n) ==
     /\ nd[n].pc = "putepoch"
     /\ IF ctr.present = nd[n].cseen.present /\ (~ctr.present \/ ctr.ver = nd[n].cseen.ver)
        THEN /\ ctr' = [present |-> TRUE, val |-> nd[n].want, ver |-> ctr.ver + 1]
-            /\ nd' = [nd EXCEPT ![n].pc = "putlease", ![n].ep = nd[n].want]
+            /\ nd' = [nd EXCEPT ![n].pc = "putlease", ![n].ep = nd[n].want, ![n].want = 0,
+                                ![n].cseen = NodeInit.cseen]
             /\ UNCHANGED lease
        ELSE /\ lease' = IF Owns(n) THEN NoLease ELSE lease
             /\ nd' = Left(n)
@@ -231,7 +230,7 @@ PutLease(n) ==
     /\ nd[n].pc = "putlease"
     /\ IF Owns(n)
        THEN /\ lease' = [lease EXCEPT !.e = nd[n].ep]
-            /\ nd' = [nd EXCEPT ![n].pc = IF ClaimMarker THEN "marker" ELSE "rsnap",
+            /\ nd' = [nd EXCEPT ![n].pc = IF ClaimMarker THEN "marker" ELSE "probe",
                                 ![n].ok = TRUE, ![n].desync = FALSE]
        ELSE /\ nd' = Left(n)
             /\ UNCHANGED lease
@@ -246,7 +245,8 @@ Marker(n) ==
 
 MarkerAck(n) ==
     /\ nd[n].pc = "mwait" /\ nd[n].rep = "ok"
-    /\ nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].await = NoMsg, ![n].rep = "none"]
+    /\ nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = @ + 1, ![n].await = NoMsg,
+                        ![n].rep = "none"]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
 \* Refused or unanswered: read past the expected tail.
@@ -256,13 +256,24 @@ MarkerRetry(n) ==
        IN IF \E j \in 1..Len(found) : found[j].e > nd[n].ep
           THEN Superseded(n)
           ELSE IF \E j \in 1..Len(found) : found[j].k = "claim" /\ found[j].e = nd[n].ep
-          THEN nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].await = NoMsg, ![n].rep = "none"]
+          THEN nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out),
+                                ![n].await = NoMsg, ![n].rep = "none"]
           ELSE nd' = [nd EXCEPT ![n].pc = "marker", ![n].kt = Len(out),
                                 ![n].await = NoMsg, ![n].rep = "none"]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
 -----------------------------------------------------------------------------
 (* Resuming *)
+
+\* A resume once the claim is on the stream (OutputLog::claim with no tail):
+\* the tail, and the superseded check on the last record of any kind.
+Probe(n) ==
+    /\ nd[n].pc = "probe"
+    /\ LET p == LastOf(out, {"out", "claim"})
+       IN IF p > 0 /\ out[p].e > nd[n].ep
+          THEN Superseded(n)
+          ELSE nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out)]
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
 ReadSnap(n) ==
     /\ nd[n].pc = "rsnap"
@@ -276,22 +287,21 @@ ReadSnap(n) ==
 
 ReadOut(n) ==
     /\ nd[n].pc = "rout"
-    /\ LET T == Len(out)
-           pl == LastOf(out, {"out", "claim"})
-           po == LastOf(out, {"out"})
+    /\ LET T == nd[n].kt
+           po == LastOf(SubSeq(out, 1, T), {"out"})
            s == nd[n].sseen
            st == IF s.on THEN s.t ELSE 0
            later == IF FoldOnEvents THEN po > 0 /\ po - 1 >= st ELSE T > st
            bad == \/ T < st
                   \/ later /\ (po = 0 \/ (s.on /\ out[po].i <= s.i))
            sk == IF later THEN [on |-> TRUE, i |-> out[po].i, x |-> out[po].x] ELSE NoSkip
-       IN IF pl > 0 /\ out[pl].e > nd[n].ep
+       IN IF po > 0 /\ out[po].e > nd[n].ep
           THEN Superseded(n) /\ UNCHANGED <<started, poisoned>>
           ELSE IF bad
           THEN Poison(n) /\ UNCHANGED started
           ELSE /\ nd' = [nd EXCEPT ![n].pc = "run", ![n].pos = IF s.on THEN s.i + 1 ELSE 0,
                                    ![n].skip = sk, ![n].wnext = st, ![n].wend = T,
-                                   ![n].kt = T, ![n].batch = <<>>]
+                                   ![n].batch = <<>>, ![n].sseen = NoSnap]
                /\ started' = IF ~ClaimMarker /\ ~\E x \in started : x.e = nd[n].ep
                              THEN started \cup {[e |-> nd[n].ep, at |-> T]}
                              ELSE started
@@ -310,9 +320,12 @@ Step(n) ==
            k == Cardinality({j \in 1..Len(recs) : AlreadyWritten(n, i, j - 1)})
            chk == CheckSkipped(recs, 1, k, nd[n].wnext, nd[n].wend)
            b == SubSeq(recs, k + 1, Len(recs))
+           done == ~Replaying(n, i)
        IN IF ~chk.ok
           THEN Poison(n)
-          ELSE /\ nd' = [nd EXCEPT ![n].wnext = chk.w, ![n].batch = b,
+          ELSE /\ nd' = [nd EXCEPT ![n].wnext = IF done THEN 0 ELSE chk.w, ![n].batch = b,
+                                   ![n].skip = IF done THEN NoSkip ELSE @,
+                                   ![n].wend = IF done THEN 0 ELSE @,
                                    ![n].pos = IF b = <<>> THEN i + 1 ELSE i,
                                    ![n].pc = IF b = <<>> THEN "post" ELSE "osend"]
                /\ UNCHANGED poisoned
@@ -349,7 +362,7 @@ Reconcile(n) ==
             [] \E j \in 1..cmp : outsF[j].i # b[j].i \/ outsF[j].x # b[j].x -> Poison(n)
             [] Len(outsF) > Len(b) ->
                     \* Behind: an earlier owner got further. Resume again.
-                    nd' = [clear EXCEPT ![n].pc = "rsnap", ![n].batch = <<>>]
+                    nd' = [clear EXCEPT ![n].pc = "probe", ![n].batch = <<>>]
                     /\ UNCHANGED poisoned
             [] OTHER ->
                     /\ nd' = IF rest = <<>>
@@ -404,7 +417,7 @@ SRefused(n) ==
 \* A snapshot write that errors ends the run; it resumes from the streams.
 SLost(n) ==
     /\ nd[n].pc = "swait" /\ nd[n].rep = "lost"
-    /\ nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].batch = <<>>,
+    /\ nd' = [nd EXCEPT ![n].pc = "probe", ![n].batch = <<>>,
                         ![n].await = NoMsg, ![n].rep = "none"]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -565,7 +578,7 @@ Recreate ==
 NodeStep(n) ==
     \/ Claim(n) \/ TakeEpoch(n) \/ PutEpoch(n) \/ PutLease(n)
     \/ Marker(n) \/ MarkerAck(n) \/ MarkerRetry(n)
-    \/ ReadSnap(n) \/ ReadOut(n)
+    \/ Probe(n) \/ ReadSnap(n) \/ ReadOut(n)
     \/ Step(n) \/ OSend(n) \/ OAck(n) \/ Reconcile(n)
     \/ Continue(n) \/ SnapSend(n) \/ SSend(n) \/ SAck(n) \/ SRefused(n) \/ SLost(n)
     \/ Sup(n) \/ ConfirmFail(n) \/ WriteFail(n)

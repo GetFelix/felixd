@@ -10,6 +10,10 @@
 # `scripts/check_tla.sh Felixd FelixdNoMarker` checks only those; a name not
 # registered below must pass. `TLC_WORKERS=4` caps TLC's worker threads.
 #
+# `TLC_SIMULATE=N` walks N random behaviours of up to `TLC_DEPTH` (default
+# 100) steps instead of checking every state. The nightly job runs
+# FelixdFull this way, as it is too large to check exhaustively.
+#
 # Needs Java 11+ on PATH. The TLA+ tools are fetched once, pinned by release
 # and checksum, into target/tla/.
 set -euo pipefail
@@ -24,6 +28,8 @@ SPEC_DIR="specs"
 
 expectations=(
   "Felixd pass"
+  "FelixdGen pass"
+  "FelixdThree pass"
   "FelixdIdle pass"
   "FelixdRecreate pass"
   "FelixdLive pass"
@@ -70,12 +76,16 @@ for entry in "${selected[@]}"; do
   echo "== $cfg (expected: $expect)"
   # TLC's state files go outside the tree, and are removed after each run.
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/tlc.XXXXXX")"
+  mode=()
+  if [ -n "${TLC_SIMULATE:-}" ]; then
+    mode=(-simulate "num=$TLC_SIMULATE" -depth "${TLC_DEPTH:-100}")
+  fi
   status=0
   output="$(cd "$SPEC_DIR" && java -XX:+UseParallelGC -jar "../$JAR" -metadir "$scratch" \
-    -deadlock -workers "${TLC_WORKERS:-auto}" -checkpoint 0 \
+    ${mode[@]+"${mode[@]}"} -deadlock -workers "${TLC_WORKERS:-auto}" -checkpoint 0 \
     -config "$cfg.cfg" Felixd.tla 2>&1)" || status=$?
   rm -rf "$scratch"
-  echo "$output" | grep -E "states generated|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
+  echo "$output" | grep -E "states generated|distinct states|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
   case "$expect" in
     pass)
       if [ "$status" -ne 0 ] || grep -qE "is violated" <<<"$output"; then
@@ -92,7 +102,7 @@ for entry in "${selected[@]}"; do
         failed=1
       else
         # The trace, for the log.
-        echo "$output" | sed -n '/is violated/,/^[0-9]* states generated/p' | head -150
+        echo "$output" | sed -n '/is violated/,/^[0-9]* states generated/p' | head -150 || true
       fi
       ;;
   esac
