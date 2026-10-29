@@ -261,16 +261,21 @@ async fn run(
     let snap_tail = felix.tail(&snap_stream).await?;
     let snapshot = match felix.last_record(&snap_stream, snap_tail).await? {
         Some(record) => {
-            let (taken, state) = snapshot::decode(&record.payload)
-                .map_err(|e| poison(format!("snapshot at {snap_stream}:{}: {e}", record.offset)))?;
-            if taken.epoch > fence.epoch() {
+            let at = |e: &dyn fmt::Display| {
+                poison(format!("snapshot at {snap_stream}:{}: {e}", record.offset))
+            };
+            let decoded = snapshot::decode(&record.payload).map_err(|e| at(&e))?;
+            if decoded.epoch() > fence.epoch() {
                 tracing::info!(
                     workload = id,
-                    epoch = taken.epoch,
+                    epoch = decoded.epoch(),
                     "a later owner took a snapshot"
                 );
-                return Err(Superseded(taken.epoch).into());
+                return Err(Superseded(decoded.epoch()).into());
             }
+            let snapshot::Record::Whole(taken, state) = decoded else {
+                return Err(at(&"this build restores only version 2 snapshots"));
+            };
             Some((taken.header, state.to_vec()))
         }
         None => None,
@@ -384,7 +389,7 @@ struct Steps<'a> {
 
 impl Steps<'_> {
     async fn step(&mut self, offset: u64, stamp: u64, input: Bytes) -> Result<()> {
-        if self.skip_claims && output::is_marker(&input) {
+        if self.skip_claims && output::passed_over(&input, output::DEFAULT_NAME) {
             return Ok(());
         }
         let interval = self
@@ -482,7 +487,7 @@ impl Steps<'_> {
                 .read_range(self.snap_stream, self.snap_tail, seen_tail)
                 .await?;
             for found in &found {
-                let epoch = snapshot::decode(&found.payload).map_or(0, |(t, _)| t.epoch);
+                let epoch = snapshot::decode(&found.payload).map_or(0, |r| r.epoch());
                 if epoch > self.fence.epoch() {
                     return Err(Superseded(epoch).into());
                 }
@@ -518,7 +523,7 @@ async fn last_input_stamp(
     while end > 0 {
         let from = end.saturating_sub(window);
         for record in felix.read_range(stream, from, end).await?.iter().rev() {
-            if !(skip_claims && output::is_marker(&record.payload)) {
+            if !(skip_claims && output::passed_over(&record.payload, output::DEFAULT_NAME)) {
                 return Ok(Some(record.timestamp_micros));
             }
         }
@@ -528,7 +533,8 @@ async fn last_input_stamp(
     Ok(None)
 }
 
-/// The last output record below `tail` and where it is, passing over claims.
+/// The last output or rejection below `tail` and where it is, passing over
+/// claims and failures.
 async fn last_output(
     felix: &Felix,
     stream: &str,
@@ -541,7 +547,7 @@ async fn last_output(
         for record in felix.read_range(stream, from, end).await?.iter().rev() {
             let found = output::decode(&record.payload)
                 .map_err(|e| poison(format!("output at {stream}:{}: {e}", record.offset)))?;
-            if let Some((written, _)) = found.output() {
+            if let Some(written) = found.written() {
                 return Ok(Some((record.offset, written)));
             }
         }

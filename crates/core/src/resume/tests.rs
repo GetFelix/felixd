@@ -271,3 +271,49 @@ fn claims_after_the_outputs_a_snapshot_covers_skip_nothing() {
     assert_eq!(resume.output_from, 41);
     assert!(!resume.already_written(100, 0));
 }
+
+#[test]
+fn a_skipped_rejection_must_match_the_record_in_its_place() {
+    use crate::output::{Rejected, encode, encode_rejection};
+    let rejected = Rejected {
+        code: 3,
+        detail: b"no",
+    };
+    let rejection = |epoch| encode_rejection(5, epoch, rejected);
+    assert_eq!(check_skipped(3, &rejection(2), Some(&rejection(1))), Ok(()));
+    // The replay rejects where the stream holds an output, and the reverse.
+    let output = encode(out(5, 0), 1, b"no");
+    assert_eq!(
+        check_skipped(3, &rejection(2), Some(&output)),
+        Err(ResumeError::Diverged { offset: 3 })
+    );
+    assert_eq!(
+        check_skipped(3, &output, Some(&rejection(1))),
+        Err(ResumeError::Diverged { offset: 3 })
+    );
+    let other = encode_rejection(
+        5,
+        1,
+        Rejected {
+            code: 4,
+            ..rejected
+        },
+    );
+    assert_eq!(
+        check_skipped(3, &rejection(2), Some(&other)),
+        Err(ResumeError::Diverged { offset: 3 })
+    );
+}
+
+#[test]
+fn a_rejection_last_on_the_stream_is_skipped_through() {
+    let resume = fold(Found {
+        snapshot: Some(snap(9, 4)),
+        last_output: Some(at(5, 12, 0)),
+        output_tail: 6,
+    })
+    .unwrap();
+    assert!(resume.already_written(12, 0));
+    assert!(!resume.already_written(12, 1));
+    assert!(resume.replaying(11));
+}

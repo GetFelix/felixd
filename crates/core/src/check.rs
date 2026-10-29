@@ -3,8 +3,9 @@
 //!
 //! The replay says what the stream should hold, in order. Every output record
 //! on the stream is matched to a replayed output by its header, and anything
-//! that does not match up is a finding. Claims hold no output, so only their
-//! epochs are checked.
+//! that does not match up is a finding. A rejection is matched like an
+//! output. Claims and failures hold no output, so only their epochs are
+//! checked.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -12,11 +13,67 @@ use std::fmt;
 use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::{self, SnapshotHeader};
 
-/// One output a replay produced.
+/// One output or rejection a replay produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Expected {
     pub header: OutputHeader,
-    pub payload: Vec<u8>,
+    pub produced: Produced,
+}
+
+/// What a step produced at one header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Produced {
+    Output {
+        name: String,
+        key: Option<Vec<u8>>,
+        payload: Vec<u8>,
+    },
+    Rejection {
+        code: u32,
+        detail: Vec<u8>,
+    },
+}
+
+impl Expected {
+    /// An output under [`output::DEFAULT_NAME`] with no key.
+    pub fn output(header: OutputHeader, payload: Vec<u8>) -> Self {
+        Expected {
+            header,
+            produced: Produced::Output {
+                name: output::DEFAULT_NAME.to_owned(),
+                key: None,
+                payload,
+            },
+        }
+    }
+
+    /// The rejection of the input at `input_offset`.
+    pub fn rejection(input_offset: u64, code: u32, detail: Vec<u8>) -> Self {
+        Expected {
+            header: OutputHeader {
+                input_offset,
+                index: 0,
+            },
+            produced: Produced::Rejection { code, detail },
+        }
+    }
+}
+
+impl Produced {
+    /// Whether `record` holds this, whatever its header and epoch.
+    fn matches(&self, record: &Record<'_>) -> bool {
+        match (self, record) {
+            (Produced::Output { name, key, payload }, Record::Output(_, found)) => {
+                found.name == name
+                    && found.key == key.as_deref()
+                    && found.payload == payload.as_slice()
+            }
+            (Produced::Rejection { code, detail }, Record::Rejection(_, found)) => {
+                found.code == *code && found.detail == detail.as_slice()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Something wrong with an output stream. `offset` is the record's offset on
@@ -44,7 +101,8 @@ pub enum Finding {
         epoch: u64,
         previous: u64,
     },
-    /// A record whose payload differs from the replay's.
+    /// A record that differs from what the replay produced, including an
+    /// output where it rejected the input or the other way round.
     Differs { offset: u64, header: OutputHeader },
     /// A record for an output the replay did not produce.
     Unexpected { offset: u64, header: OutputHeader },
@@ -102,7 +160,7 @@ pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) ->
             });
         }
         last_epoch = Some(last_epoch.map_or(epoch, |e| e.max(epoch)));
-        let Record::Output(written, payload) = decoded else {
+        let Some(written) = decoded.written() else {
             continue;
         };
         let header = written.header;
@@ -119,7 +177,7 @@ pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) ->
             continue;
         }
         seen.insert(header, offset);
-        if payload != expected[at].payload.as_slice() {
+        if !expected[at].produced.matches(&decoded) {
             findings.push(Finding::Differs { offset, header });
         }
         match furthest {
@@ -158,7 +216,7 @@ pub fn check_snapshots(
     let outputs: Vec<(u64, u64)> = records
         .iter()
         .filter_map(|&(offset, record)| {
-            let (written, _) = output::decode(record).ok()?.output()?;
+            let written = output::decode(record).ok()?.written()?;
             Some((offset, written.header.input_offset))
         })
         .collect();
@@ -176,7 +234,11 @@ pub fn check_snapshots(
     let mut findings = Vec::new();
     for &(offset, record) in snapshots {
         let header = match snapshot::decode(record) {
-            Ok((taken, _)) => taken.header,
+            Ok(decoded) => match decoded.taken() {
+                Some(taken) => taken.header,
+                // A chunk is part of a snapshot, not one.
+                None => continue,
+            },
             Err(error) => {
                 findings.push(Finding::UndecodableSnapshot {
                     offset,

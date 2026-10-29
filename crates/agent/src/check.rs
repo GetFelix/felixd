@@ -66,7 +66,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let skip_claims = names::is_output_stream(&spec.input);
     let mut expected = Vec::new();
     for input in felix.read_range(&spec.input, 0, input_tail).await? {
-        if skip_claims && output::is_marker(&input.payload) {
+        if skip_claims && output::passed_over(&input.payload, output::DEFAULT_NAME) {
             continue;
         }
         // A step that fails ends the workload there, on every node.
@@ -74,13 +74,11 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
             break;
         };
         for (index, payload) in outputs.into_iter().enumerate() {
-            expected.push(Expected {
-                header: OutputHeader {
-                    input_offset: input.offset,
-                    index: u32::try_from(index)?,
-                },
-                payload,
-            });
+            let header = OutputHeader {
+                input_offset: input.offset,
+                index: u32::try_from(index)?,
+            };
+            expected.push(Expected::output(header, payload));
         }
     }
     let on_stream: Vec<(u64, &[u8])> = records
