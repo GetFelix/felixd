@@ -88,14 +88,19 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         failure: None,
         record: None,
     };
-    let written = match specs::written_under(&felix, &submission.id).await? {
-        Some(written) => Some(written),
-        None if has_records(&felix, &spec.output).await?
-            || has_records(&felix, &snap_stream).await? =>
-        {
-            previous_spec(&felix, &submission.id).await?
-        }
+    // A new workload has nothing to conflict with, and its streams, just
+    // created, may refuse reads until their leader has committed.
+    let written = match previous_spec(&felix, &submission.id).await? {
         None => None,
+        Some(previous) => match specs::written_under(&felix, &submission.id).await? {
+            Some(written) => Some(written),
+            None if has_records(&felix, &spec.output).await?
+                || has_records(&felix, &snap_stream).await? =>
+            {
+                Some(previous)
+            }
+            None => None,
+        },
     };
     if let Some(conflict) = written.and_then(|w| w.conflicts_with_history(&spec)) {
         bail!(
@@ -118,15 +123,17 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     Ok(hash)
 }
 
-/// The spec of a workload whose output predates claims that name one: its
-/// last record, or for one written before specs were records, its cache
-/// value.
+/// The workload's latest spec: its last record, or for one written before
+/// specs were records, its cache value. `None` for a workload with no
+/// `workloads` entry, which no agent has run.
 async fn previous_spec(felix: &Felix, id: &str) -> Result<Option<WorkloadSpec>> {
+    let Some(cached) = felix.cache_get(names::WORKLOADS, id).await? else {
+        return Ok(None);
+    };
     if let Some((_, spec)) = specs::history(felix, id).await?.latest() {
         return Ok(Some(spec.clone()));
     }
-    let cached = felix.cache_get(names::WORKLOADS, id).await?;
-    Ok(cached.and_then(|c| WorkloadSpec::decode(&c).ok()))
+    Ok(WorkloadSpec::decode(&cached).ok())
 }
 
 /// Whether `stream` holds any record. Its tail alone does not say: a new
