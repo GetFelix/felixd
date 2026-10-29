@@ -536,12 +536,23 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 Anything Felix doesn't do yet that felixd needs gets an issue labelled
 `felix-gap`, with the Felix code it refers to.
 
+## Several inputs
+
+A workload reads one input stream. Replay is deterministic because the input's
+offsets fix the order. With two streams, arrival order depends on timing, so a
+replay could see a different interleaving.
+
+Joins are two steps for now: a merge workload writes one combined stream, and
+the join reads it. Later (#58), felixd will record the merge order itself. The
+lease holder appends the interleaving it chose to a merge stream, fenced like
+outputs, and resume, replay and `felixd check` read that log. A deterministic
+merge by timestamp is not planned: one idle input would stall the workload, and
+it depends on clocks.
+
 ## Open questions
 
 These are worth settling with collaborators before M1:
 
-- Should a workload read several inputs, merged in a recorded order? This is
-  needed for joins, and the merge order would itself be a record.
 - Does placement belong in the agents (first claim wins, then rules) or in a
   scheduler workload that writes assignments? A scheduler that is itself a
   felixd workload would be replayable too.
