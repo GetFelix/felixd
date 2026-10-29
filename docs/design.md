@@ -773,7 +773,10 @@ failovers. Three rules hold that:
 - **Trap classes.** A trap that depends only on the inputs (a guest panic,
   running out of fuel) is a poison input and fails the workload. A trap that
   can depend on the host (stack overflow, a host resource failure) is retried
-  once on a fresh instance before it counts as poison.
+  once, on another node. The agent releases the lease and records the trap
+  class, so the second try runs in a different environment and the count is on
+  the log rather than in one node's memory. A poison input is never retried
+  (#98).
 
 ## State size
 
@@ -866,6 +869,23 @@ Agents still claim through the lease, so the scheduler decides where work runs,
 never whether output is correct. First claim wins stays as the fallback when an
 assignment is missing or stale. A scheduler outside felixd is not planned.
 
+Rules for the scheduler and the records it writes (#100):
+
+- **Keyed per workload.** Assignments and leases are per workload, never one
+  versioned record per node. Per-node sequence numbers made Omega's
+  schedulers conflict two to three times as often.
+- **Incremental by default.** An assignment batch applies per workload.
+  All-or-nothing placement is an opt-in for a group that needs it.
+- **One placement authority per workload at a time:** the scheduler, or first
+  claim when its assignment is missing or stale.
+- **Reconsideration is a recorded tick input**, like time in the workload
+  contract, so the scheduler stays a replayable fold over recorded events.
+- **Status names what it acts on.** Agent and workload status records carry the
+  spec version and assignment offset they act on, so `ps` can show "running
+  spec 7, assignment 912" and a lagging node is visible.
+- **One writer kind per system stream**, enforced by grants. Readers keep
+  refusing unknown versions.
+
 The scheduler reads a recorded stream of node facts (discovered, measured and
 operator-asserted, with asserted winning), not the `nodes` cache, so its view
 replays. See [Lessons from Barrelfish](#lessons-from-barrelfish).
@@ -898,6 +918,11 @@ settle #27 and are tracked in #71:
   calls links a guest-side layer that turns each call into a request and
   suspends the step until the response arrives. When WASI's async support is
   stable, the shim uses it rather than a hand-made blocking bridge.
+- **Effect kinds and credentials are bound in the spec.** The spec records the
+  kinds (with versions) and credential names the component's WIT declares.
+  An executor refuses a request outside that set and resolves only bound
+  credentials, so its authority is never ambient from the workload's point of
+  view (#97).
 - A workload may have many requests outstanding at once, and executors
   advertise the effect kinds and versions they serve, so a node never claims a
   workload whose effects nobody can execute. Per-effect latency is a metric
@@ -956,6 +981,26 @@ Payloads stay opaque bytes. The system's own records do not (#73):
 - A workload stuck on a transient error past a bound releases its lease and is
   recorded `degraded` with its class and reason, so it is visible instead of
   retrying silently on one node.
+- **Restart intensity is counted cluster-wide.** The release above is per
+  holder, so a workload that fails everywhere would bounce between nodes, each
+  spending its own budget. The spec sets MaxR takeovers per window. Any
+  claimer counts them from the claim records on `wl.<id>.out`; past the limit
+  it records `degraded` with class needs operator, fenced by epoch like the
+  `failed` write (#70), and nothing claims the workload until an operator acts.
+  There is no escalation tree. The TLA model gets the counter under
+  `NoStaleFailure` (#104). Implementation is #99.
+- **Poison has a recorded way out.** The failing input is in the log, so every
+  replay reaches it. An operator resolves it with a spec change at offset N
+  that either skips input N, copying it to a dead-letter stream, or switches
+  the module from N. Both take effect at a stated offset ([Names and
+  incarnations](#names-and-incarnations)), so `check` and replay judge outputs
+  under the spec that applied and the skip replays. `failed` and `degraded`
+  stay observations; the spec change is the only action (#98).
+- **Failure modes are versioned.** The set of outcomes an effect kind can
+  return is part of that kind's WIT version and is negotiated like any record
+  format. Adding an outcome is a new version. Contract 0.2 already treats
+  running out of snapshot fuel as an abandoned snapshot and out of restore fuel
+  as needs operator (`docs/contract.md`); this section does not change that.
 - A divergence record carries the node, its determinism ABI, the input offset,
   the snapshot it started from, and the digests of both the expected and the
   actual output, so `felixd replay` can reproduce it.
@@ -976,6 +1021,8 @@ Tracked in #74.
   request; the executor resolves the name through a credential agent on its
   own node and runs the authentication itself. Response records exclude
   credentials by construction.
+- **Names are bound in the spec.** A workload can name only the credentials its
+  spec binds ([Effects](#effects), #97); the executor resolves nothing else.
 - **Tokens are per lease.** A claim gets a short-lived token scoped to that
   workload's streams and epoch, so a node can write only the outputs it holds.
   This closes the v0 grant that lets any node write any output, and needs
@@ -1075,6 +1122,38 @@ confirm that someone else stored a known file.
 
 Sources: Quinlan and Dorward, "Venti: a new approach to archival storage"
 (FAST 2002).
+
+## Later
+
+Not designed yet. Each has an issue and a rough shape.
+
+- **Guarded operator actions and a small operator surface** (#101). Operator
+  actions become typed records with a precondition and a dry-run, and are
+  refused when they would break a running workload. Fleet changes go one
+  failure domain at a time and halt when `degraded` or `failed` counts rise.
+  System records share one metadata, spec and status shape, and nothing
+  extends the claim or fence path.
+- **Provisional module upgrades with forward-only rollback** (#102, #65). The
+  new module shadow-replays live inputs for a stated window before the switch
+  record is written. Rollback writes the old module at a later offset from a
+  state it can restore; it never replays over outputs already written.
+- **Scheduler replay as a simulator, and a measured envelope** (#103).
+  `felixd replay --module` on the scheduler tests a placement policy over
+  recorded node facts, and CI measures how far workloads, nodes, streams and
+  spec sizes scale.
+
+Requirements recorded for the native tier and NineLives, whose kernel, init and
+images are undecided:
+
+- A process boundary between tenants on a node, so a sandbox escape in one
+  tenant's workload does not reach the tokens of another's.
+- A restart policy for native workloads in the spec: restart type and
+  intensity, the first restart in place and the next on another node, counted
+  on the log like the Wasm limit above.
+
+Declined: the runtime does not snapshot a guest's linear memory by default.
+Linear memory changes almost everywhere between snapshots, which defeats the
+chunk-hash skipping that contract 0.2 relies on. It could return as an opt-in.
 
 ## Open questions
 

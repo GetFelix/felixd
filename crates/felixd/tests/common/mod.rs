@@ -190,15 +190,29 @@ impl TestFelix {
         );
     }
 
+    /// Every record on `stream`. A quorum stream just created refuses reads
+    /// with a typed not_ready until its first committed mark, so this waits
+    /// for that, up to a bound.
     pub(crate) async fn read_all(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
-        let tail = self.felix.tail(stream).await.unwrap();
-        self.felix
-            .read_range(stream, 0, tail)
-            .await
-            .unwrap()
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.try_read_all(stream).await {
+                Ok(records) => return records,
+                Err(error) if Instant::now() < deadline && is_settling(&error) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("reading {stream}: {error:#}"),
+            }
+        }
+    }
+
+    async fn try_read_all(&self, stream: &str) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
+        let tail = self.felix.tail(stream).await?;
+        let records = self.felix.read_range(stream, 0, tail).await?;
+        Ok(records
             .into_iter()
             .map(|r| (r.offset, r.payload.to_vec()))
-            .collect()
+            .collect())
     }
 
     /// The output records on `stream`, without claims and failures.
@@ -486,4 +500,14 @@ pub(crate) async fn assert_uninterrupted_on(
         .unwrap();
     let (ok, report) = t.check(&["--id", id, "--complete"]);
     assert!(ok, "felixd check found problems:\n{report}");
+}
+
+/// Felix's shard_unavailable refusal with reason not_ready, matched by code
+/// and reason, not by message text.
+fn is_settling(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<felix_client::BrokerError>()
+        .is_some_and(|e| {
+            e.code == felix_client::ErrorCode::ShardUnavailable && e.reason() == Some("not_ready")
+        })
 }
