@@ -51,7 +51,14 @@ it runs (30 by default; a nightly CI job runs it for 10 minutes):
 FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test failover -- --test-threads=1
 ```
 
-By hand, with a workload component and a durable input stream that already exists:
+By hand, with a workload component and a durable input stream that already exists. Build a
+component from an example workload, then submit it:
+
+```
+cargo install wasm-tools
+cargo build --manifest-path workloads/Cargo.toml --release --target wasm32-unknown-unknown --package counter
+wasm-tools component new workloads/target/wasm32-unknown-unknown/release/counter.wasm -o counter.wasm
+```
 
 ```
 felixd run --id counter --input in --replication-factor 1 counter.wasm
@@ -194,7 +201,8 @@ here to an operating system.
 
 felixd fits work that keeps state, reacts to a stream of events, and must not
 lose or repeat results when a machine fails. These are the cases we are
-designing for. Each one is planned, not yet working.
+designing for. Failover, exactly-once output and replay work today; pipelines and
+operations are still planned.
 
 - **Stateful stream processing without a separate cluster.** Running totals,
   sessions, fraud scores over a window, deduplication. Today that usually
@@ -282,9 +290,20 @@ owner knows which outputs already exist and does not write them again.
 | 0 | One node, one workload | The workload contract works; a restart resumes where it stopped | Done |
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
-| 3 | Replay | Rebuild any workload at any offset or time | Planned |
+| 3 | Replay | Rebuild any workload at any offset or time | Done |
 | 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Planned |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
+
+## Crates
+
+| Crate | What it is |
+|---|---|
+| [`crates/core`](crates/core/README.md) | Record formats, names, lease and placement rules and the resume fold. No I/O. |
+| [`crates/runtime`](crates/runtime/README.md) | The wasmtime host that runs a workload component under fuel and memory limits. |
+| [`crates/agent`](crates/agent/README.md) | The node loop: leases, fencing, resume, output and snapshots. |
+| [`crates/felixd`](crates/felixd/README.md) | The `felixd` command line. |
+| [`crates/testkit`](crates/testkit/README.md) | Test helpers that build the example workloads. |
+| [`workloads`](workloads/README.md) | The example workloads, [`counter`](workloads/counter/README.md) and [`window`](workloads/window/README.md), and the test fixture [`faulty`](workloads/faulty/README.md). |
 
 ## Documentation
 
