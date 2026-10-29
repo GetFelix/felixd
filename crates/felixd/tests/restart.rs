@@ -148,3 +148,44 @@ async fn an_input_the_subscription_dropped_is_read_back() {
     assert_uninterrupted(&t, &module, 40).await;
     agent.kill();
 }
+
+/// An owner that resumes far behind the output stream replays more than
+/// `snapshot_every` inputs. A snapshot taken during that replay would record
+/// the stream's tail as if it matched the replayed state, and the owner after
+/// it would skip or repeat outputs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_is_not_taken_while_replaying() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..100).map(count)).await;
+
+    // The first owner writes every output and no snapshot.
+    let mut first = t.start_agent_with_faults("skip-snapshots=1000");
+    eventually(
+        "the first owner's output",
+        Duration::from_secs(60),
+        || async { (t.felix.tail(OUTPUT).await.unwrap() >= 100).then_some(()) },
+    )
+    .await;
+    first.kill();
+    assert_eq!(t.felix.tail(SNAPSHOTS).await.unwrap(), 0);
+
+    // The second replays all 100 inputs and dies after its first snapshot.
+    let mut second = t.start_agent_with_faults("crash-after-snapshot=1");
+    second.exited(Duration::from_secs(60)).await;
+
+    let _third = t.start_agent();
+    t.publish_all(INPUT, (100..120).map(count)).await;
+    assert_uninterrupted(&t, &module, 120).await;
+}
+
+/// On a new cluster the agent waits for caches `felixd run` creates. Ctrl-C
+/// must still stop it.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_works_before_the_caches_exist() {
+    let Some(t) = test_felix().await else { return };
+    let mut agent = t.start_agent();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    agent.interrupt();
+    assert!(agent.exited(Duration::from_secs(10)).await.success());
+}

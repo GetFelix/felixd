@@ -1,6 +1,8 @@
 //! Three agents, several workloads and a steady producer, while a kill loop
-//! repeatedly kills the node holding the most leases and starts it again
-//! under the same node id. At the end every output stream must pass
+//! repeatedly kills the live node holding the most leases and starts it again
+//! under the same node id. Every other restart carries
+//! `crash-after-append-sent`, so that node also dies on its own between an
+//! append and its answer. At the end every output stream must pass
 //! `felixd check --complete`.
 //!
 //! `FELIXD_FAILOVER_SECS` sets how long the kill loop runs (default 30); the
@@ -29,9 +31,9 @@ fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
 }
 
-fn start(t: &TestFelix, node_id: &str) -> Agent {
+fn start(t: &TestFelix, node_id: &str, faults: &str) -> Agent {
     let args = ["--max-workloads", "6", "--claim-delay-ms", "500"];
-    t.start_node_with_args(node_id, "", LEASE_TTL, &args)
+    t.start_node_with_args(node_id, faults, LEASE_TTL, &args)
 }
 
 /// How many leases each node holds.
@@ -61,7 +63,7 @@ async fn output_survives_repeated_kills_of_the_lease_holders() {
             .submit_as(id, "counter", &["--snapshot-every", "25"])
             .await;
     }
-    let mut agents: Vec<Agent> = NODES.iter().map(|n| start(&t, n)).collect();
+    let mut agents: Vec<Agent> = NODES.iter().map(|n| start(&t, n, "")).collect();
 
     let stop = Arc::new(AtomicBool::new(false));
     let published = Arc::new(AtomicU64::new(0));
@@ -82,26 +84,48 @@ async fn output_survives_repeated_kills_of_the_lease_holders() {
     };
 
     let until = Instant::now() + Duration::from_secs(secs);
-    let mut kills = 0;
+    let (mut kills, mut crashes) = (0, 0);
+    let mut next_kill = Instant::now() + KILL_EVERY;
     while Instant::now() < until {
-        tokio::time::sleep(KILL_EVERY).await;
-        let held = holders(&t, &ids).await;
-        let Some((victim, n)) = held.iter().max_by_key(|(_, n)| **n) else {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        for (index, agent) in agents.iter_mut().enumerate() {
+            if !agent.alive() {
+                eprintln!("{} crashed by itself", NODES[index]);
+                crashes += 1;
+                *agent = start(&t, NODES[index], "");
+            }
+        }
+        if Instant::now() < next_kill {
             continue;
-        };
+        }
+        // A lease can still name a node that died, so only a live holder is
+        // a kill that moves work; otherwise look again shortly.
+        let held = holders(&t, &ids).await;
+        let alive: Vec<bool> = agents.iter_mut().map(Agent::alive).collect();
+        let victim = held
+            .iter()
+            .filter(|(node, _)| alive[NODES.iter().position(|n| n == *node).unwrap()])
+            .max_by_key(|(_, n)| **n);
+        let Some((victim, n)) = victim else { continue };
         let index = NODES.iter().position(|node| node == victim).unwrap();
         eprintln!("kill {victim}, holding {n}");
         agents[index].kill();
         kills += 1;
         tokio::time::sleep(DOWN_FOR).await;
-        agents[index] = start(&t, victim);
+        let faults = if kills % 2 == 0 {
+            format!("crash-after-append-sent={}", 20 + kills * 37 % 150)
+        } else {
+            String::new()
+        };
+        agents[index] = start(&t, victim, &faults);
+        next_kill = Instant::now() + KILL_EVERY;
     }
     stop.store(true, Ordering::Relaxed);
     producer.await.unwrap();
     let inputs = published.load(Ordering::Relaxed);
-    eprintln!("{kills} kills, {inputs} inputs");
+    eprintln!("{kills} kills, {crashes} crashes, {inputs} inputs");
     assert!(
-        kills >= secs / KILL_EVERY.as_secs() / 2,
+        kills as f64 >= secs as f64 / (KILL_EVERY + DOWN_FOR).as_secs_f64() / 2.0,
         "only {kills} kills"
     );
 

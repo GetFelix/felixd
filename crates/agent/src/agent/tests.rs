@@ -24,3 +24,23 @@ fn a_live_change_ends_the_redelivery() {
 fn an_empty_redelivery_is_done_at_once() {
     assert!(Redelivery::new(0, 7).done());
 }
+
+#[tokio::test]
+async fn a_slot_freed_while_looking_for_room_is_not_missed() {
+    let room = Notify::new();
+    let freed = freed_unless(&room, || {
+        room.notify_waiters();
+        false
+    })
+    .expect("there is no room");
+    tokio::time::timeout(Duration::from_millis(200), freed)
+        .await
+        .expect("missed the freed slot");
+}
+
+#[tokio::test]
+async fn shutdown_ends_a_wait_that_never_finishes() {
+    let shutdown = std::future::ready(());
+    tokio::pin!(shutdown);
+    assert_eq!(unless(shutdown, std::future::pending::<()>()).await, None);
+}

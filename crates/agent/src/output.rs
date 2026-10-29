@@ -47,11 +47,12 @@ impl<'a> OutputLog<'a> {
                 return Err(LostLease.into());
             }
             faults::before_append();
-            let seen_tail = match self
+            let sent = self
                 .felix
                 .publish_if(self.stream, batch.clone(), self.tail)
-                .await
-            {
+                .await;
+            faults::after_append_sent();
+            let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == self.tail => {
                     self.tail += batch.len() as u64;
                     return Ok(());
