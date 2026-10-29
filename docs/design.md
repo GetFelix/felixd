@@ -504,6 +504,27 @@ output stream when it resumes stops too. A lost answer to
 `publish_if` is resolved by reading the stream at the expected offset, as the
 Felix docs say to do.
 
+A batch is not all or nothing. Felix ships a `Quorum` stream's records to
+followers by bytes, so a batch of several records can reach a follower in
+part, and a follower promoted with part of a batch keeps that part (Felix
+`docs/atomic-commit.md`, What atomic covers). The writer gets an error, so
+after a failed append any prefix of the batch may be on the stream. felixd
+relies on two things here:
+
+- An owner whose append fails reads the stream at the tail it expected, and
+  `output::reconcile` skips the records of its batch it finds there. It
+  writes only the rest.
+- An owner that dies instead leaves the prefix to the next one. The fold
+  skips outputs by `(input offset, index)`, not by input, so the next owner
+  runs that step again, drops the outputs already on the stream and writes
+  the rest. A resume can start in the middle of a step.
+
+`tests/batches.rs` leaves a prefix with the `append-prefix` fault and checks
+both cases with `felixd check --complete`, on one broker and on the
+three-broker cluster. The model lands part of a batch with `DeliverPrefix`
+(`FelixdPartial`). Whether Felix should make a conditional batch all or
+nothing, or document the prefix as part of its contract, is GetFelix/felix#1630.
+
 A workload with no output for an input writes nothing, so the output stream
 alone cannot tell the new owner how far its predecessor got. That is fine: the
 new owner replays from the snapshot and only skips outputs that are already on
@@ -674,8 +695,10 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 - **Module size.** Wasm modules can be several megabytes. Whether a cache
   value that large is reasonable, or modules should be chunked, needs
   measuring.
-- **Batch atomicity.** Exactly-once output assumes a `publish_if` batch lands
-  whole or not at all. That needs confirming against the broker before M2.
+- **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
+  stream when its leader changes, and the writer gets an error. felixd copes
+  (see Exactly-once output), but anything that cannot re-read and compare
+  what landed needs an all-or-nothing batch (GetFelix/felix#1630).
 - **Determinism slips.** A host that hands the workload anything outside its
   inputs breaks replay quietly. The `--diff` check exists to catch it, and CI
   runs it on every example workload.

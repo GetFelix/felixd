@@ -6,6 +6,8 @@
 //! - `grow`: allocates 64 MiB.
 //! - `huge`: outputs one 17 MiB record, more than Felix takes in one frame.
 //! - `trap-snapshot`: outputs nothing, and every later `snapshot` traps.
+//! - `split:<bytes>`: outputs each byte after the colon as its own record, so
+//!   one step writes a batch of several.
 
 use std::cell::Cell;
 
@@ -37,7 +39,10 @@ impl Guest for Faulty {
                 TRAP_SNAPSHOT.set(true);
                 Vec::new()
             }
-            _ => vec![input],
+            _ => match input.strip_prefix(b"split:") {
+                Some(bytes) => bytes.iter().map(|&b| vec![b]).collect(),
+                None => vec![input],
+            },
         }
     }
 

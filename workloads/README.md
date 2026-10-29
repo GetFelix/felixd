@@ -15,4 +15,5 @@ cargo test -p felixd-runtime --test example_workloads
 ```
 
 `faulty` is a test fixture, not an example. It loops, traps, allocates too much, outputs a record too
-large to write or traps in `snapshot` when asked, to check that the host stops it.
+large to write or traps in `snapshot` when asked, to check that the host stops it. Given
+`split:<bytes>` it outputs each byte as its own record, so one step writes several.

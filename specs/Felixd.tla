@@ -31,6 +31,8 @@
 (*                   the raw tail.                                        *)
 (*   FailRecord      a failure is a record on `.out`, appended with       *)
 (*                   publish_if, and the spec's `failed` follows from it.  *)
+(*   IndexFold       the fold skips outputs by (input, index), so a resume *)
+(*                   can start in the middle of a step.                   *)
 (* Assumptions, each dropped in a twin:                                    *)
 (*   RecreateWhenWritten  `epochs` is recreated only while every live     *)
 (*                        epoch is on a record (design.md, Leases).        *)
@@ -51,6 +53,7 @@ CONSTANTS
     MaxSnaps,
     MaxRecreates,
     MaxInflight,       \* requests one node may have in flight
+    MaxPartials,       \* batches that land in part (DeliverPrefix)
     ClaimMarker,
     EpochFloor,
     Confirmer,
@@ -58,6 +61,7 @@ CONSTANTS
     ReplayGuard,
     FoldOnEvents,
     FailRecord,
+    IndexFold,
     LocalFaults,       \* a holder may fail the workload on its own
     TimingFaults,      \* local deadlines pass and clock faults happen
     FaultsInFailWindow,
@@ -65,13 +69,14 @@ CONSTANTS
 
 ASSUME /\ NoNode \notin Nodes
        /\ \A b \in {ClaimMarker, EpochFloor, Confirmer, LaterEpochWins,
-                    ReplayGuard, FoldOnEvents, FailRecord, LocalFaults, TimingFaults,
+                    ReplayGuard, FoldOnEvents, FailRecord, IndexFold, LocalFaults, TimingFaults,
                     FaultsInFailWindow, RecreateWhenWritten} : b \in BOOLEAN
 
 \* Workload shapes for the configurations.
 One == <<1>>
 OneEach == <<1, 1>>
 IdleThenTwo == <<0, 2>>
+OneThenTwo == <<1, 2>>
 
 N == Len(Outs)
 
@@ -129,7 +134,7 @@ Init ==
     /\ spec = "running"
     /\ nd = [n \in Nodes |-> NodeInit]
     /\ bud = [claims |-> 0, crashes |-> 0, clock |-> 0, gens |-> 0,
-              snaps |-> 0, recreates |-> 0]
+              snaps |-> 0, recreates |-> 0, partials |-> 0]
     /\ started = {}
     /\ staleFail = FALSE
     /\ poisoned = FALSE
@@ -165,7 +170,8 @@ InFlight(n) == Cardinality({m \in net : m.n = n})
 Live(n) == nd[n].up /\ nd[n].pc \notin {"idle", "epoch", "putepoch", "putlease"}
 
 AlreadyWritten(n, i, x) ==
-    LET s == nd[n].skip IN s.on /\ (i < s.i \/ (i = s.i /\ x <= s.x))
+    LET s == nd[n].skip
+    IN s.on /\ (i < s.i \/ (i = s.i /\ (x <= s.x \/ ~IndexFold)))
 
 Replaying(n, i) == nd[n].skip.on /\ i < nd[n].skip.i
 
@@ -592,6 +598,20 @@ Deliver(m) ==
     /\ net' = net \ {m}
     /\ UNCHANGED <<lease, ctr, spec, bud, poisoned>>
 
+\* A multi-record batch lands in part: a Quorum leader replicated a prefix of
+\* it and lost the shard, and the follower promoted with that prefix keeps it.
+\* The sender gets an error.
+DeliverPrefix(m) ==
+    /\ m \in net /\ m.s = "out" /\ Len(m.recs) > 1 /\ Len(out) = m.at
+    /\ bud.partials < MaxPartials
+    /\ \E k \in 1..(Len(m.recs) - 1) : out' = out \o SubSeq(m.recs, 1, k)
+    /\ nd' = IF nd[m.n].up /\ nd[m.n].await = m /\ nd[m.n].rep = "none"
+             THEN [nd EXCEPT ![m.n].await = NoMsg, ![m.n].rep = "lost"]
+             ELSE nd
+    /\ net' = net \ {m}
+    /\ bud' = [bud EXCEPT !.partials = @ + 1]
+    /\ UNCHANGED <<snap, lease, ctr, spec, ghosts>>
+
 \* The sender gives up waiting. The request may still land.
 Timeout(n) ==
     /\ nd[n].await # NoMsg /\ nd[n].rep = "none"
@@ -655,7 +675,7 @@ NodeFault(n) ==
 
 Next ==
     \/ \E n \in Nodes : NodeStep(n) \/ NodeFault(n)
-    \/ \E m \in net : Deliver(m)
+    \/ \E m \in net : Deliver(m) \/ DeliverPrefix(m)
     \/ Expire
     \/ GenStart
     \/ Recreate

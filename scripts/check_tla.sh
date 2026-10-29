@@ -43,6 +43,8 @@ expectations=(
   "FelixdRecreateAnytime violates UniqueEpoch"
   "FelixdTailFold violates NoPoison"
   "FelixdNoLaterEpochWins violates EpochMonotone"
+  "FelixdPartial pass"
+  "FelixdPartialNoIndex violates NoPoison"
 )
 
 if [ ! -f "$JAR" ]; then
