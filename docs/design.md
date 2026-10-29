@@ -217,6 +217,14 @@ fixed in felixd itself. A workload that runs out of fuel or traps, in `step`,
 `snapshot` or `restore`, is stopped and marked failed. It isn't retried,
 because a deterministic failure would fail again on any node.
 
+A call can run for as long as its fuel allows, so `step`, `snapshot` and
+`restore` run on tokio's blocking threads, at most one per core at a time,
+and each workload's lease renewals run in a task of their own. A long step
+then delays only its own workload, never another workload's renewals or the
+node's entry in `nodes`. A node compiles each module once: workloads that
+need the same module at the same time wait for one compile, and at most one
+compile per core runs at once.
+
 Where fuel runs out and where the stack overflows depend on the code wasmtime
 generates, so they can move between wasmtime versions. Every node must run the
 same felixd build. Recording the build in the spec, so that a node running a
@@ -248,6 +256,16 @@ at that point.
 API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
 create streams.
 
+Running `felixd run` again for an existing id replaces the spec. A running
+workload whose spec changes restarts under the new one: the agent stops the
+task, releases the lease and claims it again, and the next owner resumes from
+the streams. A new module or input stream would not reproduce what the
+streams already hold, and the next resume would find them diverged, so
+`felixd run` refuses that change once the output or snapshot stream has a
+record. New code goes under a new id. A spec written to the cache by other
+means is not checked, and a workload resumed under such a change fails with
+the divergence.
+
 ## Leases and failure detection
 
 A lease is an entry in `leases` with a TTL (default 10 s, at least 2 s,
@@ -262,7 +280,8 @@ unanswered, since that may be the one that landed. A claim whose answer is
 lost is not adopted; it expires unused.
 
 A claim that wins then takes its epoch: one more than the larger of the last
-epoch in `epochs` and the epoch on the last record of the output stream. It
+epoch in `epochs` and the epochs on the last records of the output and
+snapshot streams. It
 writes that to `epochs` with `cache_put_if` at the version it read, then
 rewrites the lease with the epoch, again with `cache_put_if`, and only then
 runs anything. A claimer that was frozen after winning and lost its lease
@@ -403,9 +422,16 @@ or a step whose output (or a snapshot) is larger than one write to Felix may
 hold (8 MiB, against Felix's 16 MiB frame limit). The owner logs an error and
 marks the workload failed with the reason. Only Felix errors are retried.
 
-Snapshots are written every N inputs (default 1000) or every T seconds of
-activity. A stale owner's snapshot is harmless: determinism makes it identical
-to the one the new owner would have written for that offset.
+Snapshots are written every N inputs (default 1000). Each carries the
+writer's epoch and is appended with `publish_if` at the snapshot stream's
+tail as the owner last saw it, so a stale owner cannot write a snapshot after
+a later owner's. A refused write rereads the records past that tail: a
+snapshot from a later epoch means this owner is superseded and stops; ones
+from its own epoch or earlier are a stale owner's that landed first, which
+determinism makes correct, so it writes after them. A new owner that finds a
+snapshot from an epoch above its own stops at once, as it does for an output
+record, rather than ignoring it: a later owner exists, and the output fence
+would stop this one at its first write anyway.
 
 ## Checking output
 

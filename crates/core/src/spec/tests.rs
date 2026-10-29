@@ -63,3 +63,17 @@ fn an_unknown_state_is_refused() {
         Err(DecodeError::Json(_))
     ));
 }
+
+#[test]
+fn only_a_new_module_or_input_conflicts_with_written_history() {
+    let old = spec();
+    let mut next = spec();
+    next.snapshot_every = 7;
+    next.limits.fuel_per_call = 1;
+    assert_eq!(old.conflicts_with_history(&next), None);
+    next.module = "cd".repeat(32);
+    assert!(old.conflicts_with_history(&next).is_some());
+    let mut next = spec();
+    next.input = "other".into();
+    assert!(old.conflicts_with_history(&next).is_some());
+}

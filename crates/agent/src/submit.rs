@@ -57,6 +57,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
 
     let felix = Felix::connect(settings).await?;
     let hash = module::hash(&submission.module);
+    let snap_stream = names::snapshot_stream(&submission.id);
     let module = Bytes::from(submission.module);
     felix.cache_put(names::MODULES, &hash, module).await?;
     let spec = WorkloadSpec {
@@ -68,6 +69,16 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         limits: submission.limits,
         failure: None,
     };
+    if let Some(old) = felix.cache_get(names::WORKLOADS, &submission.id).await?
+        && let Ok(old) = WorkloadSpec::decode(&old)
+        && let Some(conflict) = old.conflicts_with_history(&spec)
+        && (felix.tail(&spec.output).await? > 0 || felix.tail(&snap_stream).await? > 0)
+    {
+        bail!(
+            "workload {} already has output, and {conflict}; submit the change under a new id",
+            submission.id
+        );
+    }
     let spec = Bytes::from(spec.encode());
     felix
         .cache_put(names::WORKLOADS, &submission.id, spec)

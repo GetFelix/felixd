@@ -165,8 +165,8 @@ pub(crate) enum Lost {
 /// Claims `workload` for `node` if no live lease exists. `None` means someone
 /// holds it, or took an epoch first.
 ///
-/// `output_epoch` is the epoch of the last record on the workload's output
-/// stream. It is read only once the claim has won, so every earlier holder's
+/// `output_epoch` is the highest epoch on the workload's output and snapshot
+/// streams. It is read only once the claim has won, so every earlier holder's
 /// lease has expired by then.
 ///
 /// An error leaves the claim unknown. It is not adopted even if it was applied:

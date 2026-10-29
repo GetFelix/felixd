@@ -10,10 +10,15 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use bytes::Bytes;
-use common::{ID, INPUT, LEASE_TTL, OUTPUT, assert_uninterrupted, eventually, test_felix};
+use common::{
+    ID, INPUT, LEASE_TTL, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix,
+};
 use felixd_core::names;
 use felixd_core::output::{self, OutputHeader};
+use felixd_core::snapshot::{self, SnapshotHeader};
+use felixd_core::spec::Limits;
 use felixd_core::spec::WorkloadState;
+use felixd_runtime::Runtime;
 
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
@@ -312,4 +317,81 @@ async fn a_new_watch_stops_only_workloads_deleted_while_it_was_closed() {
         t.lease(ID).await.is_none().then_some(())
     })
     .await;
+}
+
+/// A holder frozen after taking a snapshot, before writing it, whose lease
+/// ends early. The snapshot is written with `publish_if`, so once the new
+/// owner has written one the stale snapshot is refused. The holder's long TTL
+/// keeps its own renewal from noticing first.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holder_frozen_before_a_snapshot_write_writes_no_snapshot_after_the_new_owner() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "10"]).await;
+    t.publish_all(INPUT, (0..30).map(count)).await;
+    let frozen = t.start_node_with_ttl(
+        "holder",
+        "freeze-before-snapshot-write=1",
+        Duration::from_secs(30),
+    );
+    eventually("the freeze", Duration::from_secs(60), || async {
+        frozen.stopped().then_some(())
+    })
+    .await;
+    let (stale, version) = t.lease(ID).await.expect("the frozen node's lease");
+    assert_eq!(t.felix.tail(SNAPSHOTS).await.unwrap(), 0);
+    t.felix
+        .cache_delete_if(names::LEASES, ID, version)
+        .await
+        .unwrap();
+
+    let _next = t.start_agent();
+    eventually(
+        "the new owner's snapshots",
+        Duration::from_secs(60),
+        || async { (t.felix.tail(SNAPSHOTS).await.unwrap() >= 3).then_some(()) },
+    )
+    .await;
+    frozen.resume();
+    assert_uninterrupted(&t, &module, 30).await;
+    let epochs: Vec<u64> = t
+        .read_all(SNAPSHOTS)
+        .await
+        .iter()
+        .map(|(_, r)| snapshot::decode(r).unwrap().0.epoch)
+        .collect();
+    assert!(
+        epochs.iter().all(|&e| e > stale.epoch),
+        "the frozen node wrote a snapshot at epoch {}: {epochs:?}",
+        stale.epoch
+    );
+}
+
+/// A snapshot can carry a later epoch than any output, from an owner whose
+/// steps wrote nothing. A new claim must take an epoch above it, or it would
+/// find itself superseded by its own history.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_takes_an_epoch_above_the_last_snapshot() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &["--snapshot-every", "1000"]).await;
+    t.publish_all(INPUT, (0..10).map(count)).await;
+    let mut workload = Runtime::new()
+        .unwrap()
+        .load(&module, Limits::default())
+        .unwrap();
+    for i in 0..5 {
+        workload.step(&count(i)).unwrap();
+    }
+    let state = workload.snapshot().unwrap();
+    t.publish_all(OUTPUT, (0..5).map(|i| counted(i, 1))).await;
+    let header = SnapshotHeader {
+        input_offset: 4,
+        output_tail: 5,
+    };
+    t.publish_all(SNAPSHOTS, [snapshot::encode(header, 7, &state)])
+        .await;
+
+    let _agent = t.start_agent();
+    assert_uninterrupted(&t, &module, 10).await;
+    let epochs = epochs(&t).await;
+    assert!(epochs[5..].iter().all(|&e| e > 7), "{epochs:?}");
 }

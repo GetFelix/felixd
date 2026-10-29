@@ -170,7 +170,7 @@ pub fn check_snapshots(
     let mut findings = Vec::new();
     for &(offset, record) in snapshots {
         let header = match snapshot::decode(record) {
-            Ok((header, _)) => header,
+            Ok((taken, _)) => taken.header,
             Err(error) => {
                 findings.push(Finding::UndecodableSnapshot {
                     offset,
