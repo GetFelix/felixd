@@ -3,7 +3,7 @@
 //!
 //! - [`names`]: the caches and streams felixd uses, and how a workload id maps
 //!   to its streams.
-//! - [`output`] and [`snapshot`]: the headers on output and snapshot records.
+//! - [`output`] and [`snapshot`]: the records on output and snapshot streams.
 //! - [`spec`], [`lease`] and [`node`]: the values in the `workloads`, `leases`
 //!   and `nodes` caches.
 //! - [`placement`]: which free workloads a node claims.

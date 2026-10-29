@@ -104,7 +104,7 @@ async fn a_second_crash_while_replaying_repeats_no_output() {
     eventually(
         "the first run's output",
         Duration::from_secs(60),
-        || async { (t.felix.tail(OUTPUT).await.unwrap() >= 120).then_some(()) },
+        || async { (t.outputs(OUTPUT).await.len() >= 120).then_some(()) },
     )
     .await;
     agent.kill();
@@ -130,7 +130,7 @@ async fn a_crash_between_append_and_snapshot_resumes_from_the_last_snapshot() {
     let mut agent = t.start_agent_with_faults("crash-before-snapshot=3");
     assert!(!agent.exited(Duration::from_secs(60)).await.success());
     // Input 29's output is written and its snapshot is not.
-    assert_eq!(t.felix.tail(OUTPUT).await.unwrap(), 30);
+    assert_eq!(t.outputs(OUTPUT).await.len(), 30);
     assert_eq!(t.felix.tail(SNAPSHOTS).await.unwrap(), 2);
 
     let mut agent = t.start_agent();
@@ -164,7 +164,7 @@ async fn a_snapshot_is_not_taken_while_replaying() {
     eventually(
         "the first owner's output",
         Duration::from_secs(60),
-        || async { (t.felix.tail(OUTPUT).await.unwrap() >= 100).then_some(()) },
+        || async { (t.outputs(OUTPUT).await.len() >= 100).then_some(()) },
     )
     .await;
     first.kill();

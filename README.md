@@ -143,7 +143,9 @@ three things:
 1. **Kill a node mid-run.** Each of its workloads resumes on another node, and
    its output has no gaps and no duplicates.
 2. **Freeze a node and let it come back late.** The stale copy of a workload
-   cannot write anything once another node has taken over.
+   cannot write anything once another node has taken over. The new owner's
+   first write is a claim record on the output stream, so the stale copy's
+   next append is refused even if the new owner never writes an output.
 3. **Replay a workload to any past offset or time** and inspect its state.
 
 Scheduling policy, resource limits, networking and native processes come

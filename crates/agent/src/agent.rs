@@ -410,11 +410,13 @@ async fn own(
         if slot.is_none() {
             continue;
         }
-        let floor = written_epoch(&node.felix, &id, &spec.output);
+        let output_tail = std::sync::Mutex::new(None);
+        let floor = written_epoch(&node.felix, &id, &spec.output, &output_tail);
         match lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await {
             Ok(Some(mut held)) => {
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
-                let ended = run_held(&node, &id, &spec, &mut held, &mut stop).await;
+                let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let ended = run_held(&node, &id, &spec, &mut held, claim_from, &mut stop).await;
                 match ended {
                     Ended::Failed | Ended::Stopped => {
                         lease::release(&node.felix, &held).await;
@@ -527,18 +529,29 @@ fn now_millis() -> u64 {
 }
 
 /// The larger epoch of the last records on the output and snapshot streams,
-/// or 0 if they have none. A record that does not decode counts as 0: the
-/// runner fails the workload for it, which only a holder may do.
-async fn written_epoch(felix: &Felix, id: &str, output: &str) -> Result<u64> {
-    let last = async |stream: &str| -> Result<Option<Bytes>> {
+/// claims included, or 0 if they have none. A record that does not decode
+/// counts as 0: the runner fails the workload for it, which only a holder may
+/// do. The output stream's tail it read goes in `output_tail`, where the
+/// holder writes its claim.
+async fn written_epoch(
+    felix: &Felix,
+    id: &str,
+    output: &str,
+    output_tail: &std::sync::Mutex<Option<u64>>,
+) -> Result<u64> {
+    let last = async |stream: &str| -> Result<(u64, Option<Bytes>)> {
         let tail = felix.tail(stream).await?;
-        Ok(felix.last_record(stream, tail).await?.map(|r| r.payload))
+        Ok((
+            tail,
+            felix.last_record(stream, tail).await?.map(|r| r.payload),
+        ))
     };
-    let output = last(output)
-        .await?
-        .map_or(0, |r| output::decode(&r).map_or(0, |(w, _)| w.epoch));
+    let (tail, output) = last(output).await?;
+    *output_tail.lock().unwrap_or_else(|e| e.into_inner()) = Some(tail);
+    let output = output.map_or(0, |r| output::decode(&r).map_or(0, |r| r.epoch()));
     let snapshot = last(&names::snapshot_stream(id))
         .await?
+        .1
         .map_or(0, |r| snapshot::decode(&r).map_or(0, |(t, _)| t.epoch));
     Ok(output.max(snapshot))
 }
@@ -560,6 +573,7 @@ async fn run_held(
     id: &str,
     spec: &WorkloadSpec,
     held: &mut Held,
+    mut claim_from: Option<u64>,
     stop: &mut watch::Receiver<bool>,
 ) -> Ended {
     let (deadline, fence) = held.fence();
@@ -581,7 +595,16 @@ async fn run_held(
             if faults::fail_workload() {
                 break Outcome::Failed("injected failure".to_owned());
             }
-            match run_workload(&node.felix, &node.modules, id, spec, &fence).await {
+            match run_workload(
+                &node.felix,
+                &node.modules,
+                id,
+                spec,
+                &fence,
+                &mut claim_from,
+            )
+            .await
+            {
                 Ok(outcome) => break outcome,
                 Err(error) => {
                     tracing::warn!(workload = %id, error = %format!("{error:#}"), "retrying");

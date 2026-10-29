@@ -200,7 +200,7 @@ async fn a_watch_on_a_killed_broker_is_replaced() {
     let _agent = t.start_agent();
     publish_range(&t, 0..5).await;
     eventually("the first outputs", Duration::from_secs(60), || async {
-        (t.read_all(OUTPUT).await.len() >= 5).then_some(())
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
     })
     .await;
     let (old, _) = leader(&t, names::WORKLOADS)

@@ -58,10 +58,44 @@ fn an_owner_change_is_not_a_finding() {
     let expected = replay(5);
     let mut records = clean(&expected);
     for r in &mut records[3..] {
-        let (w, p) = output::decode(r).unwrap();
+        let (w, p) = output::decode(r).unwrap().output().unwrap();
         *r = output::encode(w.header, 2, p);
     }
     assert_eq!(run(&expected, &records, true), []);
+}
+
+#[test]
+fn claims_between_outputs_are_not_findings() {
+    let expected = replay(5);
+    let mut records = vec![output::encode_claim(1)];
+    records.extend(clean(&expected[..3]));
+    records.push(output::encode_claim(2));
+    records.push(output::encode_claim(3));
+    records.extend(
+        expected[3..]
+            .iter()
+            .map(|e| output::encode(e.header, 3, &e.payload)),
+    );
+    records.push(output::encode_claim(4));
+    assert_eq!(run(&expected, &records, true), []);
+}
+
+#[test]
+fn an_output_below_a_claims_epoch_is_a_regression() {
+    let expected = replay(2);
+    let records = vec![
+        record(0, 0, 1, &[0]),
+        output::encode_claim(2),
+        record(1, 0, 1, &[1]),
+    ];
+    assert_eq!(
+        run(&expected, &records, true),
+        [Finding::EpochRegression {
+            offset: 2,
+            epoch: 1,
+            previous: 2
+        }]
+    );
 }
 
 #[test]
@@ -254,4 +288,27 @@ fn a_snapshot_tail_past_the_stream_is_a_finding() {
             to: 1,
         }]
     );
+}
+
+#[test]
+fn claims_do_not_move_a_snapshots_bounds() {
+    // Outputs of inputs 0 and 1 at offsets 0 and 2, with claims at 1 and 3.
+    let records = [
+        record(0, 0, 1, &[0]),
+        output::encode_claim(2),
+        record(1, 0, 2, &[1]),
+        output::encode_claim(3),
+    ];
+    let on_stream: Vec<(u64, &[u8])> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i as u64, r.as_slice()))
+        .collect();
+    for (s, ok) in [(snap(0, 1), true), (snap(0, 2), true), (snap(0, 3), false)] {
+        let found = check_snapshots(&[(0, &s)], &on_stream, 4);
+        assert_eq!(found.is_empty(), ok, "{found:?}");
+    }
+    for tail in [3, 4] {
+        assert_eq!(check_snapshots(&[(0, &snap(1, tail))], &on_stream, 4), []);
+    }
 }

@@ -37,7 +37,7 @@ docker compose -f tests/felix/cluster.yaml run --rm felix-fleet
 tests/felix/credentials.sh /tmp/felix cluster
 export FELIX_BROKERS=127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300 \
   FELIX_OPERATOR_TOKEN_FILE=/tmp/felix/operator.jwt FELIXD_CLUSTER=$PWD/tests/felix/cluster.yaml
-cargo test -p felixd --test cluster
+cargo test -p felixd --test cluster --test fence
 ```
 
 plus the other `FELIX_*` variables the README lists. With Podman, set `COMPOSE` and `FELIXD_COMPOSE` to
