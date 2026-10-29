@@ -74,7 +74,7 @@ pub(crate) async fn record_failure(
         }
         faults::before_failure_append();
         let record = output::encode_failure(epoch, spec_version, reason);
-        match felix.publish_if(stream, vec![record], tail).await {
+        match send(felix, stream, vec![record], tail, faults::Write::Failure).await {
             Ok(ConditionalWrite::Written { .. }) => {
                 return Ok(Recorded::Failed {
                     spec_version,
@@ -89,6 +89,24 @@ pub(crate) async fn record_failure(
                 }
                 tracing::warn!(stream, %error, "failure record failed, checking the tail");
             }
+        }
+    }
+}
+
+/// `publish_if`, or the dropped request or lost answer a test fault asks for.
+async fn send(
+    felix: &Felix,
+    stream: &str,
+    records: Vec<Vec<u8>>,
+    at: u64,
+    write: faults::Write,
+) -> Result<ConditionalWrite> {
+    match faults::answer(write) {
+        faults::Answer::Sent => felix.publish_if(stream, records, at).await,
+        faults::Answer::Dropped => Err(anyhow!("injected: the request was dropped")),
+        faults::Answer::Lost => {
+            felix.publish_if(stream, records, at).await?;
+            Err(anyhow!("injected: the answer was lost"))
         }
     }
 }
@@ -147,9 +165,8 @@ impl<'a> OutputLog<'a> {
                 return Err(LostLease.into());
             }
             faults::before_claim();
-            let sent = felix
-                .publish_if(stream, vec![output::encode_claim(fence.epoch())], log.tail)
-                .await;
+            let claim = vec![output::encode_claim(fence.epoch())];
+            let sent = send(felix, stream, claim, log.tail, faults::Write::Claim).await;
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == log.tail => {
                     log.tail += 1;
@@ -255,9 +272,8 @@ impl<'a> OutputLog<'a> {
                     .await
                     .and_then(|_| Err(anyhow!("injected: the rest of the batch was lost"))),
                 None => {
-                    self.felix
-                        .publish_if(self.stream, batch.clone(), self.tail)
-                        .await
+                    let write = faults::Write::Append;
+                    send(self.felix, self.stream, batch.clone(), self.tail, write).await
                 }
             };
             faults::after_append_sent();

@@ -518,10 +518,13 @@ FailAck(n) ==
     /\ FoundFailure(n)
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
-\* Refused or unanswered: confirm again and read the tail again.
+\* Refused or unanswered: read the tail again and decide, either at once
+\* (record_failure's own loop) or after confirming again (mark_failed's,
+\* once that loop gives up).
 FailRetry(n) ==
     /\ nd[n].pc = "fwait" /\ nd[n].rep \in {"refused", "lost"}
-    /\ nd' = [nd EXCEPT ![n].pc = "failing", ![n].await = NoMsg, ![n].rep = "none"]
+    /\ \E pc \in {"failing", IF Confirmer THEN "confirmed" ELSE "failing"} :
+          nd' = [nd EXCEPT ![n].pc = pc, ![n].await = NoMsg, ![n].rep = "none"]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
 \* The spec follows the record, so this write needs no fence.
