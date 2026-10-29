@@ -5,10 +5,11 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 1 in progress. Agents hold a lease per workload,
-> spread workloads across nodes, and take a dead node's workloads over within
-> one lease TTL. `felixd check` verifies the output streams. The three-node
-> failover test in CI is next. The plan is in
+> **Status:** milestone 1 done. Agents hold a lease per workload, spread
+> workloads across nodes, and take a dead node's workloads over within one
+> lease TTL. A three-node failover test that keeps killing lease holders runs
+> on every pull request and ends with `felixd check`. Fencing a frozen node
+> (milestone 2) is next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -31,6 +32,15 @@ mid-stream, restarts it and checks the output stream:
 
 ```
 FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test restart -- --test-threads=1
+```
+
+The failover test runs three agents and six workloads under a steady
+producer, kills the node holding the most leases every 3 s and starts it
+again, then checks every output stream. `FELIXD_FAILOVER_SECS` sets how long
+it runs (30 by default; a nightly CI job runs it for 10 minutes):
+
+```
+FELIXD_REQUIRE_FELIX=1 cargo test -p felixd --test failover -- --test-threads=1
 ```
 
 By hand, with a workload component and a durable input stream that already exists:
@@ -223,7 +233,7 @@ owner knows which outputs already exist and does not write them again.
 | M | Milestone | What it proves | State |
 |---|---|---|---|
 | 0 | One node, one workload | The workload contract works; a restart resumes where it stopped | Done |
-| 1 | Leases and failover | Kill a node and its workloads continue elsewhere | In progress |
+| 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Planned |
 | 3 | Replay | Rebuild any workload at any offset or time | Planned |
 | 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Planned |

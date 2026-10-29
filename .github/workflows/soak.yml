@@ -1,0 +1,40 @@
+name: Soak
+
+# The failover test with a longer kill loop. The pull request suite runs it
+# for 30 seconds.
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: How long the kill loop runs
+        default: "600"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FELIXD_REQUIRE_FELIX: "1"
+      FELIXD_FAILOVER_SECS: ${{ inputs.seconds || '600' }}
+      FELIX_BROKERS: 127.0.0.1:5000
+      FELIX_AUTH_TENANT: dev
+      FELIX_AUTH_TOKEN_FILE: /tmp/felix/client.jwt
+      FELIX_CA_FILE: /tmp/felix/broker-cert.pem
+      FELIX_CONTROLPLANE_URL: http://127.0.0.1:8443
+      FELIX_CONTROLPLANE_TOKEN_FILE: /tmp/felix/controlplane.jwt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Felix
+        run: |
+          docker compose -f tests/felix/compose.yaml up -d --wait
+          tests/felix/credentials.sh /tmp/felix
+      - run: cargo test -p felixd --test failover --locked -- --test-threads=1
+      - name: Felix logs
+        if: failure()
+        run: docker compose -f tests/felix/compose.yaml logs --no-color
