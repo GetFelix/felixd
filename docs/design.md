@@ -796,6 +796,9 @@ in chunks. Upgrading a running workload's module is a recorded change that
 takes effect at a stated input offset, after `felixd replay --module` shows the
 new module agrees on the inputs it has already seen.
 
+The interface, the guarantees and the record formats are in
+[contract.md](contract.md).
+
 ## Upgrading felixd and scale
 
 A node that meets a record version it doesn't understand stops claiming that
