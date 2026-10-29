@@ -358,6 +358,7 @@ impl<'a> OutputLog<'a> {
         }
         if let Record::NeedsOperator { reason, detail, .. } = found
             && found.needs_operator_under(self.spec_record).is_some()
+            && self.spec_record == u64::MAX
         {
             let detail = String::from_utf8_lossy(detail).into_owned();
             return Err(NeedsOperatorOnStream(NeedsOperator::new(reason, detail)).into());

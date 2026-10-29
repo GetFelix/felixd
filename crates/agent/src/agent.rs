@@ -578,6 +578,9 @@ async fn recorded_needs_operator(
     let Some(record) = spec.record else {
         return Ok(None);
     };
+    if record < u64::MAX {
+        return Ok(None);
+    }
     let tail = felix.tail(&spec.output).await?;
     let last = felix.last_record(&spec.output, tail).await?;
     Ok(last.and_then(|last| {
