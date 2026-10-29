@@ -279,7 +279,9 @@ async fn a_snapshot_frozen_past_a_takeover_is_safe_to_resume_from() {
     let module = t.submit("counter", &["--snapshot-every", "5"]).await;
     t.publish_all(INPUT, (0..8).map(count)).await;
     let (frozen, stale) = freeze_holder(&t, "holder", "freeze-before-snapshot-write=1").await;
-    assert_eq!(t.felix.tail(SNAPSHOTS).await.unwrap(), 0);
+    // On a cluster a generation-start record can take offset 0, so count
+    // records rather than read the tail.
+    assert!(t.read_all(SNAPSHOTS).await.is_empty());
 
     let mut next = t.start_agent_with_faults("skip-snapshots=100");
     eventually(
@@ -290,7 +292,7 @@ async fn a_snapshot_frozen_past_a_takeover_is_safe_to_resume_from() {
     .await;
     frozen.resume();
     eventually("the stale snapshot", Duration::from_secs(30), || async {
-        (t.felix.tail(SNAPSHOTS).await.unwrap() > 0).then_some(())
+        (!t.read_all(SNAPSHOTS).await.is_empty()).then_some(())
     })
     .await;
     let snapshots = t.read_all(SNAPSHOTS).await;
