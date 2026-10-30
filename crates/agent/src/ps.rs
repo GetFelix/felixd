@@ -6,10 +6,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::Result;
 use felixd_core::lease::Lease;
 use felixd_core::node::{self, Drain, NodeInfo};
-use felixd_core::spec::WorkloadSpec;
+use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::status::{self, Found, State};
 use felixd_core::{merge, names, output};
 
+use crate::assignments::{self, Placed};
 use crate::drain;
 use crate::felix::Felix;
 use crate::runner;
@@ -21,6 +22,8 @@ use crate::snapshots;
 pub struct Report {
     pub workloads: Vec<Workload>,
     pub nodes: Vec<Node>,
+    /// Whether the scheduler workload is running, so assignments are in force.
+    pub scheduled: bool,
 }
 
 #[derive(Debug)]
@@ -32,6 +35,8 @@ pub struct Workload {
     pub holder: Option<Lease>,
     /// Whether the holder is marked as draining.
     pub holder_draining: bool,
+    /// The scheduler's assignment in force, while a scheduler runs.
+    pub assigned: Option<Placed>,
     /// The output stream's next offset.
     pub outputs: u64,
     /// The epoch of the last record on the output stream.
@@ -95,16 +100,27 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
     let marks = drain::draining(&felix).await?;
     let draining: BTreeSet<String> = marks.iter().map(|(n, _)| n.clone()).collect();
     let specs = felix.entries(names::WORKLOADS).await?;
+    let scheduled = specs.iter().any(|(id, value)| {
+        id == names::SCHEDULER
+            && WorkloadSpec::decode(value).is_ok_and(|s| s.state == WorkloadState::Running)
+    });
+    let mut placed = if scheduled {
+        assignments::read(&felix).await?.table
+    } else {
+        HashMap::new()
+    };
     let mut workloads = Vec::new();
     for (id, value) in specs {
         if !ids.is_empty() && !ids.contains(&id) {
             continue;
         }
         let holder = leases.get(&id).cloned();
+        let assigned = placed.remove(&id);
         let holder_draining = holder.as_ref().is_some_and(|l| draining.contains(&l.owner));
         let mut workload = Workload {
             id,
             state: None,
+            assigned,
             holder,
             holder_draining,
             outputs: 0,
@@ -144,6 +160,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
     Ok(Report {
         workloads,
         nodes: nodes.into_values().collect(),
+        scheduled,
     })
 }
 

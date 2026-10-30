@@ -81,6 +81,8 @@
 //! - `drain-read-error=1`: every read of the drain mark fails.
 //! - `delay-claim-after-drain-read=MS`: wait MS milliseconds between a
 //!   claim's read of the drain mark and the claim itself.
+//! - `no-facts=1`: never append this node's facts to `sys.facts`, so the
+//!   scheduler never hears of it.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -414,6 +416,10 @@ pub(crate) async fn after_drain_read() {
     if let Some(ms) = fault("delay-claim-after-drain-read") {
         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
+}
+
+pub(crate) fn no_facts() -> bool {
+    fault("no-facts") == Some(1)
 }
 
 pub(crate) fn miss_drain_marks() -> bool {

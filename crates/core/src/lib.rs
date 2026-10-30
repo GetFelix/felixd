@@ -8,6 +8,7 @@
 //!   `nodes` and `drains` caches.
 //! - [`class`]: error classes and what an operator has to fix.
 //! - [`placement`]: which free workloads a node claims.
+//! - [`schedule`]: the scheduler workload's inputs, assignments and fold.
 //! - [`module`]: how a module is identified.
 //! - [`merge`]: the merge log of a workload with several inputs.
 //! - [`resume`]: where a new owner picks a workload up.
@@ -27,6 +28,7 @@ pub mod output;
 pub mod placement;
 pub mod replay;
 pub mod resume;
+pub mod schedule;
 pub mod snapshot;
 pub mod spec;
 pub mod status;

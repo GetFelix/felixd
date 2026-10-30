@@ -20,6 +20,10 @@ const EPOCH_FORMAT: u32 = 1;
 /// How long a lease lives without renewal unless the agent is told otherwise.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(10);
 
+/// What [`LeaseTiming::renewed_within`] allows past a renewal interval for
+/// the renewal's round trip, watch delivery and clock skew.
+pub const FRESH_SLACK: Duration = Duration::from_secs(1);
+
 /// The shortest TTL an agent accepts. A holder stops a third of a TTL before
 /// anyone else may claim, and that margin has to cover a renewal's round trip
 /// to a busy broker and the scheduler's delay in waking the holder.
@@ -94,6 +98,27 @@ impl LeaseTiming {
     /// stops a third of a TTL before any other node can claim.
     pub fn stop_after(&self) -> Duration {
         self.ttl * 2 / 3
+    }
+
+    /// How recently a holder must have renewed its lease, or a node its
+    /// `nodes` entry, for another node to count on it still being there.
+    /// One renewal interval plus [`FRESH_SLACK`] for the renewal's round
+    /// trip, watch delay and clock skew, and never less than half a TTL. It
+    /// stays below the TTL, so a lease that has merely not expired never
+    /// counts.
+    pub fn renewed_within(&self) -> Duration {
+        let wanted = (self.renew_after() + FRESH_SLACK).max(self.ttl / 2);
+        wanted.min(self.ttl - self.ttl / 6)
+    }
+
+    /// Whether a lease last seen expiring at `expires_at_millis` (broker
+    /// time) was renewed within [`Self::renewed_within`] of `now_millis`,
+    /// judged by the time it has left. A lease that never expires (0) is not:
+    /// nothing renews it.
+    pub fn renewed_lately(&self, expires_at_millis: u64, now_millis: u64) -> bool {
+        let left = expires_at_millis.saturating_sub(now_millis);
+        let since = self.ttl.saturating_sub(self.renewed_within());
+        expires_at_millis != 0 && u128::from(left) > since.as_millis()
     }
 
     pub fn ttl_millis(&self) -> u64 {

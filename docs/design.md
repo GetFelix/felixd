@@ -248,9 +248,9 @@ OSDI 2021; Peter et al., "Arrakis", OSDI 2014 (abstract only).
 - **Pipelines:** one workload's output is another's input, and failover in the
   middle of the chain loses nothing.
 
-Out of scope for felixd: placement policy beyond "first claim wins", CPU and
-memory limits beyond Wasm fuel and memory caps, networking, and native
-processes.
+Out of scope for felixd: placement policy beyond "first claim wins" and the
+simple scheduler below, CPU and memory limits beyond Wasm fuel and memory
+caps, networking, and native processes.
 
 ## Architecture
 
@@ -540,16 +540,16 @@ a TTL. A clock ahead of the broker's costs a refused claim, never a second
 owner, since only the broker decides that a lease is gone.
 
 Each agent writes itself to `nodes` every TTL/3 with a TTL, so a dead node's
-entry goes away about when its leases do. Nothing reads `nodes` to make
-decisions yet; it says which agents are up and how full they are, and
-`felixd ps` shows it.
+entry goes away about when its leases do. It says which agents are up and
+how full they are, and `felixd ps` shows it. The only decision that reads it
+is whether to wait for a workload's assignee ([Placement](#placement)).
 
-v0 placement is "first claim wins" with a per-node cap: an agent holding
-`--max-workloads` (default 64) claims nothing more until one of its
-workloads ends, and every claim waits a random time of up to
+Without a scheduler, placement is "first claim wins" with a per-node cap: an
+agent holding `--max-workloads` (default 64) claims nothing more until one of
+its workloads ends, and every claim waits a random time of up to
 `--claim-delay-ms` (default 1 s). The agent sees placement only through the
-`Placement` trait in `core`, so the open question below (#26) can be settled
-without touching the lease code.
+`Placement` trait in `core`, so the scheduler ([Placement](#placement)) came
+in without touching the lease code.
 
 `felixd drain <node>` writes a mark under the node's id in the `drains` cache,
 with no TTL; `felixd undrain` deletes it. Each agent reads its own mark every
@@ -591,6 +591,13 @@ or one that cannot read `drains` gets, since it never says `draining`.
 node that is up leaves its workloads with no holder; they stay `running` and
 `felixd ps` shows them waiting until a node can take them.
 
+While a scheduler runs, a node that reads its mark appends a node fact saying
+it is draining within half a second, and its `nodes` entry says so too, so no
+node waits for it. The scheduler moves the node's assignments to other
+nodes, so the workloads it releases go where the scheduler puts them instead
+of to whichever node claims first. A node's assignments are left alone after
+an undrain; nothing is moved back.
+
 ## Operating a cluster
 
 `felixd ps` reads everything it shows from the caches and streams, so any
@@ -614,6 +621,11 @@ it. For each workload:
   `next`), and a separate line gives the next step on the merge log against
   its tail. Lag counts records on the stream, claims included when the input
   is another workload's output.
+
+- **Assigned.** While a scheduler runs, an `ASSIGNED` column gives the node the
+  scheduler assigned the workload to and the offset of that assignment on
+  `wl.scheduler.out`, such as `node-2@912`. A holder that differs from it took
+  the workload by first claim wins, or before the assignment changed.
 
 For each node: whether it has an entry in `nodes`, how many live leases name
 it, its `--max-workloads`, its version and whether it is draining: `yes`, or
@@ -1124,16 +1136,119 @@ log and runs as before.
 
 ## Placement
 
-Agents place workloads by first claim wins: when a lease is free or expired,
-an agent with room claims it after a random delay, and the broker's
-conditional write picks one winner. It sits behind the `Placement` seam.
+Without a scheduler, agents place workloads by first claim wins: when a lease
+is free or expired, an agent with room claims it after a random delay, and the
+broker's conditional write picks one winner. It sits behind the `Placement`
+seam.
 
-When that limits us (balancing, labels, graceful drain), placement moves to a
-scheduler that is itself a felixd workload (#60). It writes assignments as
+Built (#60): placement can come from a scheduler that is itself a felixd
+workload, `scheduler`, submitted with `felixd run --id scheduler --input
+sys.specs --input sys.facts scheduler.wasm`. It writes assignments as
 records, so placement is replayable and survives failover like any workload.
 Agents still claim through the lease, so the scheduler decides where work runs,
-never whether output is correct. First claim wins stays as the fallback when an
-assignment is missing or stale. A scheduler outside felixd is not planned.
+never whether output is correct. A scheduler outside felixd is not planned.
+
+- **Inputs.** Spec records on `sys.specs`, and node facts on `sys.facts`.
+  While the `scheduler` workload runs, each agent appends a fact: its id,
+  how often it appends, its `--max-workloads`, the ids of the workloads it
+  holds however it claimed them, and whether it is draining or cannot claim
+  (it cannot read its drain mark). It appends one every
+  `--facts-every-ms` (three lease TTLs by default) and within half a second
+  of a change. The scheduler's clocks are the append times of the inputs it
+  steps, never a wall clock, so a replay assigns the same way. A node takes
+  work while its last fact is within three of its intervals of the latest
+  `sys.facts` append time and says it is neither draining nor blocked.
+  Silence is measured on `sys.facts` alone, which one shard leader stamps,
+  so a broker clock that runs ahead on `sys.specs` cannot make every node
+  look silent. The skew left is a leader change on `sys.facts` to a broker
+  whose clock is behind or ahead, which can shift one node's silence by that
+  much. Nodes silent for thirty intervals are forgotten.
+- **Policy.** A running workload with no assignment, or one assigned to a node
+  that no longer takes work, goes to the node with the lowest load and room,
+  the lowest id first. A node's load is every workload assigned to it or held
+  by it, counted once, so workloads it took by first claim wins, the
+  scheduler included, count. A node over its room loses the assignments it
+  does not hold, highest ids first, to nodes with room or to none. Nothing
+  else is moved off a node that still takes work, and a returning node gets
+  nothing back. A stopped workload's assignment is dropped. The scheduler
+  never assigns itself; it is always placed by first claim wins.
+- **Output.** An assignment per change, keyed by workload. Each output also
+  says how far the scheduler has read `sys.specs`, and a spec record that
+  changes nothing still gets a progress record, so a node can tell "not yet
+  assigned" from "left unassigned". The whole table is written again on the
+  first step and then every ten minutes of input time. A takeover is not an
+  input, so a table written on takeover would not replay; the timed table is
+  the deterministic way to the same end. Readers start from the latest table,
+  so `wl.scheduler.out` can be trimmed below it (#19).
+- **Agents.** Each agent reads `wl.scheduler.out` a page at a time every half
+  second, starting from the latest table, and keeps its place across failed
+  reads and across the scheduler stopping and starting. A node follows
+  assignments only while the scheduler is healthy: its spec says `running`
+  and its holder renewed the lease lately: within the freshness window W, one
+  renewal interval (TTL/3) plus 1 s for the renewal's round trip, watch delay
+  and skew, at least TTL/2 and at most five sixths of a TTL. That is 5 s at
+  the default 10 s TTL. A lease that has only not yet expired is not enough,
+  since its holder may have died up to a TTL ago. Then a node claims a free
+  workload assigned to it at once. It leaves one to another node only while
+  that node's `nodes` entry says it takes work (under `--max-workloads`, not
+  draining, not blocked) and was rewritten lately: a read gives no expiry, so
+  an entry whose version has not changed for W since this node first read it
+  counts as gone. That wait lasts at most `--assignment-bound-ms`
+  (15 s). It leaves a workload with no assignment only while the scheduler
+  has not read its spec record, for at most `--assignment-grace-ms` (2 s): a
+  healthy scheduler assigns a new spec in well under a second. Both are
+  counted from when the node first saw the workload free, whatever the
+  assignment did meanwhile.
+- **Fallback.** Everything else is first claim wins at once: no healthy
+  scheduler, an assignee that is down, silent, full, draining or blocked, an
+  entry that cannot be read, a workload the scheduler read and left
+  unassigned, and a wait past the bound or the grace. An assignment cannot
+  make two owners, since the lease and the `publish_if` fence still decide.
+
+What this adds to a failover or a new workload, compared with first claim
+wins:
+
+| Case | Added wait |
+|---|---|
+| No scheduler, or its holder not renewing | None once its lease has gone W without renewal |
+| Assignee down, full, draining or blocked | None (one `nodes` read) |
+| Assignee died but its `nodes` entry has not expired | At most W from this node's first read, plus a second between reads |
+| Assigned to this node | Less: it claims with no random delay |
+| Scheduler read the spec and left it unassigned | None |
+| Healthy scheduler not yet at the spec record | Until it is, typically under a second, at most the grace (2 s) |
+| Assignee healthy, with room, but does not claim | The bound (15 s) |
+
+When the scheduler's own node dies, nodes stop counting on it once its lease
+has gone W without renewal, W after its last renewal. Until then a new workload waits at most the grace, and a workload
+on a dead node is first claim wins at once as before.
+
+The scheduler's own view of a dead node is slower: three fact intervals,
+90 s by default. That is deliberate. It only decides where new assignments
+go, while each node's check of the assignee's `nodes` entry decides whether
+anyone waits, so a dead assignee costs a claim at most W whatever
+the scheduler thinks. Matching the scheduler's view to the lease TTL would
+mean a fact per node per TTL, three times the growth below.
+
+Growth. `sys.facts` gets one record per node per `--facts-every-ms`, about
+2,900 a day per node at the default 30 s, plus one per claim or release, at
+most two a second per node. A fact is about 150 bytes plus each held
+workload's id and three bytes: about 1.6 KB for a node holding 64 workloads
+with 20-character ids, and at most about 4.5 KB with 64-character ones. A
+full node at the defaults so writes about 4.6 MB a day. The agent refuses a
+`--max-workloads` whose largest possible fact would not fit in one record
+(about 125,000). `wl.scheduler.out` gets one
+record per spec record, one per assignment change and a table every ten
+minutes of input time. Neither is trimmed yet (#164).
+
+Mixed versions. A node from before the scheduler ignores assignments and
+claims by first claim wins. That only takes work an assignment meant for
+another node; the lease still picks one owner. It writes no facts, so the
+scheduler never assigns to it.
+
+What is not built yet: moving a running workload to its assignee (the
+scheduler only places free workloads), labels and the other node facts
+below, and replacing per-workload lease watching with assignments
+([Upgrading felixd and scale](#upgrading-felixd-and-scale)).
 
 Rules for the scheduler and the records it writes (#100):
 

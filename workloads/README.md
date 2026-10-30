@@ -1,6 +1,6 @@
 # Example workloads
 
-Two workloads that implement workload contract 0.2, the `workload` world in
+Two example workloads that implement workload contract 0.2, the `workload` world in
 [`../wit/workload.wit`](../wit/workload.wit), described in
 [`../docs/contract.md`](../docs/contract.md). Both write every output under the name `out` with no
 key, and snapshot their state as one chunk.
@@ -9,6 +9,9 @@ key, and snapshot their state as one chunk.
 |---|---|
 | `counter` | Counts its input records. Each step outputs the new total as eight big-endian bytes. |
 | `window` | Groups `(timestamp_ms, value)` records into ten second windows. The record that opens a later window closes the open one and outputs its count, sum, min and max as JSON. Every other step outputs nothing. A record that is not 16 bytes is rejected with code 1. |
+
+`scheduler` is the placement scheduler, which felixd runs as an ordinary workload. It reads spec
+records and node facts and writes assignments; see [scheduler/README.md](scheduler/README.md).
 
 They are a separate cargo workspace because they build for `wasm32-unknown-unknown`. The tests in
 `felixd-runtime` build them on demand with `felixd-testkit` and run them in wasmtime:

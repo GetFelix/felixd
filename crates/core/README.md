@@ -11,12 +11,13 @@ It depends on no other felixd crate. `felixd-runtime` takes its `Limits` from it
 
 | Module | Holds |
 |---|---|
-| `names` | The caches (`workloads`, `leases`, `epochs`, `nodes`, `drains`, `modules`) and how a workload id maps to its `wl.<id>.out`, `wl.<id>.snap` and `wl.<id>.merge` streams |
+| `names` | The caches (`workloads`, `leases`, `epochs`, `nodes`, `drains`, `modules`), the `sys.specs` and `sys.facts` streams, the `scheduler` workload id, and how a workload id maps to its `wl.<id>.out`, `wl.<id>.snap` and `wl.<id>.merge` streams |
 | `output` | Output stream records: outputs, claims, failures and rejections, with the name and key of each output |
 | `merge` | Merge log records of a workload with several inputs: entries, claims, the cursor and `reconcile` |
 | `snapshot` | Snapshot chunk and manifest records, `plan` (which chunks a new snapshot writes) and `read_chunk` (checks a chunk against its hash) |
 | `spec`, `lease`, `node` | The JSON values in the `workloads`, `leases`, `nodes` and `drains` caches, including `Limits`, and spec records on `sys.specs` with `History`, their fold for one workload |
-| `placement` | Which free workloads a node claims (`FirstClaimWins`) |
+| `placement` | Which free workloads a node claims: `FirstClaimWins`, and `Scheduled`, which follows the scheduler's assignments with first claim wins as the fallback |
+| `schedule` | The scheduler workload's fold (`Scheduler`), the node facts it reads from `sys.facts` and the assignments it writes |
 | `module` | How a module is identified: the hex sha256 of its bytes |
 | `resume` | `fold`, which says where a new owner restores from, where it subscribes, and which outputs the stream already holds |
 | `replay` | Where a replay starts and stops |

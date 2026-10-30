@@ -3,12 +3,14 @@
 //! until the lease looks free and the placement policy lets it, then tries to
 //! claim it. It runs a workload only while it holds the lease. While the node
 //! is marked in `drains` it gives up what it holds and claims nothing.
+//! While a scheduler runs, it follows the scheduler's assignments and appends
+//! this node's facts for it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -17,7 +19,8 @@ use felix_client::{CacheChange, CacheCondition, CacheWatchItem, ClusterCacheWatc
 use felixd_core::class::{ErrorClass, Failure, OperatorReason};
 use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
-use felixd_core::placement::{FirstClaimWins, Placement};
+use felixd_core::placement::{Assigned, AssignedTo, FirstClaimWins, Placement, Scheduled, Turn};
+use felixd_core::schedule::NodeFact;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::{names, output, snapshot, status};
 use felixd_runtime::Runtime;
@@ -25,6 +28,7 @@ use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::assignments::{self, Assignments};
 use crate::drain;
 use crate::faults;
 use crate::felix::Felix;
@@ -56,6 +60,10 @@ const READ_DRAIN_EVERY: Duration = Duration::from_secs(1);
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
 
+/// How often a node leaving a workload to its assignee checks that the
+/// assignee is still up.
+const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
+
 /// Who this node is and how it holds and claims leases.
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -63,7 +71,17 @@ pub struct AgentConfig {
     /// agent needs its own.
     pub node_id: String,
     pub lease: LeaseTiming,
+    /// How it claims when no assignment says otherwise.
     pub placement: FirstClaimWins,
+    /// The longest a free workload is left to the node it is assigned to
+    /// while a scheduler runs.
+    pub assignment_bound: Duration,
+    /// The longest a free workload waits for a healthy scheduler to read its
+    /// spec and assign it.
+    pub assignment_grace: Duration,
+    /// How often this node appends its facts for the scheduler when they
+    /// have not changed.
+    pub facts_every: Duration,
 }
 
 struct Node {
@@ -87,6 +105,40 @@ struct Node {
     claiming: AtomicUsize,
     /// Notified when what this node writes to `nodes` should change now.
     announce_now: Notify,
+    assignments: Assignments,
+    /// It cannot read its drain mark, so it claims nothing.
+    blocked: AtomicBool,
+    facts_every: Duration,
+    /// The workloads this node holds, for its facts.
+    holding: std::sync::Mutex<BTreeSet<String>>,
+    /// What this node last read of each assignee's `nodes` entry.
+    entries: std::sync::Mutex<HashMap<String, Entry>>,
+}
+
+/// A `nodes` entry as read: its version, when that version was first read,
+/// and when it was last read.
+struct Entry {
+    version: u64,
+    since: tokio::time::Instant,
+    read: tokio::time::Instant,
+}
+
+/// A workload this node holds, named in its facts while this lives.
+struct Holds<'a>(&'a Node, String);
+
+impl<'a> Holds<'a> {
+    fn start(node: &'a Node, id: &str) -> Holds<'a> {
+        let mut holding = node.holding.lock().unwrap_or_else(|e| e.into_inner());
+        holding.insert(id.to_owned());
+        Holds(node, id.to_owned())
+    }
+}
+
+impl Drop for Holds<'_> {
+    fn drop(&mut self) {
+        let mut holding = self.0.holding.lock().unwrap_or_else(|e| e.into_inner());
+        holding.remove(&self.1);
+    }
 }
 
 /// What the leases watch last said about one workload's lease.
@@ -114,6 +166,7 @@ pub async fn run(
     config: AgentConfig,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
+    felixd_core::schedule::check_fact_fits(&config.node_id, config.placement.max_workloads)?;
     anyhow::ensure!(
         config.lease.ttl >= MIN_TTL,
         "the lease TTL must be at least {} ms",
@@ -130,7 +183,11 @@ pub async fn run(
         node_id: config.node_id,
         timing: config.lease,
         max_workloads: config.placement.max_workloads,
-        placement: Box::new(config.placement),
+        placement: Box::new(Scheduled {
+            fallback: config.placement,
+            bound: config.assignment_bound,
+            grace: config.assignment_grace,
+        }),
         held: AtomicUsize::new(0),
         room: Notify::new(),
         random: AtomicU64::new(seed | 1),
@@ -138,12 +195,22 @@ pub async fn run(
         mark_reads: drain::MarkReads::default(),
         claiming: AtomicUsize::new(0),
         announce_now: Notify::new(),
+        assignments: Assignments::new(),
+        blocked: AtomicBool::new(false),
+        facts_every: config.facts_every,
+        holding: std::sync::Mutex::new(BTreeSet::new()),
+        entries: std::sync::Mutex::new(HashMap::new()),
     });
     tracing::info!(node = %node.node_id, "agent started");
     let presence = tokio::spawn({
         let node = node.clone();
         async move {
-            tokio::join!(announce(node.clone()), follow_drain(node));
+            tokio::join!(
+                announce(node.clone()),
+                follow_drain(node.clone()),
+                assignments::follow(&node.felix, &node.assignments),
+                write_facts(node.clone()),
+            );
         }
     });
     let mut tasks: HashMap<String, Task> = HashMap::new();
@@ -174,7 +241,7 @@ pub async fn run(
                 match item {
                     Some(CacheWatchItem::Change(change)) => {
                         if change.value.is_some() || !faults::ignore_lease_delete() {
-                            note_lease(&mut seen, change);
+                            note_lease(&node, &mut seen, change);
                         }
                     }
                     // A new watch redelivers every live lease.
@@ -211,7 +278,7 @@ pub async fn run(
                         if let Some(r) = redelivery.as_mut()
                             && r.note(&id, offset)
                         {
-                            prune(&mut tasks, &r.seen);
+                            prune(&node, &mut tasks, &r.seen);
                             redelivery = None;
                         }
                         continue;
@@ -242,7 +309,7 @@ pub async fn run(
             }
         };
         if let Some(r) = redelivery.as_ref().filter(|r| r.done()) {
-            prune(&mut tasks, &r.seen);
+            prune(&node, &mut tasks, &r.seen);
             redelivery = None;
         }
     }
@@ -286,7 +353,11 @@ async fn reopen(node: &Node, cache: &str, delay: Duration) -> ClusterCacheWatch 
     }
 }
 
-fn note_lease(seen: &mut HashMap<String, watch::Sender<Seen>>, change: CacheChange) {
+fn note_lease(node: &Node, seen: &mut HashMap<String, watch::Sender<Seen>>, change: CacheChange) {
+    if change.key == names::SCHEDULER {
+        let expires = change.value.is_some().then_some(change.expires_at_millis);
+        node.assignments.set_holder(expires);
+    }
     let now = match change.value {
         Some(_) => Seen::Held {
             expires_at_millis: change.expires_at_millis,
@@ -318,6 +389,7 @@ async fn announce(node: Arc<Node>) {
             draining: (draining && node.claiming.load(Ordering::SeqCst) == 0)
                 .then(|| node.mark_reads.nonce())
                 .flatten(),
+            blocked: node.blocked.load(Ordering::SeqCst),
         };
         let put = node
             .felix
@@ -355,8 +427,36 @@ async fn follow_drain(node: Arc<Node>) {
             }
             Err(_) => {}
         }
+        // A claim reads the mark too, so a node that cannot read it says it
+        // takes no work, and nobody waits for it.
+        if node.blocked.swap(failing, Ordering::SeqCst) != failing {
+            node.announce_now.notify_one();
+        }
         tokio::time::sleep(READ_DRAIN_EVERY).await;
     }
+}
+
+/// Appends this node's facts for the scheduler while one runs: every
+/// `facts_every`, and soon after what it holds or whether it can take work
+/// changes.
+async fn write_facts(node: Arc<Node>) {
+    let fact = || NodeFact {
+        node: node.node_id.clone(),
+        every_ms: u64::try_from(node.facts_every.as_millis()).unwrap_or(u64::MAX),
+        max_workloads: node.max_workloads,
+        held: node.held.load(Ordering::SeqCst),
+        holding: node
+            .holding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .take(node.max_workloads)
+            .cloned()
+            .collect(),
+        draining: *node.draining.borrow(),
+        blocked: node.blocked.load(Ordering::SeqCst),
+    };
+    assignments::write_facts(&node.felix, &node.assignments, node.facts_every, fact).await;
 }
 
 const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \
@@ -431,7 +531,10 @@ impl Redelivery {
 }
 
 /// Stops the tasks of workloads not in `current`.
-fn prune(tasks: &mut HashMap<String, Task>, current: &HashSet<String>) {
+fn prune(node: &Node, tasks: &mut HashMap<String, Task>, current: &HashSet<String>) {
+    if !current.contains(names::SCHEDULER) {
+        node.assignments.set_scheduler(false);
+    }
     tasks.retain(|id, task| {
         let keep = current.contains(id);
         if !keep {
@@ -474,6 +577,9 @@ fn apply(
         }
         _ => None,
     };
+    if id == names::SCHEDULER {
+        node.assignments.set_scheduler(wanted.is_some());
+    }
     if let Some(task) = tasks.get(&id) {
         // A changed spec restarts the task, which resumes under it.
         if !task.handle.is_finished() && wanted.as_ref() == Some(&task.spec) {
@@ -506,7 +612,10 @@ async fn own(
         return;
     };
     loop {
-        if !node.wait_for_chance(&id, &mut lease, &mut stop).await {
+        if !node
+            .wait_for_chance(&id, spec.record, &mut lease, &mut stop)
+            .await
+        {
             return;
         }
         match recorded_needs_operator(&node.felix, &spec).await {
@@ -580,6 +689,7 @@ async fn own(
             Ok(Some(mut held)) => {
                 metrics::claim(Claim::Won);
                 let holding = metrics::Holding::start(&metrics::workload(&id));
+                let _named = Holds::start(&node, &id);
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let run = Run {
@@ -748,14 +858,20 @@ impl Drop for Slot<'_> {
 
 impl Node {
     /// Waits until the lease looks free, this node has room and the placement
-    /// policy's delay has passed. `false` means stop.
+    /// policy lets it claim. `false` means stop.
     async fn wait_for_chance(
         &self,
         id: &str,
+        record: Option<u64>,
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
     ) -> bool {
         let mut draining = self.draining.subscribe();
+        let mut assignments = self.assignments.changes();
+        // When this node first saw the workload free, whatever its
+        // assignment, so assignments that keep changing cannot defer it for
+        // longer than the bound.
+        let mut free_since: Option<tokio::time::Instant> = None;
         loop {
             if *draining.borrow_and_update() {
                 tokio::select! {
@@ -770,6 +886,7 @@ impl Node {
                 }
             };
             if !wait.is_zero() {
+                free_since = None;
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     _ = lease.changed() => continue,
@@ -786,14 +903,90 @@ impl Node {
                 }
                 continue;
             }
-            let delay = self.placement.claim_delay(id, self.random());
-            tokio::select! {
-                () = tokio::time::sleep(delay) => return true,
-                // Someone may have claimed it meanwhile.
-                _ = lease.changed() => {}
-                _ = stop.wait_for(|stop| *stop) => return false,
+            assignments.mark_unchanged();
+            let since = *free_since.get_or_insert_with(tokio::time::Instant::now);
+            let assigned = self.assigned(id, record, since).await;
+            match self.placement.turn(id, &assigned, self.random()) {
+                Turn::Claim(delay) => tokio::select! {
+                    () = tokio::time::sleep(delay) => return true,
+                    // Someone may have claimed it meanwhile.
+                    _ = lease.changed() => {}
+                    _ = stop.wait_for(|stop| *stop) => return false,
+                },
+                Turn::Defer(left) => tokio::select! {
+                    () = tokio::time::sleep(left.min(CHECK_ASSIGNEE_EVERY)) => {}
+                    _ = lease.changed() => {}
+                    _ = assignments.changed() => {}
+                    _ = stop.wait_for(|stop| *stop) => return false,
+                },
             }
         }
+    }
+
+    /// What this node knows of the free workload `id`'s assignment. `record`
+    /// is the `sys.specs` offset of its spec, and `since` when this node
+    /// first saw it free.
+    async fn assigned(
+        &self,
+        id: &str,
+        record: Option<u64>,
+        since: tokio::time::Instant,
+    ) -> Assigned {
+        if !self.assignments.healthy(&self.timing, now_millis()) {
+            return Assigned::NONE;
+        }
+        let (placed, specs) = self.assignments.get(id);
+        let to = match placed {
+            None => AssignedTo::Nobody {
+                decided: record.is_none_or(|record| specs > record),
+            },
+            Some(p) if p.node == self.node_id => AssignedTo::ThisNode,
+            Some(p) => AssignedTo::Elsewhere {
+                coming: self.takes_work(&p.node).await,
+            },
+        };
+        Assigned {
+            scheduler: true,
+            to,
+            waited: since.elapsed(),
+        }
+    }
+
+    /// Whether `node`'s entry in `nodes` says it would claim one more
+    /// workload, and was rewritten lately. A read does not give the entry's
+    /// expiry, so freshness comes from its version: a node rewrites its
+    /// entry every renewal interval, and one whose version has not changed
+    /// for [`LeaseTiming::renewed_within`] since this node first read it
+    /// counts as gone, well before its entry expires. No entry, one this
+    /// build cannot read, or a read that fails all count as no, so nothing
+    /// waits on a node that may not come.
+    async fn takes_work(&self, node: &str) -> bool {
+        let read = self.felix.cache_get_versioned(names::NODES, node);
+        let found = tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await;
+        let now = tokio::time::Instant::now();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // Nodes no assignment has named for a while are not kept.
+        let forget = self.timing.ttl * 10;
+        entries.retain(|_, e| now.duration_since(e.read) <= forget);
+        let Ok(Ok(found)) = found else {
+            return false;
+        };
+        let Some(found) = found else {
+            entries.remove(node);
+            return false;
+        };
+        let entry = entries.entry(node.to_owned()).or_insert(Entry {
+            version: found.version,
+            since: now,
+            read: now,
+        });
+        if entry.version != found.version {
+            entry.version = found.version;
+            entry.since = now;
+        }
+        entry.read = now;
+        now.duration_since(entry.since) <= self.timing.renewed_within()
+            && NodeInfo::decode(&found.value).is_ok_and(|info| info.takes_work())
     }
 
     /// Uniform in `[0, 1)`, from an xorshift. It only spreads claims.

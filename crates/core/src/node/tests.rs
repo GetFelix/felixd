@@ -7,6 +7,7 @@ fn node_info_round_trips() {
         max_workloads: 4,
         held: 1,
         draining: None,
+        blocked: false,
     };
     assert_eq!(NodeInfo::decode(&info.encode()), Ok(info.clone()));
     // Not draining is written as before the field.
@@ -26,6 +27,7 @@ fn only_an_acknowledgement_of_this_mark_counts() {
         max_workloads: 4,
         held: 0,
         draining,
+        blocked: false,
     };
     let mark = Drain { nonce: 9 };
     assert!(acknowledges(Some(&info(Some(9))), Some(&mark)));
@@ -49,4 +51,36 @@ fn a_drain_mark_round_trips_and_refuses_another_format() {
         Ok(Drain { nonce: 0 })
     );
     assert!(Drain::decode(br#"{"format": 2, "value": {}}"#).is_err());
+}
+
+#[test]
+fn a_node_takes_work_only_with_room_undrained_and_able_to_claim() {
+    let info = NodeInfo {
+        version: "0.0.0".into(),
+        max_workloads: 2,
+        held: 1,
+        draining: None,
+        blocked: false,
+    };
+    assert!(info.takes_work());
+    assert!(
+        !NodeInfo {
+            held: 2,
+            ..info.clone()
+        }
+        .takes_work()
+    );
+    assert!(
+        !NodeInfo {
+            draining: Some(3),
+            ..info.clone()
+        }
+        .takes_work()
+    );
+    let blocked = NodeInfo {
+        blocked: true,
+        ..info
+    };
+    assert!(!blocked.takes_work());
+    assert_eq!(NodeInfo::decode(&blocked.encode()), Ok(blocked));
 }

@@ -12,6 +12,7 @@ fn workload(id: &str, state: State, holder: Option<Lease>) -> Workload {
         state: Some(state),
         holder,
         holder_draining: false,
+        assigned: None,
         outputs: 0,
         last_epoch: None,
         inputs: vec![Position {
@@ -33,6 +34,7 @@ fn node(id: &str, up: bool, draining: bool, leases: usize) -> Node {
             max_workloads: 64,
             held: leases,
             draining: draining.then_some(1),
+            blocked: false,
         }),
         draining,
         mark: draining.then_some(Drain { nonce: 1 }),
@@ -65,6 +67,7 @@ fn every_input_and_the_merge_log_get_a_line() {
     let report = Report {
         workloads: vec![join],
         nodes: vec![node("node-2", true, true, 1)],
+        scheduled: false,
     };
     let printed = render(&report);
     let lines: Vec<&str> = printed.lines().collect();
@@ -114,6 +117,7 @@ fn a_parked_or_failed_workload_says_why() {
             workload("b", State::Failed(failed), None),
         ],
         nodes: vec![node("n", true, false, 0)],
+        scheduled: false,
     };
     let printed = render(&report);
     assert!(
@@ -129,6 +133,7 @@ fn waiting_with_every_node_draining_says_so() {
     let report = Report {
         workloads: vec![workload("a", State::Waiting, None)],
         nodes: vec![node("n", true, true, 0), node("gone", false, false, 0)],
+        scheduled: false,
     };
     let printed = render(&report);
     assert!(
@@ -147,6 +152,7 @@ fn a_mark_the_node_has_not_acknowledged_is_pending_and_an_unreadable_entry_is_up
     let report = Report {
         workloads: vec![],
         nodes: vec![old, newer],
+        scheduled: false,
     };
     let printed = render(&report);
     assert!(
@@ -161,4 +167,31 @@ fn a_mark_the_node_has_not_acknowledged_is_pending_and_an_unreadable_entry_is_up
         printed.contains("pending: the node has not said"),
         "{printed}"
     );
+}
+
+#[test]
+fn with_a_scheduler_each_workload_shows_its_assignment() {
+    let mut placed = workload("wl", State::Running, Some(Lease::held("n-2", 3)));
+    placed.assigned = Some(felixd_agent::assignments::Placed {
+        node: "n-2".into(),
+        offset: 912,
+    });
+    let unplaced = workload("new", State::Waiting, None);
+    let report = Report {
+        workloads: vec![placed, unplaced],
+        nodes: vec![node("n-2", true, false, 1)],
+        scheduled: true,
+    };
+    let printed = render(&report);
+    let lines: Vec<Vec<&str>> = printed
+        .lines()
+        .take(3)
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        lines[0][..5],
+        ["WORKLOAD", "STATE", "HOLDER", "ASSIGNED", "EPOCH"]
+    );
+    assert_eq!(lines[1][..5], ["wl", "running", "n-2", "n-2@912", "3"]);
+    assert_eq!(lines[2][..4], ["new", "waiting", "-", "-"]);
 }

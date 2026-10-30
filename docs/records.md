@@ -206,6 +206,32 @@ workload spec as below with `state` `running` or `stopped`. A reader refuses ano
 record's offset is the spec's version, so a later record for an id supersedes an earlier one and
 the stream is the spec history. Records are never rewritten; `failed` stays in the cache.
 
+## Node facts and assignments
+
+Node facts are on `sys.facts`, one shard, and are the scheduler's second input. Each is
+`{"format": 1, "value": ...}` with `node`, the node's id, `every_ms`, how often it appends one when
+nothing changes, `max_workloads`, `held`, how many workloads it holds, `holding`, their ids (at most
+`max_workloads`, left out when empty), and the booleans `draining` and `blocked` (it cannot read
+its drain mark). Those after `max_workloads` default to 0, empty and false.
+An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
+a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
+is more than three of the node's `every_ms` past its last fact, and forgets it after thirty.
+
+The scheduler's outputs on `wl.scheduler.out` are ordinary output records under the name `out`.
+Each payload is `{"format": 1, "value": ...}` with `specs`, the next `sys.specs` offset it has not
+stepped, and `kind`:
+
+- `assign`, keyed by the workload id, with `workload` and `node`, the node it should run on.
+  `node` is left out once the workload no longer runs.
+- `table`, with no key, with `assignments`, an object from workload id to node. It replaces every
+  assignment before it. The first step writes one, and another follows every ten minutes of input
+  time.
+- `progress`, with no key: a spec record that changed no assignment.
+
+A reader starts at the latest table and folds what follows; the last word on a workload is in
+force, and its offset is what `felixd ps` shows after the node. A running workload with no
+assignment whose spec record is below `specs` was left unassigned on purpose, for want of room.
+
 ## Caches
 
 Values in `workloads`, `leases`, `epochs`, `nodes` and `drains` are JSON of the form
