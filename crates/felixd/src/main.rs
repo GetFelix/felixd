@@ -52,6 +52,20 @@ enum Command {
         /// workload, so that the first node to see it does not take everything.
         #[arg(long, default_value_t = placement::DEFAULT_CLAIM_DELAY.as_millis() as u64)]
         claim_delay_ms: u64,
+        /// Serve Prometheus metrics at `/metrics` on this address, such as
+        /// 127.0.0.1:9464. Off when left out. Plain HTTP with no
+        /// authentication: it names workloads and streams, so keep it on an
+        /// internal network.
+        #[arg(long, env = "FELIXD_METRICS_BIND")]
+        metrics_bind: Option<std::net::SocketAddr>,
+        /// The most workloads that get metric series of their own. Those past
+        /// it are reported together as `workload="_other"`.
+        #[arg(
+            long,
+            default_value_t = felixd_agent::metrics::DEFAULT_MAX_WORKLOADS,
+            requires = "metrics_bind"
+        )]
+        metrics_max_workloads: usize,
     },
     /// Check output streams: replay each workload's module over its input and
     /// report gaps, duplicates, records out of order, epoch regressions and
@@ -195,12 +209,18 @@ async fn main() -> Result<()> {
             lease_ttl_ms,
             max_workloads,
             claim_delay_ms,
+            metrics_bind,
+            metrics_max_workloads,
         } => {
+            let node_id = node_id.unwrap_or_else(default_node_id);
+            if let Some(bind) = metrics_bind {
+                felixd_agent::metrics::start(bind, &node_id, metrics_max_workloads).await?;
+            }
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
             let config = AgentConfig {
-                node_id: node_id.unwrap_or_else(default_node_id),
+                node_id,
                 lease: LeaseTiming {
                     ttl: Duration::from_millis(lease_ttl_ms),
                 },

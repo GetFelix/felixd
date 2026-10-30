@@ -894,7 +894,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics and snapshot trimming are not) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); snapshot trimming is not) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -1236,9 +1236,12 @@ Payloads stay opaque bytes. The system's own records do not (#73):
 - A divergence record carries the node, its determinism ABI, the input offset,
   the snapshot it started from, and the digests of both the expected and the
   actual output, so `felixd replay` can reproduce it. Not built yet.
-- Metrics and traces use OpenTelemetry: input lag, last output offset, epoch,
-  takeovers, replay time and per-effect latency per workload. Not built yet
-  ([#18](https://github.com/GetFelix/felixd/issues/18)).
+- Metrics are Prometheus text per node, which an OpenTelemetry Collector
+  scrapes with its Prometheus receiver; [Metrics](metrics.md) lists them.
+  Input lag, claims, handoffs, steps, step latency, outputs, refusals and
+  snapshots are built ([#18](https://github.com/GetFelix/felixd/issues/18)).
+  Pushing OTLP from felixd, traces, and replay time and per-effect latency
+  (effects are not built) are not.
 
 Plan 9's `ctl` files each had their own text commands and `errstr` returned a
 string that callers matched by text. Linux sysfs had to impose one value per
