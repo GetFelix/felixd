@@ -24,6 +24,9 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
 | `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
 | `felixd replay` | Rebuilds a workload as of `--to` and prints what its `inspect` returns, or with `--diff` compares a replay with the recorded outputs. Writes nothing. |
+| `felixd ps` | Shows each workload's state, holder, epoch, output stream tail and position on each input, and each node. Reads only. |
+| `felixd drain <node>` | Marks a node as draining: it releases its leases so other nodes take its workloads over at once, and claims nothing. |
+| `felixd undrain <node>` | Lifts the mark, so the node claims work again. |
 
 Flags of `run`: `--id`, `--input` (up to 64), `--snapshot-every` (1000), `--snapshot-every-ms`, `--fuel`,
 `--max-memory`, `--snapshot-fuel` and `--replication-factor` (3; use 1 against a single broker).
@@ -42,11 +45,18 @@ Flags of `replay`: `--id`, `--to` (an input offset or an RFC 3339 time such as
 with when entries were merged), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
 the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a divergence.
 
+Flags of `ps`: `--id` (repeat for several; every workload by default).
+
+Flags of `drain`: `--wait`, which returns once no live lease names the node and the node says it
+claims nothing (or it is down), `--timeout-secs` (300) for `--wait`, after which it exits 1, and
+`--replication-factor` (3) for the `drains` cache if this creates it.
+
 Connection flags, each also read from an environment variable: `--brokers` (`FELIX_BROKERS`),
 `--server-name` (`FELIX_SERVER_NAME`), `--tenant` (`FELIX_AUTH_TENANT`), `--namespace`
 (`FELIX_NAMESPACE`), `--token-file` (`FELIX_AUTH_TOKEN_FILE`), `--ca-file` (`FELIX_CA_FILE`),
 `--controlplane-url` (`FELIX_CONTROLPLANE_URL`) and `--controlplane-token-file`
-(`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `run`). `felixd <command> --help` lists them all.
+(`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `run` and `drain`). A node needs read on the `drains`
+cache, or it claims nothing. `felixd <command> --help` lists them all.
 
 Submit a workload and start a node (set the variables as in the top-level
 [README](../../README.md#try-it) first):

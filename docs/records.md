@@ -190,7 +190,7 @@ the stream is the spec history. Records are never rewritten; `failed` stays in t
 
 ## Caches
 
-Values in `workloads`, `leases`, `epochs` and `nodes` are JSON of the form
+Values in `workloads`, `leases`, `epochs`, `nodes` and `drains` are JSON of the form
 `{"format": 1, "value": ...}`, each with its own format number. A reader refuses a format it does
 not know. The value sits under its own key so that a build from before formats, which reads the
 fields at the top, refuses it instead of reading what it can. A value with no `format` is from such
@@ -208,7 +208,12 @@ needs an operator). A spec without `limits` gets the defaults. A failed spec
   One with several has `inputs`, a list of 2 to 64 distinct names and no `input`, so a build that
   reads only `input` refuses it.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a number.
-- A node has `version`, `max_workloads` and `held`.
+- A node has `version`, `max_workloads` and `held`, and `draining`, the nonce of the drain mark
+  it has read, once it also has no claim under way. `draining` is left out when there is none.
+- A drain mark is `nonce`, a number other than 0 that `felixd drain` picks anew each time, under a
+  node's id, with no TTL. A mark without `nonce` reads as 0, which no node acknowledges. `felixd drain` writes it and
+  `felixd undrain` deletes it. While it is there the node gives up its leases and claims nothing.
+  A mark in a format this build does not know still counts as a drain.
 
 ## The resume fold
 

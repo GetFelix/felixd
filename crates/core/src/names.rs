@@ -11,6 +11,9 @@ pub const EPOCHS: &str = "epochs";
 pub const NODES: &str = "nodes";
 /// Cache of module bytes, keyed by the module's sha256 in hex.
 pub const MODULES: &str = "modules";
+/// Cache of drain marks, keyed by node id. No TTL: a mark stays until an
+/// operator lifts it.
+pub const DRAINS: &str = "drains";
 
 /// Stream of spec records: every version of every workload's spec.
 pub const SPECS: &str = "sys.specs";

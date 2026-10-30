@@ -1006,7 +1006,7 @@ async fn last_merged_stamp(
 
 /// The last output or rejection below `tail` and where it is, passing over
 /// claims and failures.
-async fn last_output(
+pub(crate) async fn last_output(
     felix: &Felix,
     stream: &str,
     tail: u64,

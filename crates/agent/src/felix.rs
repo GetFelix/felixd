@@ -31,6 +31,15 @@ pub struct Felix {
 
 pub use felix_client::{ClusterSubscription as Subscription, Event};
 
+/// What [`Felix::cache_lookup`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// The broker does not know the cache, right now.
+    NoCache,
+    /// The value under the key, if any.
+    Value(Option<Bytes>),
+}
+
 impl Felix {
     pub async fn connect(settings: &Settings) -> Result<Felix> {
         let roots = match &settings.ca_file {
@@ -341,6 +350,49 @@ impl Felix {
             )
             .await
     }
+
+    /// The value under `key`, telling a cache the broker does not know
+    /// apart from a missing key, and without [`Felix::cache_get`]'s wait for
+    /// a cache that is not served yet. A broker that is restarting or has
+    /// not loaded the cache answers the same way as for one never created,
+    /// so [`Lookup::NoCache`] is not proof that the cache does not exist.
+    pub async fn cache_lookup(&self, cache: &str, key: &str) -> Result<Lookup> {
+        match self
+            .client
+            .cache_get(&self.tenant, &self.namespace, cache, key)
+            .await
+        {
+            Ok(value) => Ok(Lookup::Value(value)),
+            Err(error) if not_found(&error) => Ok(Lookup::NoCache),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every live entry of `cache`, sorted by key, or none when the cache
+    /// does not exist.
+    pub async fn entries(&self, cache: &str) -> Result<Vec<(String, Bytes)>> {
+        let mut watch = match self.watch_retained(cache).await {
+            Ok(watch) => watch,
+            Err(error) if not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let count = watch
+            .retained_count()
+            .with_context(|| format!("the {cache} watch did not say how many entries it holds"))?;
+        let mut entries = Vec::new();
+        while (entries.len() as u64) < count {
+            match watch.recv().await {
+                Some(felix_client::CacheWatchItem::Change(change)) => {
+                    if let Some(value) = change.value {
+                        entries.push((change.key, value));
+                    }
+                }
+                _ => bail!("the {cache} watch ended early"),
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
 }
 
 /// Calls `page` until it gets past `from`. A page stops short at what the
@@ -382,6 +434,12 @@ where
             result => return result,
         }
     }
+}
+
+fn not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<BrokerError>()
+        .is_some_and(|broker| broker.code == ErrorCode::NotFound)
 }
 
 fn not_ready(error: &anyhow::Error) -> bool {

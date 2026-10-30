@@ -68,6 +68,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         names::LEASES,
         names::EPOCHS,
         names::NODES,
+        names::DRAINS,
     ] {
         admin::ensure_cache(settings, cache, kind).await?;
     }
