@@ -7,7 +7,9 @@ felixd agent --metrics-bind 127.0.0.1:9464 ...    # or FELIXD_METRICS_BIND
 curl -s 127.0.0.1:9464/metrics
 ```
 
-`/live` answers `ok` for a probe. Nothing is served and nothing is counted
+`/live` answers `ok` for a probe. If the address cannot be bound the agent
+exits at start. At most 64 connections are served at once, and a client has
+5 seconds to send its request and to take the reply. Nothing is served and nothing is counted
 unless the flag is given. When it is, the counters are atomics that are read
 only when a scrape arrives, and nothing in felixd reads them back, so they
 cannot change what a node does. The endpoint is plain HTTP with no
@@ -52,25 +54,28 @@ holder going quiet and the new one starting.
 | `felixd_steps_total` | counter | inputs stepped on this node |
 | `felixd_step_duration_seconds` | histogram | time in the workload's `step` call, 0.1 ms to 5 s |
 | `felixd_output_records_total` | counter | output records this node appended |
-| `felixd_output_refused_total` | counter | appends the output stream refused because its tail had moved. The holder reads the stream and reconciles. A lost answer whose write landed is refused once on the retry, so a few are normal. A steady rate means another node is writing to the stream |
+| `felixd_output_refused_total{result}` | counter | appends the output stream refused because its tail had moved. `reconciled`: the holder read the stream and found its own earlier write (a lost answer) or a race, and carried on. `fenced`: it found a later holder's records and stopped. A few `reconciled` are normal; any `fenced` means a holder was superseded |
 | `felixd_merge_log_appends_total` | counter | entries appended to the merge log of a workload with several inputs |
 | `felixd_workload_restarts_total` | counter | times its run was restarted after an error talking to Felix |
-| `felixd_snapshot_bytes` | gauge | size of its last snapshot, chunks together |
+| `felixd_workload_snapshot_bytes` | gauge | size of its last snapshot, chunks together |
 | `felixd_input_lag_records{input}` | gauge | records on the input past the next one the workload steps |
 
 Input lag is the input's tail, read every 5 seconds while the node holds the
 workload, minus the next offset the workload steps. It is at most 5 seconds
 stale and shows nothing until the first read. It counts records on the
 stream, claims included when the input is another workload's output, as
-`felixd ps` does. It is not shown for a workload the node does not hold.
+`felixd ps` does. It is not shown for a workload the node does not hold, and it is dropped after three failed reads in a row. Reads are spread over 5 to 6 seconds.
 
 ## Cardinality
 
 A node keeps series for the workloads it has held or claimed, at most
-`--metrics-max-workloads` of them (default 100). Each costs about 25 series,
+`--metrics-max-workloads` of them (default 100). Past that, a workload it no
+longer holds is dropped to make room, and its counters start over if it
+comes back. Each costs about 25 series,
 mostly the step histogram, and one more per input, so the default is a few
 thousand series per node at most. Past the limit a node reports all further
-workloads together as `workload="_other"`, summed, with no input lag. Raise
+workloads together as `workload="_other"`, summed, with no input lag or
+snapshot size, only while every named workload is held. Raise
 the limit if Prometheus can take it, or look at the workloads that matter by
 name with `felixd ps`. Nothing else is labelled by a name: the other labels
 (`result`, `reason`, `le`) have fixed values, and `input` is bounded by the

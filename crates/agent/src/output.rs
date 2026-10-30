@@ -399,6 +399,7 @@ impl<'a> OutputLog<'a> {
     pub(crate) async fn append(&mut self, mut batch: Vec<Vec<u8>>) -> Result<()> {
         let mut failures = 0;
         while !batch.is_empty() {
+            let mut refused = false;
             if !self.fence.holds() {
                 return Err(LostLease.into());
             }
@@ -430,9 +431,7 @@ impl<'a> OutputLog<'a> {
                     )));
                 }
                 Ok(ConditionalWrite::Refused { tail }) => {
-                    if let Some(m) = &self.metrics {
-                        m.output_refused();
-                    }
+                    refused = true;
                     tail
                 }
                 Err(error) => {
@@ -444,7 +443,14 @@ impl<'a> OutputLog<'a> {
                     self.felix.tail(self.stream).await?
                 }
             };
-            self.skip_written(&mut batch, seen_tail).await?;
+            let settled = self.skip_written(&mut batch, seen_tail).await;
+            if refused && let Some(m) = &self.metrics {
+                // Fenced when what was found ends this holder, reconciled
+                // when it was this holder's own earlier write or a race.
+                let fenced = settled.as_ref().is_err_and(|e| e.is::<Superseded>());
+                m.output_refused(fenced);
+            }
+            settled?;
         }
         Ok(())
     }

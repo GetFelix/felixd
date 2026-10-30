@@ -128,7 +128,7 @@ impl Metrics {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|(id, w)| (id.clone(), w.clone()))
+            .map(|(id, w)| (escape(id), w.clone()))
             .collect();
         let each = |out: &mut String,
                     name: &str,
@@ -175,13 +175,21 @@ impl Metrics {
             "Output records this node appended.",
             &|w| w.output_records.load(Ordering::Relaxed),
         );
-        each(
+        family(
             &mut out,
             "felixd_output_refused_total",
             "counter",
-            "Output appends the stream refused because its tail had moved, which fences a stale holder.",
-            &|w| w.output_refused.load(Ordering::Relaxed),
+            "Output appends the stream refused because its tail had moved, by result: fenced (a later holder wrote, so this one stops) or reconciled (its own earlier write or a race, settled by reading the stream).",
         );
+        for (id, w) in &workloads {
+            for (result, count) in ["reconciled", "fenced"].iter().zip(&w.output_refused) {
+                let _ = writeln!(
+                    out,
+                    "felixd_output_refused_total{{workload=\"{id}\",result=\"{result}\"}} {}",
+                    count.load(Ordering::Relaxed)
+                );
+            }
+        }
         each(
             &mut out,
             "felixd_merge_log_appends_total",
@@ -196,13 +204,20 @@ impl Metrics {
             "Times the workload's run was restarted after an error talking to Felix.",
             &|w| w.restarts.load(Ordering::Relaxed),
         );
-        each(
+        // Not for `_other`, where workloads would overwrite each other.
+        family(
             &mut out,
-            "felixd_snapshot_bytes",
+            "felixd_workload_snapshot_bytes",
             "gauge",
             "Size of the workload's last snapshot, chunks together.",
-            &|w| w.snapshot_bytes.load(Ordering::Relaxed),
         );
+        for (id, w) in workloads.iter().filter(|(id, _)| id != super::OTHER) {
+            let _ = writeln!(
+                out,
+                "felixd_workload_snapshot_bytes{{workload=\"{id}\"}} {}",
+                w.snapshot_bytes.load(Ordering::Relaxed)
+            );
+        }
         family(
             &mut out,
             "felixd_input_lag_records",
@@ -247,7 +262,7 @@ fn histogram(out: &mut String, name: &str, labels: &str, h: &Histogram) {
     } else {
         format!("{{{labels}}}")
     };
-    let sum = h.sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
+    let sum = h.sum_nanos.load(Ordering::Relaxed) as f64 / 1e9;
     let _ = writeln!(out, "{name}_sum{braces} {sum}");
     let _ = writeln!(out, "{name}_count{braces} {total}");
 }

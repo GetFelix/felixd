@@ -78,7 +78,7 @@ async fn a_node_reports_its_claims_steps_outputs_lag_snapshots_and_drain() {
     reaches(&addr, "felixd_snapshots_total{result=\"written\"}", 1.0).await;
     reaches(
         &addr,
-        &format!("felixd_snapshot_bytes{{workload=\"{ID}\"}}"),
+        &format!("felixd_workload_snapshot_bytes{{workload=\"{ID}\"}}"),
         1.0,
     )
     .await;

@@ -1007,15 +1007,25 @@ async fn run_held(
 }
 
 /// Reads the tail of each input of the workload now and then, for the lag
-/// metric. A failed read leaves the last one.
+/// metric. A few failed reads in a row drop the lag until one succeeds.
 async fn sample_tails(node: Arc<Node>, workload: Arc<metrics::WorkloadMetrics>) {
+    let mut failed = 0u32;
     loop {
-        for (at, input) in workload.inputs().iter().enumerate() {
-            if let Ok(tail) = node.felix.read_tail(&input.stream).await {
-                metrics::WorkloadMetrics::tail(&workload.inputs(), at, tail);
+        let inputs = workload.inputs();
+        let mut all_read = true;
+        for (at, input) in inputs.iter().enumerate() {
+            match node.felix.read_tail(&input.stream).await {
+                Ok(tail) => metrics::WorkloadMetrics::tail(&inputs, at, tail),
+                Err(_) => all_read = false,
             }
         }
-        tokio::time::sleep(metrics::SAMPLE_TAILS_EVERY).await;
+        failed = if all_read { 0 } else { failed + 1 };
+        if failed >= metrics::FORGET_TAIL_AFTER {
+            for at in 0..inputs.len() {
+                metrics::WorkloadMetrics::forget_tail(&inputs, at);
+            }
+        }
+        tokio::time::sleep(metrics::sample_wait()).await;
     }
 }
 

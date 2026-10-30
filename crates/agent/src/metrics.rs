@@ -9,7 +9,8 @@
 //! Prometheus adds the instance. Series labelled by workload are bounded by
 //! `--metrics-max-workloads` (default [`DEFAULT_MAX_WORKLOADS`]). A node that
 //! meets more workloads than that reports the rest together as
-//! `workload="_other"`, without input lag. Everything else has a fixed label
+//! `workload="_other"`, without input lag or snapshot size. A workload that
+//! is no longer held is dropped to make room for a new one. Everything else has a fixed label
 //! set. See docs/metrics.md.
 
 mod render;
@@ -36,6 +37,18 @@ const UNKNOWN: u64 = u64::MAX;
 /// How long a workload's input tails go between reads, so lag is at most
 /// this stale when an input is quiet.
 pub(crate) const SAMPLE_TAILS_EVERY: Duration = Duration::from_secs(5);
+
+/// Failed tail reads in a row after which an input's lag is dropped.
+pub(crate) const FORGET_TAIL_AFTER: u32 = 3;
+
+/// `SAMPLE_TAILS_EVERY` plus up to a second, so the workloads of a node do
+/// not all read at once.
+pub(crate) fn sample_wait() -> Duration {
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_millis());
+    SAMPLE_TAILS_EVERY + Duration::from_millis(u64::from(jitter))
+}
 
 /// Step latencies, in seconds.
 const STEP_BUCKETS: &[f64] = &[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0];
@@ -94,7 +107,7 @@ pub(crate) struct Histogram {
     bounds: &'static [f64],
     /// Observations in each bucket, the last for those above every bound.
     buckets: Vec<AtomicU64>,
-    sum_micros: AtomicU64,
+    sum_nanos: AtomicU64,
 }
 
 impl Histogram {
@@ -102,7 +115,7 @@ impl Histogram {
         Histogram {
             bounds,
             buckets: (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect(),
-            sum_micros: AtomicU64::new(0),
+            sum_nanos: AtomicU64::new(0),
         }
     }
 
@@ -110,8 +123,8 @@ impl Histogram {
         let seconds = took.as_secs_f64();
         let at = self.bounds.partition_point(|&b| b < seconds);
         self.buckets[at].fetch_add(1, Ordering::Relaxed);
-        let micros = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
-        self.sum_micros.fetch_add(micros, Ordering::Relaxed);
+        let nanos = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);
+        self.sum_nanos.fetch_add(nanos, Ordering::Relaxed);
     }
 }
 
@@ -139,7 +152,8 @@ pub(crate) struct WorkloadMetrics {
     steps: AtomicU64,
     step_seconds: Histogram,
     output_records: AtomicU64,
-    output_refused: AtomicU64,
+    /// Refused appends: reconciled, then fenced.
+    output_refused: [AtomicU64; 2],
     merge_entries: AtomicU64,
     restarts: AtomicU64,
     snapshot_bytes: AtomicU64,
@@ -153,7 +167,7 @@ impl WorkloadMetrics {
             steps: AtomicU64::new(0),
             step_seconds: Histogram::new(STEP_BUCKETS),
             output_records: AtomicU64::new(0),
-            output_refused: AtomicU64::new(0),
+            output_refused: Default::default(),
             merge_entries: AtomicU64::new(0),
             restarts: AtomicU64::new(0),
             snapshot_bytes: AtomicU64::new(0),
@@ -198,9 +212,10 @@ impl WorkloadMetrics {
             .fetch_add(records as u64, Ordering::Relaxed);
     }
 
-    /// An append the output stream refused because its tail had moved.
-    pub(crate) fn output_refused(&self) {
-        self.output_refused.fetch_add(1, Ordering::Relaxed);
+    /// An append the output stream refused because its tail had moved,
+    /// and whether what was found there fenced this holder.
+    pub(crate) fn output_refused(&self, fenced: bool) {
+        self.output_refused[usize::from(fenced)].fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn merged(&self, entries: usize) {
@@ -226,10 +241,22 @@ impl WorkloadMetrics {
         }
     }
 
-    /// Records the tail read for `input`.
+    /// Records the tail read for `input`. Tails do not shrink, so a lower
+    /// one is a stale read.
     pub(crate) fn tail(inputs: &[Arc<InputMetrics>], input: usize, tail: u64) {
         if let Some(input) = inputs.get(input) {
-            input.tail.store(tail, Ordering::Relaxed);
+            let _ = input
+                .tail
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |now| {
+                    Some(if now == UNKNOWN { tail } else { now.max(tail) })
+                });
+        }
+    }
+
+    /// Drops the lag of `input` until a tail is read again.
+    pub(crate) fn forget_tail(inputs: &[Arc<InputMetrics>], input: usize) {
+        if let Some(input) = inputs.get(input) {
+            input.tail.store(UNKNOWN, Ordering::Relaxed);
         }
     }
 }
@@ -361,8 +388,25 @@ impl Metrics {
             return (found.clone(), false);
         }
         // `_other` is not a valid workload id, so it never collides.
-        let named = workloads.len() - usize::from(workloads.contains_key(OTHER));
-        let key = if named >= self.max_workloads {
+        let named = |w: &BTreeMap<String, Arc<WorkloadMetrics>>| {
+            w.len() - usize::from(w.contains_key(OTHER))
+        };
+        if named(&workloads) >= self.max_workloads {
+            // Make room by dropping one that is neither held nor in use. Its
+            // counters start over if it returns, which a rate absorbs.
+            let idle = workloads
+                .iter()
+                .find(|(key, w)| {
+                    key.as_str() != OTHER
+                        && w.held.load(Ordering::Relaxed) <= 0
+                        && Arc::strong_count(w) == 1
+                })
+                .map(|(key, _)| key.clone());
+            if let Some(idle) = idle {
+                workloads.remove(&idle);
+            }
+        }
+        let key = if named(&workloads) >= self.max_workloads {
             OTHER
         } else {
             id

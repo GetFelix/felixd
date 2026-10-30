@@ -65,17 +65,20 @@ fn outputs_refusals_merges_and_restarts_are_counted_per_workload() {
     let m = metrics(10);
     let (w, _) = m.workload("a");
     w.output_written(3);
-    w.output_refused();
+    w.output_refused(false);
+    w.output_refused(true);
+    w.output_refused(true);
     w.merged(5);
     w.restarted();
     w.snapshot_size(42);
     let text = m.render();
     for expected in [
         "felixd_output_records_total{workload=\"a\"} 3",
-        "felixd_output_refused_total{workload=\"a\"} 1",
+        "felixd_output_refused_total{workload=\"a\",result=\"reconciled\"} 1",
         "felixd_merge_log_appends_total{workload=\"a\"} 5",
         "felixd_workload_restarts_total{workload=\"a\"} 1",
-        "felixd_snapshot_bytes{workload=\"a\"} 42",
+        "felixd_output_refused_total{workload=\"a\",result=\"fenced\"} 2",
+        "felixd_workload_snapshot_bytes{workload=\"a\"} 42",
     ] {
         assert!(
             text.lines().any(|l| l == expected),
@@ -218,4 +221,105 @@ async fn the_endpoint_serves_metrics_and_liveness_and_nothing_else() {
     assert!(metrics.contains("felixd_node_info{node=\""), "{metrics}");
     assert!(get("/live").await.starts_with("HTTP/1.1 200 OK"));
     assert!(get("/other").await.starts_with("HTTP/1.1 404"));
+}
+
+#[test]
+fn churn_past_the_cap_drops_released_workloads_and_keeps_held_ones() {
+    let m = metrics(3);
+    let (held, _) = m.workload("held");
+    held.held.store(1, Ordering::Relaxed);
+    for i in 0..50 {
+        let (w, shared) = m.workload(&format!("w{i}"));
+        assert!(!shared, "w{i} fell into _other with only idle workloads");
+        w.step(Duration::ZERO);
+    }
+    let text = m.render();
+    assert!(
+        text.contains("felixd_workload_held{workload=\"held\"} 1"),
+        "{text}"
+    );
+    assert!(text.contains("workload=\"w49\""), "{text}");
+    assert!(!text.contains("workload=\"w0\""), "{text}");
+    assert!(!text.contains("workload=\"_other\""), "{text}");
+    let series = text
+        .lines()
+        .filter(|l| l.contains("felixd_steps_total{"))
+        .count();
+    assert_eq!(series, 3);
+    // All held: nothing can be dropped.
+    let m = metrics(1);
+    let (a, _) = m.workload("a");
+    a.held.store(1, Ordering::Relaxed);
+    assert!(m.workload("b").1);
+}
+
+#[test]
+fn snapshot_size_is_not_reported_for_the_shared_series() {
+    let m = metrics(1);
+    let (a, _) = m.workload("a");
+    a.held.store(1, Ordering::Relaxed);
+    a.snapshot_size(7);
+    let (other, shared) = m.workload("b");
+    assert!(shared);
+    other.snapshot_size(9);
+    let text = m.render();
+    assert!(
+        text.contains("felixd_workload_snapshot_bytes{workload=\"a\"} 7"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("felixd_workload_snapshot_bytes{workload=\"_other\""),
+        "{text}"
+    );
+}
+
+#[test]
+fn lag_is_dropped_when_tails_stop_being_read_and_a_tail_never_goes_back() {
+    let m = metrics(2);
+    let (w, _) = m.workload("a");
+    w.set_inputs(&["in".to_owned()], false);
+    let inputs = w.inputs();
+    WorkloadMetrics::tail(&inputs, 0, 10);
+    WorkloadMetrics::tail(&inputs, 0, 8);
+    assert!(m.render().contains("input=\"in\"} 10"), "{}", m.render());
+    WorkloadMetrics::forget_tail(&inputs, 0);
+    assert!(!m.render().contains("felixd_input_lag_records{"));
+    WorkloadMetrics::tail(&inputs, 0, 3);
+    assert!(m.render().contains("input=\"in\"} 3"), "{}", m.render());
+}
+
+#[tokio::test]
+async fn a_client_that_never_reads_or_never_finishes_does_not_hold_the_endpoint() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = start("127.0.0.1:0".parse().unwrap(), "slow-test", 10)
+        .await
+        .unwrap();
+    // More idle connections than the limit: the extra ones are closed.
+    let mut idle = Vec::new();
+    for _ in 0..(serve::MAX_CONNECTIONS + 8) {
+        idle.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+    }
+    // A request in two segments and with a query still gets served once
+    // there is room, and the endpoint answers while the others sit idle.
+    let mut closed = 0;
+    for stream in &mut idle {
+        let mut byte = [0u8; 1];
+        if let Ok(Ok(0)) =
+            tokio::time::timeout(Duration::from_millis(20), stream.read(&mut byte)).await
+        {
+            closed += 1;
+        }
+    }
+    assert!(closed >= 8, "only {closed} connections were refused");
+    idle.clear();
+    let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    client.write_all(b"GET /metrics?x=1 HT").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client
+        .write_all(b"TP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut body = String::new();
+    client.read_to_string(&mut body).await.unwrap();
+    assert!(body.starts_with("HTTP/1.1 200 OK"), "{body}");
 }
