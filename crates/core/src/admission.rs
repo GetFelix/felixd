@@ -230,7 +230,7 @@ pub fn decide(policy: &Policy, offset: u64, payload: &[u8]) -> Decision {
 fn check(policy: &Policy, request: &Request) -> Result<(), (Reason, String)> {
     let spec = &request.spec;
     names::validate_id(&request.id).map_err(|e| (Reason::InvalidId, e.to_string()))?;
-    if names::is_system(&request.id) {
+    if request.id == names::ADMISSION {
         return Err((
             Reason::Reserved,
             format!(
