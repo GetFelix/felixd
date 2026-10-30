@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- felixd keeps its Felix and control plane tokens out of what it writes
+  (part of #74). They are held in a type whose `Debug` and `Display` print a
+  placeholder, and a new integration test runs a workload through a failover
+  with every log at trace level, then scans every record, cache entry, metric,
+  log line and refused-credential error for the token bytes. Per-lease tokens
+  wait on scoped token minting in Felix (GetFelix/felix#1625).
 - A scheduler that is itself a felixd workload (#60). Submit
   `scheduler.wasm` (in the container image) as `felixd run --id scheduler
   --input sys.specs --input sys.facts`. It reads spec records and node facts

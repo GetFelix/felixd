@@ -49,7 +49,7 @@ impl Felix {
         let quinn = felix_client::quic_client_config(roots, true)?;
         let config = ClientConfig {
             auth_tenant_id: Some(settings.tenant.clone()),
-            auth_token: Some(settings.token.clone()),
+            auth_token: Some(settings.token.expose().to_owned()),
             // Time-based snapshot points come from input append times.
             timestamps: true,
             ..ClientConfig::optimized_defaults(quinn)

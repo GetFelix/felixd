@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use felixd_agent::settings::Settings;
+use felixd_agent::settings::{Secret, Settings};
 
 /// How to reach Felix. The environment variables are the ones `felixctl` reads.
 #[derive(Args)]
@@ -35,7 +35,7 @@ impl Connection {
     pub(crate) fn settings(&self) -> Result<Settings> {
         let read = |path: &PathBuf| {
             std::fs::read_to_string(path)
-                .map(|t| t.trim().to_owned())
+                .map(|t| Secret::new(t.trim()))
                 .with_context(|| format!("read {}", path.display()))
         };
         Ok(Settings {

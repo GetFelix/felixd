@@ -1430,7 +1430,12 @@ Sources: Plan 9 `errstr(2)`; Linux `Documentation/filesystems/sysfs.rst`.
 
 ## Credentials
 
-Tracked in #74.
+Tracked in #74. Built so far: felixd reads its tokens only from files, never
+from arguments or the log, and holds them in a type that formats as a
+placeholder, so no log line, error or panic message carries one. An
+integration test (`crates/felixd/tests/secrets.rs`) runs a workload through a
+failover with every log turned up and scans every record, cache entry, metric
+and log line for the token bytes. Per-lease tokens are not built; see below.
 
 - **Secrets never enter the log.** A workload names a credential in an effect
   request; the executor resolves the name through a credential agent on its
@@ -1441,7 +1446,15 @@ Tracked in #74.
 - **Tokens are per lease.** A claim gets a short-lived token scoped to that
   workload's streams and epoch, so a node can write only the outputs it holds.
   This closes the v0 grant that lets any node write any output, and needs
-  scoped token minting from Felix.
+  scoped token minting from Felix
+  ([GetFelix/felix#1625](https://github.com/GetFelix/felix/issues/1625)).
+  Felix's token exchange can narrow a token to named streams, but only from an
+  upstream identity token whose grants already cover every output, so a node
+  minting its own per-lease token would still hold the authority to mint one
+  for any workload, and every claim would wait on the control plane, which
+  failover does not today. The mint has to check the lease itself, and refuse
+  a holder whose epoch is no longer the latest. Until Felix has that, output
+  stays protected by the `publish_if` fence alone.
 - **Workload identity in the SPIFFE style.** Nodes and workloads have
   identities that executors and grants check, issued by the cluster rather than
   configured by hand. Authentication stays negotiable, so a weak scheme can be
