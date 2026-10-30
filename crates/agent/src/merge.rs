@@ -72,6 +72,10 @@ impl<'a> MergeLog<'a> {
                     return Ok(log);
                 }
             }
+            // REVERT CHECK: no merge claim.
+            if fence.epoch() > 0 {
+                return Ok(log);
+            }
             let claim = merge::encode_claim(fence.epoch(), &log.next, fence.node());
             match felix.publish_if(stream, vec![claim], tail).await {
                 Ok(ConditionalWrite::Written { offset }) if offset == tail => {

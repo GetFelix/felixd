@@ -575,7 +575,8 @@ async fn merged(
 ) -> Result<Infallible> {
     let mut feed = Feed::new(felix, id, spec);
     let mut next = next_input;
-    let end = merge.tail();
+    // REVERT CHECK: no catch-up of merged entries.
+    let end = next_input.min(merge.tail());
     while next < end {
         let (page, after) = feed.page(next, end).await?;
         for step in page {
