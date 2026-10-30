@@ -67,11 +67,9 @@ impl Gate {
     /// build's admission record is not missed.
     async fn before(&self, felix: &Felix, id: &str, at: u64) -> Result<Before> {
         let mut scanned = self.0.lock().await;
-        let decisions_tail = if scanned.to < at {
-            felix.tail(&names::output_stream(names::ADMISSION)).await?
-        } else {
-            0
-        };
+        // Read only once a record names a decision: without admission,
+        // `wl.admission.out` does not exist.
+        let mut decisions_tail = None;
         while scanned.to < at {
             let from = scanned.to;
             let (page, after) = felix.read_page(names::SPECS, from, at).await?;
@@ -81,8 +79,16 @@ impl Gate {
                         if found.id == names::ADMISSION && scanned.first.is_none() {
                             scanned.first = Some(record.offset);
                         }
+                        let tail = match (found.admitted, decisions_tail) {
+                            (None, _) => 0,
+                            (Some(_), Some(tail)) => tail,
+                            (Some(_), None) => {
+                                let stream = names::output_stream(names::ADMISSION);
+                                *decisions_tail.insert(felix.tail(&stream).await?)
+                            }
+                        };
                         if let Some(decision) = found.admitted
-                            && verified(felix, decisions_tail, &found, decision).await?
+                            && verified(felix, tail, &found, decision).await?
                         {
                             let named = scanned.named.entry(found.id).or_default();
                             named.push((record.offset, decision));
