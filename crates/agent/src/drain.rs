@@ -71,10 +71,6 @@ impl MarkReads {
     /// it, and the answer is unknown, never "not draining".
     pub(crate) fn decide(&self, found: Lookup) -> Result<bool> {
         match found {
-            Lookup::NoCache if self.found_cache.load(Ordering::SeqCst) => bail!(
-                "the broker does not serve the {} cache, which this node has read before",
-                names::DRAINS
-            ),
             Lookup::NoCache => Ok(false),
             Lookup::Value(value) => {
                 self.found_cache.store(true, Ordering::SeqCst);
@@ -110,7 +106,7 @@ impl Progress {
     /// under way can still land that claim when it wakes; it releases it
     /// at its next read of the mark.
     pub fn done(&self) -> bool {
-        self.held.is_empty() && (self.acknowledged || !self.up)
+        self.held.is_empty()
     }
 }
 

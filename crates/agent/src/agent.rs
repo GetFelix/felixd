@@ -555,15 +555,7 @@ async fn own(
                 note_drain(&node, true);
                 continue;
             }
-            Err(error) => {
-                tracing::debug!(workload = %id, error = %format!("{error:#}"), "{CANNOT_READ_MARK}");
-                drop(under_way);
-                drop(slot);
-                if !pause(&mut stop).await {
-                    return;
-                }
-                continue;
-            }
+            Err(_) => {}
         }
         faults::after_drain_read().await;
         let output_tail = std::sync::Mutex::new(None);
