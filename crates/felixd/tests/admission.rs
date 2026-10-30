@@ -217,7 +217,9 @@ async fn submit_through_a_crash(t: &TestFelix, faults: &str) -> (Vec<u8>, common
         "submitted through a takeover in {} ms",
         started.elapsed().as_millis()
     );
-    assert!(!a.alive(), "node a did not hit {faults}");
+    // The record can be read before the aborting process has exited.
+    let status = a.exited(Duration::from_secs(10)).await;
+    assert!(!status.success(), "node a did not hit {faults}");
     (counter, b)
 }
 
