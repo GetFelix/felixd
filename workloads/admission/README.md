@@ -12,8 +12,9 @@ it: `felixd init` writes it.
 - **Output:** one decision per request under the name `out`, keyed by the workload id, accepting
   the spec or rejecting it with a reason code. Formats are in
   [docs/records.md](../../docs/records.md#requests-and-decisions).
-- **Policy:** the id is valid and not `admission`; the inputs are 1 to 64 different streams, and
-  only the scheduler may read `sys.specs` and `sys.facts`; the output stream is `wl.<id>.out`; the
+- **Policy:** the id is valid and not a system workload's (`admission`, `scheduler`), whose specs
+  only an operator writes; the inputs are 1 to 64 different streams, none of them a `sys.` stream
+  or one of admission's own; the output stream is `wl.<id>.out`; the
   state is `running` or `stopped`; snapshot settings are at least 1; fuel per call is at most ten
   times the default, memory at most 1 GiB, snapshot fuel at most ten times the default, the module
   at most 8 MiB and the replication factor 1 to 7. A decision reads nothing but its request, so

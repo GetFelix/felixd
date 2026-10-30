@@ -33,6 +33,15 @@ pub const ADMISSION: &str = "admission";
 /// assignments. It reads [`SPECS`] and [`FACTS`].
 pub const SCHEDULER: &str = "scheduler";
 
+/// The system workloads. Their specs are written directly by an operator,
+/// never submitted through admission, which refuses these ids.
+pub const SYSTEM: [&str; 2] = [ADMISSION, SCHEDULER];
+
+/// Whether `id` is a system workload's.
+pub fn is_system(id: &str) -> bool {
+    SYSTEM.contains(&id)
+}
+
 /// The longest workload id.
 pub const MAX_ID_LEN: usize = 64;
 

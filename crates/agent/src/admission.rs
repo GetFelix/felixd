@@ -4,10 +4,13 @@
 //!
 //! The decisions themselves are admission's outputs on `wl.admission.out`,
 //! written once under its lease and fence like any output. The projector only
-//! copies the accepted ones to `sys.specs`, and the gate checks each record
-//! against the decision it names, so a record that did not come from an
-//! accepting decision never runs, whoever wrote it.
+//! copies the accepted ones to `sys.specs`. The gate runs a record only if
+//! it names an accepting decision for exactly its spec, later than any an
+//! earlier record of the workload named. Whoever writes `sys.specs` cannot get
+//! past it; a principal that can write `wl.admission.out`, which in v0 is any
+//! node, can forge a decision until per-lease tokens (#74).
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,7 +23,7 @@ use felixd_core::{module, names, output};
 use tokio::sync::{Mutex, watch};
 
 use crate::admin::{self, StreamKind};
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::runner::NeedsOperator;
 use crate::settings::Settings;
 use crate::specs;
@@ -28,50 +31,79 @@ use crate::specs;
 /// How often the projector and a waiting submitter look for new records.
 const POLL: Duration = Duration::from_millis(50);
 
-/// Where admission was bootstrapped on `sys.specs`, as far as this node has
-/// read. Found once and kept: records are never rewritten, so the first
-/// admission record stays the first.
+/// What this node has read of `sys.specs` for the gate. Records are never
+/// rewritten, so what is folded stays true.
 #[derive(Default)]
 pub(crate) struct Gate(Mutex<Scanned>);
 
 #[derive(Default)]
 struct Scanned {
-    /// Every record below this has been looked at.
+    /// Every record below this has been folded.
     to: u64,
     /// The first record that is admission's own, or does not decode and so
     /// might be.
     first: Option<u64>,
+    /// Per workload, `(record offset, decision)` for each record naming a
+    /// decision, in record order.
+    named: HashMap<String, Vec<(u64, u64)>>,
+}
+
+/// What the gate knows of the records below one.
+struct Before {
+    /// The first record that is, or might be, admission's own.
+    admission_from: Option<u64>,
+    /// The latest decision an earlier record of the same workload named.
+    latest_decision: Option<u64>,
 }
 
 impl Gate {
-    /// The offset of the first record below `end` on `sys.specs` that is, or
-    /// might be, admission's own. A record that does not decode counts, so a
-    /// newer build's admission record is not missed.
-    pub(crate) async fn admission_from(&self, felix: &Felix, end: u64) -> Result<Option<u64>> {
+    /// Folds `sys.specs` up to `at` and says what is below it for workload
+    /// `id`. A record that does not decode counts as admission's, so a newer
+    /// build's admission record is not missed.
+    async fn before(&self, felix: &Felix, id: &str, at: u64) -> Result<Before> {
         let mut scanned = self.0.lock().await;
-        if let Some(first) = scanned.first {
-            return Ok(Some(first).filter(|&first| first < end));
-        }
-        while scanned.to < end {
-            let (page, after) = felix.read_page(names::SPECS, scanned.to, end).await?;
+        while scanned.to < at {
+            let from = scanned.to;
+            let (page, after) = felix.read_page(names::SPECS, from, at).await?;
             for record in page {
-                let bootstrap = SpecRecord::decode(&record.payload)
-                    .map_or(true, |found| found.id == names::ADMISSION);
-                if bootstrap {
-                    scanned.first = Some(record.offset);
-                    return Ok(Some(record.offset));
+                match SpecRecord::decode(&record.payload) {
+                    Ok(found) => {
+                        if found.id == names::ADMISSION && scanned.first.is_none() {
+                            scanned.first = Some(record.offset);
+                        }
+                        if let Some(decision) = found.admitted {
+                            let named = scanned.named.entry(found.id).or_default();
+                            named.push((record.offset, decision));
+                        }
+                    }
+                    Err(_) => {
+                        scanned.first.get_or_insert(record.offset);
+                    }
                 }
             }
             scanned.to = after;
         }
-        Ok(None)
+        let latest_decision = scanned.named.get(id).and_then(|named| {
+            named
+                .iter()
+                .filter(|(offset, _)| *offset < at)
+                .map(|(_, decision)| *decision)
+                .max()
+        });
+        Ok(Before {
+            admission_from: scanned.first.filter(|&first| first < at),
+            latest_decision,
+        })
     }
 }
 
 /// Checks that spec record `record`, at `sys.specs` offset `at`, may run:
 /// either admission had not been bootstrapped before it, or it names a
-/// decision on `wl.admission.out` that accepted exactly its spec. Anything
-/// else is [`NeedsOperator`] with [`OperatorReason::SpecUnadmitted`].
+/// decision on `wl.admission.out` that accepted exactly its spec and is
+/// later than any decision an earlier record of the workload named, so an
+/// old acceptance cannot be replayed over a later change or stop. Anything
+/// else is [`NeedsOperator`] with [`OperatorReason::SpecUnadmitted`],
+/// including a decision Felix no longer holds.
 pub(crate) async fn check_admitted(
     felix: &Felix,
     gate: &Gate,
@@ -79,8 +111,8 @@ pub(crate) async fn check_admitted(
     at: u64,
     record: &SpecRecord,
 ) -> Result<()> {
-    let from = gate.admission_from(felix, at).await?;
-    if !admission::needs_decision(id, at, from) {
+    let before = gate.before(felix, id, at).await?;
+    if !admission::needs_decision(id, at, before.admission_from) {
         return Ok(());
     }
     let unadmitted = |detail: String| NeedsOperator::new(OperatorReason::SpecUnadmitted, detail);
@@ -94,11 +126,17 @@ pub(crate) async fn check_admitted(
         .into());
     };
     let stream = names::output_stream(names::ADMISSION);
-    let found = felix
-        .read_range(&stream, decision, decision + 1)
-        .await?
-        .into_iter()
-        .find(|r| r.offset == decision);
+    let found = match felix.read_range(&stream, decision, decision + 1).await {
+        Ok(found) => found.into_iter().find(|r| r.offset == decision),
+        // Retrying would wait forever on a record that is gone.
+        Err(error) if Trimmed::of(&error).is_some() => {
+            return Err(unadmitted(format!(
+                "the decision at {stream}:{decision} was trimmed: {error:#}"
+            ))
+            .into());
+        }
+        Err(error) => return Err(error),
+    };
     let Some(found) = found else {
         if decision >= felix.tail(&stream).await? {
             return Err(specs::PastTail(format!(
@@ -113,8 +151,16 @@ pub(crate) async fn check_admitted(
             "the decision at {stream}:{decision} does not admit the spec record at {}:{at}: {why}",
             names::SPECS
         ))
-        .into()
-    })
+    })?;
+    if let Some(latest) = before.latest_decision.filter(|&latest| latest >= decision) {
+        return Err(unadmitted(format!(
+            "the spec record at {}:{at} names decision {decision}, and an earlier record of \
+             workload {id} names decision {latest}",
+            names::SPECS
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Records each decision admission accepted on `sys.specs`, in order, after

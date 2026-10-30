@@ -784,33 +784,13 @@ async fn before_claim(
     stop: &mut watch::Receiver<bool>,
 ) -> Option<Option<NeedsOperator>> {
     let found = async {
-        // A module missing for this long is not a stale read.
-        let missing_until = tokio::time::Instant::now() + RECORD_WAIT;
-        loop {
-            let Err(error) = node.modules.compiled(&node.felix, &spec.module).await else {
-                break;
-            };
-            if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
-                return Some(Some(problem.clone()));
-            }
-            // The runner fails the workload for a module it cannot load.
-            if !error.is::<ModuleMissing>() {
-                break;
-            }
-            if tokio::time::Instant::now() >= missing_until {
-                let problem = NeedsOperator::new(OperatorReason::ModuleMissing, error.to_string());
-                return Some(Some(problem));
-            }
-            tracing::warn!(workload = %id, %error, "waiting for the module");
-            if !pause(stop).await {
-                return None;
-            }
-        }
-        // Only a spec in the history runs, so check and replay see what ran.
+        // The spec record first, so a spec admission did not accept costs no
+        // module fetch or compile. Only a spec in the history runs, so check
+        // and replay see what ran.
         let past_tail_until = tokio::time::Instant::now() + RECORD_WAIT;
         loop {
             let Err(error) = specs::check_record(&node.felix, &node.gate, id, spec).await else {
-                return Some(None);
+                break;
             };
             if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
                 return Some(Some(problem.clone()));
@@ -822,6 +802,28 @@ async fn before_claim(
                 return Some(Some(problem));
             }
             tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the spec record");
+            if !pause(stop).await {
+                return None;
+            }
+        }
+        // A module missing for this long is not a stale read.
+        let missing_until = tokio::time::Instant::now() + RECORD_WAIT;
+        loop {
+            let Err(error) = node.modules.compiled(&node.felix, &spec.module).await else {
+                return Some(None);
+            };
+            if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
+                return Some(Some(problem.clone()));
+            }
+            // The runner fails the workload for a module it cannot load.
+            if !error.is::<ModuleMissing>() {
+                return Some(None);
+            }
+            if tokio::time::Instant::now() >= missing_until {
+                let problem = NeedsOperator::new(OperatorReason::ModuleMissing, error.to_string());
+                return Some(Some(problem));
+            }
+            tracing::warn!(workload = %id, %error, "waiting for the module");
             if !pause(stop).await {
                 return None;
             }

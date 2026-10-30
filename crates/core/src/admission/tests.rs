@@ -76,16 +76,29 @@ fn reserved_and_invalid_ids_are_rejected() {
 }
 
 #[test]
-fn system_streams_are_inputs_only_of_the_scheduler() {
-    let mut intake = request("wl");
-    intake.spec.inputs = vec![names::INTAKE.to_owned()];
-    assert_eq!(rejected(&decided(&intake)), Reason::InvalidInputs);
-    let mut specs = request("wl");
-    specs.spec.inputs = vec![names::SPECS.to_owned()];
-    assert_eq!(rejected(&decided(&specs)), Reason::InvalidInputs);
+fn system_streams_and_admissions_are_no_admitted_workloads_input() {
+    let decisions = names::output_stream(names::ADMISSION);
+    for input in [
+        names::INTAKE,
+        names::SPECS,
+        names::FACTS,
+        decisions.as_str(),
+    ] {
+        let mut request = request("wl");
+        request.spec.inputs = vec![input.to_owned()];
+        assert_eq!(
+            rejected(&decided(&request)),
+            Reason::InvalidInputs,
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn system_workloads_are_refused_through_intake() {
     let mut scheduler = request(names::SCHEDULER);
     scheduler.spec.inputs = vec![names::SPECS.to_owned(), names::FACTS.to_owned()];
-    assert!(decided(&scheduler).accepted().is_some());
+    assert_eq!(rejected(&decided(&scheduler)), Reason::Reserved);
 }
 
 #[test]
@@ -182,4 +195,5 @@ fn records_after_admissions_first_need_a_decision() {
     assert!(!needs_decision("wl", 5, Some(9)));
     assert!(needs_decision("wl", 10, Some(9)));
     assert!(!needs_decision(names::ADMISSION, 10, Some(9)));
+    assert!(!needs_decision(names::SCHEDULER, 10, Some(9)));
 }

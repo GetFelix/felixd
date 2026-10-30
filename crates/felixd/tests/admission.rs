@@ -16,6 +16,7 @@ use common::{
 };
 use felix_client::ConditionalWrite;
 use felixd_agent::admin::{StreamKind, ensure_stream};
+use felixd_agent::admission::{self, Submitted};
 use felixd_core::admission::{Decision, Outcome, Policy, Reason};
 use felixd_core::spec::{Limits, SpecRecord, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
@@ -140,6 +141,37 @@ async fn a_rejected_request_never_runs_and_an_accepted_one_does() {
     t.publish_all(INPUT, (0..5).map(count)).await;
     assert_uninterrupted(&t, &counter, 5).await;
 
+    // A system workload's id is refused through intake, whatever it asks:
+    // only an operator writes the scheduler's spec.
+    let mut spec = admission::running(names::SCHEDULER, &module::hash(&counter), vec![]);
+    spec.inputs = vec![names::SPECS.to_owned(), names::FACTS.to_owned()];
+    let submitted = admission::request(
+        &t.felix,
+        names::SCHEDULER,
+        counter.clone(),
+        spec,
+        replication_factor(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            submitted,
+            Submitted::Rejected {
+                reason: Reason::Reserved,
+                ..
+            }
+        ),
+        "{submitted}"
+    );
+    assert!(
+        records(&t)
+            .await
+            .iter()
+            .all(|(_, r)| r.id != names::SCHEDULER)
+    );
+
     // Nothing of the rejected request was recorded, so nothing could run it.
     assert!(records(&t).await.iter().all(|(_, r)| r.id != "big"));
     let entry = t.felix.cache_get(names::WORKLOADS, "big").await.unwrap();
@@ -193,13 +225,40 @@ async fn a_spec_written_around_admission_never_runs() {
     );
 
     // One naming a real decision, which accepted another workload's spec.
-    let mut forged = SpecRecord::new(ID, spec);
+    let mut forged = SpecRecord::new(ID, spec.clone());
     forged.admitted = Some(accepted);
     write_around_admission(&t, forged).await;
     tokio::time::sleep(3 * LEASE_TTL).await;
     assert!(
         t.read_all(OUTPUT).await.is_empty(),
         "a spec naming another workload's decision was claimed or ran"
+    );
+
+    // One naming a decision that accepted this workload, under another spec:
+    // stopped, with other limits.
+    let mut stopped = spec.clone();
+    stopped.state = WorkloadState::Stopped;
+    stopped.limits.fuel_per_call /= 2;
+    let submitted = admission::request(
+        &t.felix,
+        ID,
+        counter.clone(),
+        stopped,
+        replication_factor(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let Submitted::Accepted { decision, .. } = submitted else {
+        panic!("{submitted}");
+    };
+    let mut forged = SpecRecord::new(ID, spec);
+    forged.admitted = Some(decision);
+    write_around_admission(&t, forged).await;
+    tokio::time::sleep(3 * LEASE_TTL).await;
+    assert!(
+        t.read_all(OUTPUT).await.is_empty(),
+        "a spec naming a decision for another spec of the workload was claimed or ran"
     );
 }
 
@@ -323,5 +382,56 @@ async fn a_replay_of_admission_matches_and_lists_what_a_policy_change_decides_ot
             hungry.request
         )),
         "{report}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_acceptance_replayed_after_a_stop_never_runs() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let _a = t.start_agent();
+    let counter = felixd_testkit::workload("counter");
+    assert!(t.run(ID, &counter, INPUT, &[]).success());
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    eventually("the first outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
+    })
+    .await;
+    let (_, running) = records(&t)
+        .await
+        .into_iter()
+        .rfind(|(_, r)| r.id == ID)
+        .unwrap();
+
+    // Stopped through admission, a later decision.
+    let mut stopped = running.spec.clone();
+    stopped.state = WorkloadState::Stopped;
+    let submitted = admission::request(
+        &t.felix,
+        ID,
+        counter.clone(),
+        stopped,
+        replication_factor(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(submitted, Submitted::Accepted { .. }),
+        "{submitted}"
+    );
+    eventually("the workload to stop", Duration::from_secs(30), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+
+    // The running record appended again, naming its own, older decision.
+    write_around_admission(&t, running).await;
+    t.publish_all(INPUT, (5..10).map(count)).await;
+    tokio::time::sleep(3 * LEASE_TTL).await;
+    assert_eq!(
+        t.outputs(OUTPUT).await.len(),
+        5,
+        "a replayed acceptance ran the workload again after its stop"
     );
 }

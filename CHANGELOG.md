@@ -18,6 +18,13 @@
   admission's own only if it names a decision that accepted exactly that
   spec; any other needs an operator with the new reason `spec_unadmitted` and
   never claims. New fault `crash-after-projection-sent=N` for tests.
+- System workloads (`admission`, `scheduler`) are refused through intake;
+  `felixd run` writes their specs directly with the control plane token as
+  before. A spec record naming a decision no later than one an earlier record
+  of the workload named is refused, so an old acceptance cannot be replayed.
+- If `felixd init` dies between appending admission's spec record and
+  writing `workloads`, run it again: it writes the spec again and nodes pick
+  admission up.
 - Upgrading for admission: run `init` only once every node runs this build,
   since an older node ignores admission. Without `init` nothing changes. The
   requester, grants (#117) and quotas are not built; see

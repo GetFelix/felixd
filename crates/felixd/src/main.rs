@@ -200,8 +200,10 @@ enum Command {
     },
     /// Submit a workload. Where admission runs, this uploads the module,
     /// publishes a request on `sys.intake` and waits for admission's
-    /// decision, exiting with 1 if it rejects the request. Otherwise it
-    /// stores the module, creates the streams and writes the spec itself.
+    /// decision, exiting with 1 if it rejects the request. Otherwise, and for
+    /// a system workload (`admission`, `scheduler`) whose spec only an
+    /// operator writes, it stores the module, creates the streams and writes
+    /// the spec itself with the control plane token.
     Run {
         #[command(flatten)]
         connection: Connection,
@@ -459,7 +461,7 @@ async fn main() -> Result<()> {
                 max_memory_bytes: max_memory,
                 snapshot_fuel,
             };
-            if id != names::ADMISSION {
+            if !names::is_system(&id) {
                 let felix = Felix::connect(&settings).await?;
                 if admission::runs(&felix).await? {
                     Runtime::new()

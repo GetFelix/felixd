@@ -882,7 +882,7 @@ needs only read on its inputs.
 |---|---|
 | Node | Read `workloads`, `sys.specs`, `modules`, `epochs` and `drains`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out`, `wl.*.snap` and `wl.*.merge` |
 | Operator (`felixd run`) | Read and write `workloads`; read `sys.specs` and append to it (a conditional write); write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
-| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out` and `sys.specs`. Nothing else |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out` and `sys.specs`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
 | Admission | Read `sys.intake` and `modules`; write `sys.specs` and `workloads`; hold the stream-creation credential. Today its holder's node token and control plane token, so any node with both can write `sys.specs` |
 | Operator (`felixd init`) | Write admission's own spec directly. The one direct write left |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing |
@@ -1522,8 +1522,18 @@ history, the scheduler included, reads only specs. Once admission's own
 record is on `sys.specs`, a node runs a later record only if the decision it
 names accepted that workload and exactly that spec, so a record written around
 admission, by a stale tool or a submitter with direct write rights, never
-runs or claims. `felixd replay --id admission --diff --all --module <hash>`
-lists the recorded requests a new policy decides otherwise.
+runs or claims, and a record naming a decision no later than one an earlier
+record of the workload named is refused, so an old acceptance cannot be
+replayed over a later change or stop. A record whose decision Felix no longer
+holds needs an operator; no admitted workload may read admission's streams,
+so no trim record marks a decision trimmable, and `felixd init` sets no
+`keep_snapshots` on admission. System workloads (`admission`, `scheduler`)
+are refused through intake: an operator writes their specs directly, and the
+gate lets those through. The scheduler reads every spec record, admitted or
+not, so it can assign one admission did not accept; the assignee refuses it
+at the gate, and the assignment only delays others until the bound.
+`felixd replay --id admission --diff --all --module <hash>` lists the recorded
+requests a new policy decides otherwise.
 
 Not built: the requester. Felix records a record's publisher only when the
 broker is configured to and a reader asks, and the workload contract has no

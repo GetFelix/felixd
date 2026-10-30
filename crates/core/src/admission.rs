@@ -230,15 +230,18 @@ pub fn decide(policy: &Policy, offset: u64, payload: &[u8]) -> Decision {
 fn check(policy: &Policy, request: &Request) -> Result<(), (Reason, String)> {
     let spec = &request.spec;
     names::validate_id(&request.id).map_err(|e| (Reason::InvalidId, e.to_string()))?;
-    if request.id == names::ADMISSION {
+    if names::is_system(&request.id) {
         return Err((
             Reason::Reserved,
-            "admission's own spec is written by felixd init".to_owned(),
+            format!(
+                "{} is a system workload, whose spec only an operator writes",
+                request.id
+            ),
         ));
     }
     validate_inputs(&spec.inputs).map_err(|e| (Reason::InvalidInputs, e.to_string()))?;
     for input in &spec.inputs {
-        if !input_allowed(&request.id, input) {
+        if !input_allowed(input) {
             return Err((
                 Reason::InvalidInputs,
                 format!("workload {} may not read {input}", request.id),
@@ -307,14 +310,12 @@ fn check(policy: &Policy, request: &Request) -> Result<(), (Reason, String)> {
     Ok(())
 }
 
-/// System streams are read only by the system workloads that need them:
-/// `sys.intake` by nobody admitted, `sys.specs` and `sys.facts` by the
-/// scheduler.
-fn input_allowed(id: &str, input: &str) -> bool {
-    if !input.starts_with("sys.") {
-        return true;
-    }
-    id == names::SCHEDULER && (input == names::SPECS || input == names::FACTS)
+/// No admitted workload reads a system stream or one of admission's own.
+/// Reading admission's streams would let its trim records mark decisions
+/// trimmable, and a node needs every decision a live spec names.
+fn input_allowed(input: &str) -> bool {
+    let admissions = format!("wl.{}.", names::ADMISSION);
+    !input.starts_with("sys.") && !input.starts_with(&admissions)
 }
 
 fn is_module_hash(module: &str) -> bool {
@@ -348,11 +349,11 @@ pub fn admits(output: &[u8], id: &str, spec: &WorkloadSpec) -> Result<(), String
 
 /// Whether a spec record of workload `id` at `sys.specs` offset `at` must
 /// name an accepting decision, given the offset of the first record that
-/// could be admission's own (`admission_from`). Admission's own records are
-/// the bootstrap and need none; records before admission was bootstrapped
-/// predate it.
+/// could be admission's own (`admission_from`). System workloads' records are
+/// written by an operator and need none; records before admission was
+/// bootstrapped predate it.
 pub fn needs_decision(id: &str, at: u64, admission_from: Option<u64>) -> bool {
-    id != names::ADMISSION && admission_from.is_some_and(|from| from < at)
+    !names::is_system(id) && admission_from.is_some_and(|from| from < at)
 }
 
 #[cfg(test)]

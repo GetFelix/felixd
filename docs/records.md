@@ -210,7 +210,9 @@ A record that admission's projector wrote also has `admitted`, the `wl.admission
 the decision that accepted it. Once a record for `admission` is on the stream, a node runs a later
 record of any other workload only if `admitted` names a decision accepting that workload and
 exactly that spec; otherwise the spec needs an operator with reason `spec_unadmitted` (code 10),
-which is logged and counted but not written to the output stream. A record that does not decode
+which is logged and counted but not written to the output stream. So is a record whose decision is
+no later than one an earlier record of the same workload names, and one whose decision Felix no
+longer holds. Records of the system workloads, `admission` and `scheduler`, need no decision. A record that does not decode
 counts as admission's, so a node fails closed on one from a newer build.
 
 ## Requests and decisions
