@@ -288,6 +288,12 @@ async fn a_recreated_upstream_shorter_than_what_was_read_needs_an_operator() {
 
     delete_stream(&t.settings, up).await.unwrap();
     ensure_stream(&t.settings, up, kind).await.unwrap();
+    // Brokers learn of the delete and the new stream from the catalog after
+    // the control plane answers.
+    eventually("the new stream", Duration::from_secs(60), || async {
+        matches!(t.felix.tail(up).await, Ok(0)).then_some(())
+    })
+    .await;
     t.publish_if(up, outputs(0, 1), 0).await;
     let _agent = t.start_agent();
     assert_eq!(
