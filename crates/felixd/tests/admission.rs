@@ -619,7 +619,7 @@ async fn a_skipped_acceptance_stays_skipped_after_the_projector_restarts() {
         .filter(|(_, r)| r.id == "skipped")
         .collect();
     assert!(
-        matches!(&skipped[..], [(_, r)] if r.skipped),
+        skipped.is_empty(), // the old SpecRecord has no `skipped`; old code writes no skip record
         "a restarted projector recorded an acceptance its predecessor skipped: {skipped:?}"
     );
 }
