@@ -126,13 +126,7 @@ impl Placement for Scheduled {
         }
         match assigned.to {
             AssignedTo::ThisNode => Turn::Claim(Duration::ZERO),
-            AssignedTo::Elsewhere { up: false } => self.fallback.turn(workload, assigned, random),
-            AssignedTo::Nobody | AssignedTo::Elsewhere { up: true }
-                if assigned.waited < self.bound =>
-            {
-                Turn::Defer(self.bound - assigned.waited)
-            }
-            _ => self.fallback.turn(workload, assigned, random),
+            _ => Turn::Defer(self.bound),
         }
     }
 }
