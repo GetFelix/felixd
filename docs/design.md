@@ -789,9 +789,11 @@ the old version's state, and the diff shows where its outputs differ (#29).
 `--module` without `--diff` prints the new version's state at `--to`.
 
 Replay needs no lease and writes nothing. It should run anywhere with read
-grants, but it reads the input and snapshot streams' tails, and Felix reports a
-tail only to a conditional write, so for now it needs publish grants on those
-streams too (Felix #1621). `felixd check` has the same gap.
+grants, but it reads the input and snapshot streams' tails with a refused
+conditional write, so for now it needs publish grants on those streams too
+(Felix #1621). `felixd check` has the same gap. A node reads its input's tail
+with a read past the end instead, which Felix refuses with the tail, so a node
+needs only read on its inputs.
 
 ## Grants
 

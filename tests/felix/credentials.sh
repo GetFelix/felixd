@@ -12,7 +12,7 @@ if [ "${2:-}" = cluster ]; then
   done
   $compose -f "$here/cluster.yaml" exec -T broker-1 cat /var/lib/felix/ca.pem > "$dir/broker-cert.pem"
 else
-  for f in client.jwt controlplane.jwt broker-cert.pem; do
+  for f in client.jwt controlplane.jwt restricted-node.jwt broker-cert.pem; do
     $compose -f "$here/compose.yaml" exec -T felix-broker cat "/var/lib/felix/$f" > "$dir/$f"
   done
 fi

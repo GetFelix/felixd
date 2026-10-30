@@ -567,23 +567,26 @@ fn recordable(spec: &WorkloadSpec, problem: &NeedsOperator) -> bool {
     spec.record.is_some() && problem.reason != OperatorReason::SpecStale
 }
 
-/// The reason, if the last record on the output stream says that the spec
-/// record this spec comes from needs an operator. Only a spec change, which
-/// is a new spec record, or removing the workload clears it.
-async fn recorded_needs_operator(
-    felix: &Felix,
-    spec: &WorkloadSpec,
-) -> Result<Option<OperatorReason>> {
+/// Why, if the last record on the output stream says that the spec record
+/// this spec comes from needs an operator. Only a spec change, which is a new
+/// spec record, or removing the workload clears it.
+async fn recorded_needs_operator(felix: &Felix, spec: &WorkloadSpec) -> Result<Option<String>> {
     let Some(record) = spec.record else {
         return Ok(None);
     };
     let tail = felix.tail(&spec.output).await?;
     let last = felix.last_record(&spec.output, tail).await?;
-    Ok(last.and_then(|last| {
-        output::decode(&last.payload)
-            .ok()
-            .and_then(|found| found.needs_operator_under(record))
-    }))
+    Ok(last.and_then(|last| parked_by(&last.payload, record)))
+}
+
+/// Why `found` parks spec record `record`, if it does. A newer build may
+/// record a reason this one cannot read, and that still parks it.
+fn parked_by(found: &[u8], record: u64) -> Option<String> {
+    match output::decode(found) {
+        Ok(found) => found.needs_operator_under(record).map(|r| r.to_string()),
+        Err(error) => (output::needs_operator_spec_of(found) == Some(record))
+            .then(|| format!("a reason this build cannot read ({error})")),
+    }
 }
 
 /// Waits a moment before trying again. `false` means stop.

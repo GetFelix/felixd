@@ -21,6 +21,10 @@
 //!   the Nth one lands, and the caller gets an error instead of the answer.
 //! - `drop-input=K`: ignore the subscription's delivery of input offset `K`, as
 //!   if Felix had dropped it.
+//! - `subscribe-from=K`: subscribe to the input from offset `K` instead of
+//!   where the workload resumes, and skip the resume check of the input's
+//!   tail, as when the input started over after that check passed and
+//!   replays offsets already stepped.
 //! - `freeze-before-snapshot-write=N`: stop the process with `SIGSTOP` once
 //!   its Nth snapshot is taken, after the lease was checked and before it is
 //!   written. It carries on at `SIGCONT`.
@@ -180,6 +184,11 @@ pub(crate) fn append_prefix(batch: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
 
 pub(crate) fn drop_input(offset: u64) -> bool {
     fault("drop-input") == Some(offset)
+}
+
+/// Where to subscribe to the input instead of `next_input`, if anywhere.
+pub(crate) fn subscribe_from() -> Option<u64> {
+    fault("subscribe-from")
 }
 
 pub(crate) fn before_append() {

@@ -442,6 +442,18 @@ pub fn is_marker(record: &[u8]) -> bool {
     )
 }
 
+/// The spec record a needs-operator record names, read from its header
+/// alone, so a record whose reason this build does not know still counts.
+pub fn needs_operator_spec_of(record: &[u8]) -> Option<u64> {
+    if kind_of(record).ok()? != NEEDS_OPERATOR {
+        return None;
+    }
+    let mut r = Reader::new(record);
+    r.bytes(2).ok()?;
+    r.u64().ok()?;
+    r.u64().ok()
+}
+
 /// The output in `record` if it is addressed to `name`, for a workload whose
 /// input is another workload's output stream. Claims, failures, rejections
 /// and outputs of other names are `None`. Only an output's body is read, so

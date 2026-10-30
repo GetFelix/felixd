@@ -68,7 +68,9 @@ continues with:
 
 A holder appends it the way it appends a failure, behind everything of earlier epochs, and then
 releases the lease. A node that finds the problem before it claims claims only to write the record,
-with no claim record before it. A reason this build does not know is refused. Any node whose spec
+with no claim record before it. A reason this build does not know is refused when reading the
+record in full, but a node checking whether to run still reads the spec record from the header and
+leaves the workload alone, so an older build never runs what a newer one parked. Any node whose spec
 names that record and that finds it last on the stream, before it claims or while claiming, leaves
 the workload alone, so it is written once per workload, spec record and reason. It is not a failure
 and the spec stays `running`. A new spec record, which `felixd run` writes for any change, or

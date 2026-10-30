@@ -594,3 +594,15 @@ fn a_rejection_is_reconciled_like_an_output() {
         Reconciled::Behind
     );
 }
+
+#[test]
+fn a_needs_operator_record_names_its_spec_even_with_an_unknown_reason() {
+    let mut record = encode_needs_operator(3, 42, OperatorReason::InputBehind, "x");
+    assert_eq!(needs_operator_spec_of(&record), Some(42));
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(decode(&record).is_err());
+    assert_eq!(needs_operator_spec_of(&record), Some(42));
+    assert_eq!(needs_operator_spec_of(&record[..17]), None);
+    let failure = encode_failure(3, 42, ErrorClass::Poison, "x");
+    assert_eq!(needs_operator_spec_of(&failure), None);
+}

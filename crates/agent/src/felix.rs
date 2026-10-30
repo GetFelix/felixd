@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
     AckMode, BrokerError, CacheCondition, CacheConditionResult, ClientConfig, ClusterClient,
-    ConditionalWrite, ErrorCode, StartPosition, StreamRecord, VersionedValue,
-    root_store_from_pem_file,
+    ConditionalWrite, CursorErrorReason, ErrorCode, StartPosition, StreamRecord,
+    SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
 
 use crate::settings::Settings;
@@ -205,6 +205,30 @@ impl Felix {
             ConditionalWrite::Written { offset } => {
                 bail!("probe write to {stream} landed at offset {offset}")
             }
+        }
+    }
+
+    /// The stream's next offset, asked with a read so that the read grant is
+    /// enough. A read past the end is refused with the leading broker's log
+    /// tail, which counts every committed record, so it is never below what
+    /// a reader has already been given.
+    pub async fn read_tail(&self, stream: &str) -> Result<u64> {
+        let read = until_ready(|| {
+            self.client
+                .read(&self.tenant, &self.namespace, stream, 0, u64::MAX, None, 1)
+        })
+        .await;
+        match read {
+            Err(error) => match error.downcast_ref::<SubscribeCursorError>() {
+                Some(refused) if matches!(refused.reason, CursorErrorReason::InFuture) => {
+                    Ok(refused.available)
+                }
+                _ => Err(error),
+            },
+            Ok(page) => bail!(
+                "reading {stream} past its end answered with a page to {}",
+                page.next_offset
+            ),
         }
     }
 
