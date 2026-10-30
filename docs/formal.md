@@ -272,16 +272,19 @@ could still write is on `.out`, the assumption design.md states.
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
 | `FelixdMerge` | pass | two inputs (two records and one), three holders, a crash mid-merge, a lost answer, batches of up to two | 7,212,850 | 5 min 56 s |
-| `FelixdMergeLost` | pass | one record on each input, two holders, two lost answers or timeouts, a batch that lands in part | 486,394 | 18 s |
-| `FelixdMergeRecreate` | pass | one record on each input, three holders, a crash, `epochs` recreated once | 157,557 | 8 s |
+| `FelixdMergeLost` | pass | two inputs (two records and one), two holders, two lost answers or timeouts, a batch of two that lands in part | 2,814,975 | 1 min 59 s |
+| `FelixdMergeRecreate` | pass | one record on each input, three holders, a crash, `epochs` recreated once | 157,557 | 7 s |
 | `FelixdMergeNoSkip` | pass | the same-epoch skip off, a crash and a lost answer | 91,744 | 4 s |
-| `FelixdMergeNoClaim` | `MergeEpochMonotone` | no merge claim: a stale holder appends after the new holder read the tail | about 250 | under 3 s |
+| `FelixdMergeNoClaimExact` | pass | no merge claim, a crash and a lost answer; checks only `MergeExact`, `OneWriter`, `OutputsFollowMerge` and `StepsFollowMerge` | 65,121 | 3 s |
+| `FelixdMergeNoClaim` | `EntriesClaimed` | no merge claim: the first entry follows no claim of its epoch | about 80 | under 3 s |
+| `FelixdMergeNoClaimFence` | `MergeEpochMonotone` | no merge claim: a stale holder appends after the new holder read the tail | about 250 | under 3 s |
 | `FelixdMergeNoClaimCheck` | `MergeEpochMonotone` | the claim does not check the last record: a holder frozen after its `.out` claim claims the merge log after a later holder | about 350 | under 3 s |
 | `FelixdMergeNoCatchUp` | `OutputsFollowMerge` | the entries before the claim not stepped: a holder that crashed between its merge append and its steps leaves a gap | about 2,300 | under 3 s |
 | `FelixdMergeBeforeOut` | `OneWriter` | the merge log claimed before `.out`, with `epochs` recreated | about 250 | under 3 s |
+| `FelixdMergeNoSameBytes` | `StepsFollowMerge` | reconcile takes any record of its own epoch past the tail as the entry it sent | about 240 | under 3 s |
 
 Every configuration has two nodes. Counts and times are from the `tla-merge` job on the CI
-runner, where the whole script takes about six and a half minutes. `FelixdMergeFull` has two records on each input, four holders, two crashes, two lost
+runner, where the whole script takes about eight and a half minutes. `FelixdMergeFull` has two records on each input, four holders, two crashes, two lost
 answers, a partial batch and a recreated `epochs`; the `TLA nightly` workflow walks it with
 `TLC_SIMULATE`.
 
@@ -293,6 +296,19 @@ the same epoch, finds that claim last, takes it as its own, and writes under it 
 
 `FelixdMergeNoSkip` passes: claiming again over a claim of the holder's own epoch only adds a
 record, so the skip is not a guard.
+
+The merge claim does not keep the log or the outputs exact: `FelixdMergeNoClaimExact` passes
+without it, because a stale holder's entry that lands after the new holder read the tail makes
+the new holder's next append fail as `Diverged`, and it reads the log again. What the claim buys
+is that this never happens: from the claim on, an earlier holder's append is refused, so a
+holder past its claim never retries for that reason, and `felixd check` can require every entry
+to follow its own epoch's claim (`MergeUnclaimed`, `EntriesClaimed`). The two `NoClaim` twins
+show those two effects.
+
+A holder steps the entries it sent at the offsets it believes they landed at, not what it reads
+back, so `StepsFollowMerge` checks reconcile. `FelixdMergeNoSameBytes` is a holder whose append
+timed out and that ended the run, merged another record at the same tail, and found the old
+append there first: comparing epochs alone, it steps the new record at the old one's offset.
 
 | Action | Code |
 |---|---|
