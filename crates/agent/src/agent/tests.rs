@@ -60,3 +60,16 @@ fn a_failed_spec_read_below_the_record_is_read_again() {
         SpecWrite::Done(false)
     );
 }
+
+#[test]
+fn a_needs_operator_record_this_build_cannot_read_still_parks_its_spec() {
+    let known = output::encode_needs_operator(1, 7, OperatorReason::InputBehind, "x");
+    assert!(parked_by(&known, 7).is_some());
+    assert_eq!(parked_by(&known, 8), None);
+    let mut newer = known.clone();
+    newer[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(parked_by(&newer, 7).is_some());
+    assert_eq!(parked_by(&newer, 8), None);
+    let claim = output::encode_claim(1, "n");
+    assert_eq!(parked_by(&claim, 7), None);
+}

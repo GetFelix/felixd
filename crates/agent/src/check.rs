@@ -23,24 +23,50 @@ use crate::specs;
 pub struct Report {
     pub workload: String,
     pub output: String,
+    /// The stream the outputs were checked against.
+    pub input: String,
     /// Output records on the stream, claims not counted.
     pub records: usize,
     pub findings: Vec<Finding>,
 }
 
 /// Checks the workloads in `ids`, or every workload in the `workloads` cache
-/// when it is empty. `complete` makes outputs missing from the end of a stream
-/// a finding.
-pub async fn check(settings: &Settings, ids: &[String], complete: bool) -> Result<Vec<Report>> {
+/// when it is empty, a pipeline's stages upstream first
+/// ([`check::upstream_first`]). `complete` makes outputs missing from the end
+/// of a stream a finding. `upstream` also checks every workload whose output
+/// stream one of them reads, and so on up the pipeline.
+pub async fn check(
+    settings: &Settings,
+    ids: &[String],
+    complete: bool,
+    upstream: bool,
+) -> Result<Vec<Report>> {
     let felix = Felix::connect(settings).await?;
     let runtime = Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ids = if ids.is_empty() {
+    let mut ids = if ids.is_empty() {
         workload_ids(&felix).await?
     } else {
         ids.to_vec()
     };
+    let mut inputs = Vec::with_capacity(ids.len());
+    let mut at = 0;
+    while at < ids.len() {
+        let id = ids[at].clone();
+        let input = input_of(&felix, &id)
+            .await
+            .with_context(|| format!("check workload {id}"))?;
+        if upstream
+            && let Some(up) = names::output_of(&input)
+            && !ids.iter().any(|i| i == up)
+            && felix.cache_get(names::WORKLOADS, up).await?.is_some()
+        {
+            ids.push(up.to_owned());
+        }
+        inputs.push((id, input));
+        at += 1;
+    }
     let mut reports = Vec::new();
-    for id in ids {
+    for id in check::upstream_first(&inputs) {
         let report = check_one(&felix, &runtime, &id, complete)
             .await
             .with_context(|| format!("check workload {id}"))?;
@@ -115,6 +141,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     Ok(Report {
         workload: id.to_owned(),
         output: spec.output.clone(),
+        input: spec.input.clone(),
         records: records
             .iter()
             .filter(|r| !output::is_marker(&r.payload))
@@ -138,6 +165,20 @@ pub(crate) async fn judged(
         claimed.insert(offset, specs::read(felix, id, offset).await?);
     }
     Ok(check::judged_under(cached, &claimed, payloads))
+}
+
+/// The input workload `id`'s output stream was written under, from the same
+/// spec [`check_one`] judges it under.
+async fn input_of(felix: &Felix, id: &str) -> Result<String> {
+    let cached = felix
+        .cache_get(names::WORKLOADS, id)
+        .await?
+        .context("no such workload")?;
+    let cached = WorkloadSpec::decode(&cached)?;
+    let tail = felix.tail(&cached.output).await?;
+    let records = felix.read_range(&cached.output, 0, tail).await?;
+    let (spec, _) = judged(felix, id, &cached, &records).await?;
+    Ok(spec.input)
 }
 
 /// The module `hash` from the `modules` cache.

@@ -64,3 +64,12 @@ async fn a_blocking_call_leaves_the_runtime_free() {
     assert_eq!((out, slot), (1, Some(1)));
     assert!(ticks.load(Ordering::SeqCst) >= 5, "the runtime was blocked");
 }
+
+#[test]
+fn an_input_is_behind_only_when_its_tail_is_below_the_position() {
+    assert!(not_behind("in", 4, 4).is_ok());
+    assert!(not_behind("in", 5, 4).is_ok());
+    let error = not_behind("in", 3, 4).unwrap_err();
+    let problem = error.downcast_ref::<NeedsOperator>().unwrap();
+    assert_eq!(problem.reason, OperatorReason::InputBehind);
+}

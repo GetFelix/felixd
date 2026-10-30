@@ -103,14 +103,14 @@ Paths are from the repository root, as of workload contract 0.2.
 | `ReadOut` | the last output passing over claims, the superseded check and `resume::fold`: `crates/agent/src/runner.rs:305-323`, `crates/agent/src/runner.rs:618-638`, `crates/core/src/resume.rs:104-137` |
 | `Step` | `Steps::step`, with `already_written` and `Written::check`: `crates/agent/src/runner.rs:420-457`, `crates/core/src/resume.rs:70-77`, `crates/agent/src/runner.rs:651-670`. A rejection is the step's one output, at index 0 |
 | `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:393-436` |
-| `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:496-545` |
+| `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:520-569` |
 | `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:814-832` |
 | `LocalFault` | the `fail-workload` test fault, or any trap only this node hits: `crates/agent/src/agent.rs:765-767` |
 | `ConfirmFail` | `mark_failed` up to the confirm: `crates/agent/src/agent.rs:969-1023`; the `Confirmer`: `crates/agent/src/lease.rs:258-271` |
 | `FailSend`, `FailAck`, `FailRetry` | `record_failure` and `record_needs_operator` over `append_last`: `crates/agent/src/output.rs:56-197`; the records are `encode_failure` and `encode_needs_operator`: `crates/core/src/output.rs:272-297`. A retry reads the tail again in `append_last`'s loop, or confirms again in `mark_failed`'s or `record_needs_operator`'s once that loop gives up |
-| `NeedsOperator` | a problem found before the claim, which the node then claims only to record (`before_claim` and `own`: `crates/agent/src/agent.rs:405-571`), or once the claim is on the stream, when the spec is checked again or a restore runs out of fuel (`Outcome::NeedsOperator`); recorded by `record_needs_operator`: `crates/agent/src/agent.rs:895-960` |
+| `NeedsOperator` | a problem found before the claim, which the node then claims only to record (`before_claim` and `own`: `crates/agent/src/agent.rs:405-571`), or once the claim is on the stream, when the spec is checked again, a restore runs out of fuel, or the input holds a record kind this build does not read or ends before the inputs already stepped (`Outcome::NeedsOperator`); recorded by `record_needs_operator`: `crates/agent/src/agent.rs:895-960` |
 | `Park` | the lease released and the task left waiting for a spec change: `own`, `Ended::NeedsOperator`. A needs-operator record found by `check_found` (`crates/agent/src/output.rs:345`) or before the claim (`recorded_needs_operator`: `crates/agent/src/agent.rs:573`) leads here |
 | `Derive` | `write_failed`: `crates/agent/src/agent.rs:1053-1089`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:803-813` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
@@ -231,6 +231,19 @@ without finishing, so the `TLA nightly` workflow walks it with `TLC_SIMULATE` in
 Not in this model: failures, snapshots, epochs (`Felixd.tla`), inputs with no output, and
 `felixd run`'s own history check, which the agent's refusal backs.
 
+## Pipelines
+
+A pipeline needs no new model. `Felixd.tla` takes the input as a fixed sequence of records, each
+read when an owner gets to it, so an input that arrives late looks like an owner that is slow. Every
+invariant is about one workload's `.out` and `.snap` given that input. A downstream's input is an upstream's `.out`. Felix never rewrites a
+record on it, and the upstream's fence makes its outputs land once and in order, which is what
+`OutputsExact` and `EpochMonotone` check for the upstream. Which records a downstream steps is a
+function of each record alone (`crates/agent/src/input.rs`), so a claim, even one that lands
+between the halves of a batch, is an offset the downstream skips, like an offset that holds no
+record. A two-stage model would be two copies of this one with the first's output fed to the
+second, and would check nothing the one-stage model does not. `tests/pipeline.rs` tests the
+composition.
+
 ## Not modelled
 
 - Lost answers to cache calls, and the renewal read-back (`crates/agent/src/lease.rs:341-355`).
@@ -245,7 +258,7 @@ Not in this model: failures, snapshots, epochs (`Felixd.tla`), inputs with no ou
   record's.
 - Spec edits and spec records in `Felixd.tla`. `FelixdSpecs.tla` models them
   ([Spec history](#spec-history)).
-- Several inputs, pipelines, `felixd check` beyond which spec each input ran under, and drain.
+- Several inputs, `felixd check` beyond which spec each input ran under, and drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.

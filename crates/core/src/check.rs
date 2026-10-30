@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::names;
 use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::{self, SnapshotHeader};
 use crate::spec::{Limits, WorkloadSpec};
@@ -481,6 +482,37 @@ pub fn specs_claimed<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<u64
         }
     }
     claimed
+}
+
+/// The order to check `workloads`, given as `(id, input stream)`, in: a
+/// workload after the one whose output stream it reads, when both are there,
+/// and otherwise in the order given. Checked upstream first, each stage's
+/// input is read after the stage before it was checked, so `--complete` on
+/// every stage says every input the first stage saw went through the last.
+/// A cycle, which no pipeline has, is broken where it is entered.
+pub fn upstream_first(workloads: &[(String, String)]) -> Vec<String> {
+    fn visit(
+        at: usize,
+        workloads: &[(String, String)],
+        seen: &mut Vec<bool>,
+        order: &mut Vec<String>,
+    ) {
+        if std::mem::replace(&mut seen[at], true) {
+            return;
+        }
+        let upstream = names::output_of(&workloads[at].1)
+            .and_then(|up| workloads.iter().position(|(id, _)| id == up));
+        if let Some(upstream) = upstream {
+            visit(upstream, workloads, seen, order);
+        }
+        order.push(workloads[at].0.clone());
+    }
+    let mut seen = vec![false; workloads.len()];
+    let mut order = Vec::with_capacity(workloads.len());
+    for at in 0..workloads.len() {
+        visit(at, workloads, &mut seen, &mut order);
+    }
+    order
 }
 
 #[cfg(test)]

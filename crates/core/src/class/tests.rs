@@ -16,6 +16,8 @@ fn codes_round_trip() {
         OperatorReason::SpecConflict,
         OperatorReason::SpecStale,
         OperatorReason::RestoreFuel,
+        OperatorReason::InputUnreadable,
+        OperatorReason::InputBehind,
     ] {
         assert_eq!(OperatorReason::from_code(reason.code()), Ok(reason));
     }

@@ -249,3 +249,98 @@ async fn a_failure_found_while_recording_fails_the_spec() {
     assert!(found.contains("from the test"), "{found}");
     assert_eq!(t.needs_operator().await.0, []);
 }
+
+/// The downstream's output says it stepped inputs past the end of its input
+/// stream, which is what an upstream stream deleted and created again looks
+/// like from the downstream. Felix 0.6.2 leaves a recreated stream's shard
+/// unplaced in the single-broker test setup, so the test writes that output
+/// instead of recreating the stream. The node needs an operator rather than
+/// waiting for the new stream to reach offsets the old one held.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_input_that_ends_below_what_was_stepped_needs_an_operator() {
+    let Some(t) = test_felix().await else { return };
+    let up = "wl.up.out";
+    let kind = StreamKind {
+        replication_factor: common::replication_factor(),
+    };
+    ensure_stream(&t.settings, up, kind).await.unwrap();
+    let records: Vec<Vec<u8>> = (0..4)
+        .map(|i| output::encode(header(i), 1, &count(i)))
+        .collect();
+    t.publish_if(up, records, 0).await;
+    let module = felixd_testkit::workload("counter");
+    assert!(t.run(ID, &module, up, &[]).success());
+    let mut agent = t.start_agent();
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 4).then_some(())
+    })
+    .await;
+    agent.kill();
+
+    let (epoch, tail) = last_epoch(&t).await;
+    t.publish_if(OUTPUT, vec![output::encode(header(100), epoch, b"")], tail)
+        .await;
+    let _agent = t.start_agent();
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::InputBehind
+    );
+    assert_eq!(t.outputs(OUTPUT).await.len(), 5);
+}
+
+/// A subscription that goes below the workload's position, into an input
+/// that still reaches it, passes over what it replays, so nothing is stepped
+/// twice and nothing needs an operator.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_below_the_position_is_passed_over_while_the_input_reaches_it() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..4).map(count)).await;
+    let mut agent = t.start_agent();
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 4).then_some(())
+    })
+    .await;
+    agent.kill();
+
+    let _agent = t.start_agent_with_faults("restart-input-after=4");
+    t.publish_all(INPUT, (4..6).map(count)).await;
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 6).then_some(())
+    })
+    .await;
+    tokio::time::sleep(LEASE_TTL).await;
+    common::assert_uninterrupted(&t, &module, 6).await;
+    assert_eq!(t.needs_operator().await.0, []);
+}
+
+/// A needs-operator record with a reason this build does not know, as a
+/// newer build writes, still parks the spec record it names.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_with_an_unknown_reason_still_parks_the_workload() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    let spec = t.spec().await;
+    let mut record = needs_operator(0, spec.record.unwrap());
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    t.publish_if(OUTPUT, vec![record], 0).await;
+    let _agent = t.start_agent();
+    tokio::time::sleep(LEASE_TTL * 3).await;
+    assert!(t.outputs(OUTPUT).await.is_empty(), "it ran");
+    assert!(
+        t.felix
+            .cache_get(names::EPOCHS, ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "a node claimed it"
+    );
+}
+
+fn header(input_offset: u64) -> output::OutputHeader {
+    output::OutputHeader {
+        input_offset,
+        index: 0,
+    }
+}

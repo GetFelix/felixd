@@ -341,6 +341,33 @@ fn a_reader_of_another_stream_gets_only_outputs_of_its_name() {
     assert!(!passed_over(b"\x09", "out"));
 }
 
+/// A rolling upgrade can add a class or reason. A reader of the stream
+/// passes over such a marker by its kind, without reading the code.
+#[test]
+fn a_reader_of_another_stream_passes_over_a_marker_with_an_unknown_code() {
+    let mut failure = encode_failure(1, 1, ErrorClass::Poison, "trap");
+    failure[18] = 99;
+    let mut needs = encode_needs_operator(1, 5, OperatorReason::SpecConflict, "input");
+    needs[18..20].copy_from_slice(&99u16.to_be_bytes());
+    for record in [failure, needs] {
+        assert!(decode(&record).is_err(), "{record:?}");
+        assert_eq!(addressed_to(&record, "out"), Ok(None), "{record:?}");
+        assert!(passed_over(&record, "out"), "{record:?}");
+        assert!(is_marker(&record), "{record:?}");
+    }
+}
+
+#[test]
+fn a_reader_of_another_stream_refuses_an_unknown_version_or_kind() {
+    let mut kind = encode_claim(1, "node");
+    kind[1] = 9;
+    for record in [vec![9, 0], kind] {
+        assert!(addressed_to(&record, "out").is_err(), "{record:?}");
+        assert!(!passed_over(&record, "out"), "{record:?}");
+        assert!(!is_marker(&record), "{record:?}");
+    }
+}
+
 #[test]
 fn an_unknown_version_or_kind_is_refused() {
     let mut record = encode(h(1, 0), 1, b"");
@@ -566,4 +593,16 @@ fn a_rejection_is_reconciled_like_an_output() {
         reconcile(7, &batch(7, &[10]), &refs(&theirs)),
         Reconciled::Behind
     );
+}
+
+#[test]
+fn a_needs_operator_record_names_its_spec_even_with_an_unknown_reason() {
+    let mut record = encode_needs_operator(3, 42, OperatorReason::InputBehind, "x");
+    assert_eq!(needs_operator_spec_of(&record), Some(42));
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(decode(&record).is_err());
+    assert_eq!(needs_operator_spec_of(&record), Some(42));
+    assert_eq!(needs_operator_spec_of(&record[..17]), None);
+    let failure = encode_failure(3, 42, ErrorClass::Poison, "x");
+    assert_eq!(needs_operator_spec_of(&failure), None);
 }

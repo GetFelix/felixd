@@ -257,8 +257,9 @@ live manifest references.
 ## Inputs from another workload
 
 A spec's input may be another workload's output stream, as now. It gets the
-outputs addressed to one name, `out` unless the spec says otherwise, with
-their keys. Claims, failures, rejections and other names are passed over.
+outputs addressed to one name, `out`, with their keys; a spec cannot name
+another yet. Claims, failures, needs-operator records, rejections and other
+names are passed over ([design.md, Pipelines](design.md#pipelines)).
 
 ## 0.1 workloads
 

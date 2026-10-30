@@ -3,11 +3,15 @@
 //! the same input on each.
 
 use bytes::Bytes;
+use felixd_core::DecodeError;
 use felixd_core::check::Produced;
+use felixd_core::class::OperatorReason;
 use felixd_core::names;
 use felixd_core::output::{self, DEFAULT_NAME};
 use felixd_core::spec::WorkloadSpec;
 use felixd_runtime::{Input, Stepped};
+
+use crate::runner::{NeedsOperator, poison};
 
 /// One input record, owned, so a step can run on a blocking thread.
 pub(crate) struct StepInput {
@@ -23,15 +27,17 @@ impl StepInput {
     /// `timestamp_micros`, from its record. Every field comes from the record
     /// and the spec. When the input is another workload's output stream,
     /// only outputs addressed to `out` are inputs, and the step gets their
-    /// key and payload; `None` means the record is passed over. A record
-    /// there that does not decode is an error, since this build cannot tell
-    /// what it holds.
+    /// key and payload; `None` means the record is passed over.
+    ///
+    /// A record there of a version or kind this build does not know is
+    /// [`NeedsOperator`]: a newer build wrote it, and upgrading this node is
+    /// the fix. An output that does not decode is poison.
     pub(crate) fn read(
         spec: &WorkloadSpec,
         offset: u64,
         timestamp_micros: u64,
         record: &Bytes,
-    ) -> Result<Option<StepInput>, String> {
+    ) -> anyhow::Result<Option<StepInput>> {
         let (key, payload) = if names::is_output_stream(&spec.input) {
             match output::addressed_to(record, DEFAULT_NAME) {
                 Ok(Some(addressed)) => (
@@ -40,10 +46,16 @@ impl StepInput {
                 ),
                 Ok(None) => return Ok(None),
                 Err(error) => {
-                    return Err(format!(
+                    let detail = format!(
                         "input {offset} on {} is not an output record this build reads: {error}",
                         spec.input
-                    ));
+                    );
+                    return Err(match error {
+                        DecodeError::UnknownVersion(_) | DecodeError::UnknownKind(_) => {
+                            NeedsOperator::new(OperatorReason::InputUnreadable, detail).into()
+                        }
+                        _ => poison(detail),
+                    });
                 }
             }
         } else {
@@ -89,3 +101,6 @@ pub(crate) fn produced(stepped: Stepped) -> Vec<Produced> {
         }],
     }
 }
+
+#[cfg(test)]
+mod tests;

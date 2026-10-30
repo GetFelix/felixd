@@ -70,6 +70,12 @@ pub enum OperatorReason {
     SpecStale,
     /// Restoring the snapshot ran out of `snapshot_fuel`.
     RestoreFuel,
+    /// The input is another workload's output stream and holds a record of a
+    /// version or kind this build does not read. Upgrading the node fixes it.
+    InputUnreadable,
+    /// The input stream ends before the inputs the workload has already
+    /// stepped, so it was deleted and created again, or lost records.
+    InputBehind,
 }
 
 impl OperatorReason {
@@ -81,6 +87,8 @@ impl OperatorReason {
             OperatorReason::SpecConflict => 4,
             OperatorReason::SpecStale => 5,
             OperatorReason::RestoreFuel => 6,
+            OperatorReason::InputUnreadable => 7,
+            OperatorReason::InputBehind => 8,
         }
     }
 
@@ -92,6 +100,8 @@ impl OperatorReason {
             4 => OperatorReason::SpecConflict,
             5 => OperatorReason::SpecStale,
             6 => OperatorReason::RestoreFuel,
+            7 => OperatorReason::InputUnreadable,
+            8 => OperatorReason::InputBehind,
             other => return Err(DecodeError::UnknownReason(other)),
         })
     }
@@ -106,6 +116,8 @@ impl fmt::Display for OperatorReason {
             OperatorReason::SpecConflict => "spec conflicts with the output",
             OperatorReason::SpecStale => "spec stale",
             OperatorReason::RestoreFuel => "restore out of fuel",
+            OperatorReason::InputUnreadable => "input record unreadable by this build",
+            OperatorReason::InputBehind => "input stream behind the workload",
         })
     }
 }

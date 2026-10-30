@@ -36,6 +36,11 @@ pub(crate) struct TestFelix {
 /// Connects to the test Felix in its own fresh namespace. `None` when no Felix
 /// is configured, unless `FELIXD_REQUIRE_FELIX` is set, which CI does.
 pub(crate) async fn test_felix() -> Option<TestFelix> {
+    test_felix_in(None).await
+}
+
+/// As [`test_felix`], in `namespace` if given instead of a fresh one.
+pub(crate) async fn test_felix_in(namespace: Option<&str>) -> Option<TestFelix> {
     let Ok(brokers) = std::env::var("FELIX_BROKERS") else {
         if std::env::var_os("FELIXD_REQUIRE_FELIX").is_some() {
             panic!("FELIXD_REQUIRE_FELIX is set but FELIX_BROKERS is not");
@@ -59,9 +64,14 @@ pub(crate) async fn test_felix() -> Option<TestFelix> {
         server_name: "localhost".into(),
         tenant: var("FELIX_AUTH_TENANT"),
         // The clock alone can repeat across tests that start together.
-        namespace: format!(
-            "t{nanos:x}{:x}",
-            NEXT_NAMESPACE.fetch_add(1, Ordering::Relaxed)
+        namespace: namespace.map_or_else(
+            || {
+                format!(
+                    "t{nanos:x}{:x}",
+                    NEXT_NAMESPACE.fetch_add(1, Ordering::Relaxed)
+                )
+            },
+            str::to_owned,
         ),
         token: read("FELIX_AUTH_TOKEN_FILE"),
         ca_file: Some(PathBuf::from(var("FELIX_CA_FILE"))),
@@ -119,6 +129,26 @@ impl TestFelix {
         let child = self
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
             .args(args)
+            .env("FELIXD_FAULTS", faults)
+            .spawn()
+            .expect("start felixd agent");
+        Agent {
+            child,
+            node_id: node_id.to_owned(),
+        }
+    }
+
+    /// Starts an agent that connects with the token in `token_file`.
+    pub(crate) fn start_node_with_token(
+        &self,
+        node_id: &str,
+        token_file: &str,
+        faults: &str,
+    ) -> Agent {
+        let ttl = LEASE_TTL.as_millis().to_string();
+        let child = self
+            .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
+            .env("FELIX_AUTH_TOKEN_FILE", token_file)
             .env("FELIXD_FAULTS", faults)
             .spawn()
             .expect("start felixd agent");

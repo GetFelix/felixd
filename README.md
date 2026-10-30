@@ -15,8 +15,9 @@ A node agent that runs programs across a cluster with
 > rebuilds a workload as of any input offset or time, and `--diff` checks a
 > replay, or a new module, against the recorded outputs. Workloads implement
 > [contract 0.2](docs/contract.md): named and keyed outputs, rejections and
-> chunked snapshots. Pipelines and
-> operations (milestone 4) are next. The plan is in
+> chunked snapshots. Pipelines, where one workload reads another's output,
+> survive failover at every stage; the rest of milestone 4, operations, is
+> next. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -114,7 +115,23 @@ order, epoch regressions, outputs that differ from the replay and snapshots
 whose output tail does not match their input offset, and exits with 1 if it
 finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
-should have caught up. It writes nothing.
+should have caught up. `--upstream` also checks the workloads a checked one
+reads from, up the pipeline. It writes nothing.
+
+A workload can read another's output stream. This pipeline counts the inputs
+on `in`, then counts the first stage's outputs:
+
+```
+felixd run --id first --input in --replication-factor 1 counter.wasm
+felixd run --id second --input wl.first.out --replication-factor 1 counter.wasm
+felixd check --id second --upstream --complete
+```
+
+A downstream gets only the records its upstream addresses to `out`, with
+their keys. Claims, failures, rejections and other names are passed over, so
+a stage can fail over, even in the middle of a batch, without the next stage
+seeing anything but the same outputs in the same order.
+
 `felixd replay --id counter --to 41` rebuilds the workload's state after
 input 41, and `--to 2026-10-29T14:02:00Z` its state after every input appended
 before that time. It restores the nearest snapshot at or before that point on a
@@ -165,9 +182,9 @@ needs-operator record with the reason to the output stream, fenced the same
 way. Every node then leaves the workload alone until its spec changes or it
 is removed. Cache values and stream records carry a format version, so an
 older felixd refuses a newer record instead of misreading it. For a workload
-that reads another workload's output stream, refusing means failing: an older
-felixd fails it as poison once a failure or needs-operator record lands on
-the stream it reads. Upgrade every node first.
+that reads another workload's output stream, refusing means it needs an
+operator: an older felixd stops there once a record kind it does not know
+lands on the stream it reads. Upgrade every node first.
 
 ## Try it on three nodes
 
@@ -293,8 +310,8 @@ here to an operating system.
 
 felixd fits work that keeps state, reacts to a stream of events, and must not
 lose or repeat results when a machine fails. These are the cases we are
-designing for. Failover, exactly-once output and replay work today; pipelines and
-operations are still planned.
+designing for. Failover, exactly-once output, replay and pipelines work today; operations
+are still planned.
 
 - **Stateful stream processing without a separate cluster.** Running totals,
   sessions, fraud scores over a window, deduplication. Today that usually
@@ -383,7 +400,7 @@ owner knows which outputs already exist and does not write them again.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Planned |
+| 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Pipelines done |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates

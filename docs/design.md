@@ -344,8 +344,10 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
-Claim and failure records on another workload's `.out` are not inputs: the
-owner and `felixd check` pass over them, so only outputs reach `step`.
+Claim, failure and needs-operator records on another workload's `.out` are
+not inputs, and neither are rejections or outputs under another name than
+`out`: the owner, `felixd check` and replay pass over them, so only outputs
+addressed to `out` reach `step` ([Pipelines](#pipelines)).
 
 Each output record carries a small header: the input offset that produced it,
 its index among that step's outputs, and the lease epoch of the owner that
@@ -390,6 +392,58 @@ first claim's spec, and judge each input under the limits of the spec whose
 claim covers it: a claim's spec applies from the input after the last output
 before it. A claim its owner refused, under another module or an older
 record, is passed over.
+
+## Pipelines
+
+A pipeline is workloads that read each other's `.out`. Nothing about a stage
+is special: a downstream is an ordinary workload whose input stream happens to
+be fenced by someone else. Its exactly-once output and resume rest on one
+property of that stream, which the upstream's fencing gives: a record on it is
+never rewritten or removed, so every reader at an offset sees the same record.
+
+An upstream takeover leaves its marks on the stream, and a downstream reads
+through them:
+
+- A claim lands between two outputs, possibly in the middle of one step's
+  batch when the previous owner left a prefix of it (Felix#1630). The
+  downstream passes over the claim. Its inputs keep their offsets, gaps and
+  all, so its own headers and the fold do not move.
+- Outputs written by a stale owner before the claim are on the stream once,
+  in order, by the upstream's fence. The downstream sees each once, wherever
+  the claim fell.
+- Generation-start records take offsets and are never read back, as on any
+  input.
+
+So a downstream's step sees the same inputs, with the same metadata, on every
+node and in `felixd check` and replay, and its own fence makes its output
+exactly once. `crates/agent/src/input.rs` is the one place that decides what a
+record on another workload's `.out` gives a step.
+
+Spec history applies to a downstream like any workload: its input is the
+upstream's stream name, so pointing it at another upstream once it has output
+is refused by `felixd run` and left to an operator by an agent. Recreating an
+upstream under the same id is the incarnation problem ([Names and
+incarnations](#names-and-incarnations)), solved only in part: a node that
+finds its input ending before the inputs its output or snapshot shows it
+stepped, when it resumes or when its subscription goes back below its
+position, records needs-operator. A recreated input that has already grown
+past that offset is not detected and
+is read as if it continued the old one, until Felix exposes incarnations to
+clients (#133).
+
+`felixd check` judges each stage against its input as it stands, and checks
+stages upstream first. Each stage's input is then read after the stage before
+it was checked, so `--complete` on every stage says that every input on the
+first stage's input when it was checked went through the last.
+`felixd check --id <last> --upstream` checks a whole pipeline from its last
+stage. `felixd replay` works stage by stage.
+
+`tests/pipeline.rs` runs three stages, each on its own node with a spare,
+and loses the holder of each in turn: stage one's new holder dies after half
+a batch lands, stage two's is frozen past its lease and woken after a third
+node took over, and stage three's is killed. Every stage must then hold what
+an uninterrupted pipeline writes and pass `felixd check --complete` and
+`replay --diff`. CI runs it on one broker and on three.
 
 ## Leases and failure detection
 
@@ -735,9 +789,11 @@ the old version's state, and the diff shows where its outputs differ (#29).
 `--module` without `--diff` prints the new version's state at `--to`.
 
 Replay needs no lease and writes nothing. It should run anywhere with read
-grants, but it reads the input and snapshot streams' tails, and Felix reports a
-tail only to a conditional write, so for now it needs publish grants on those
-streams too (Felix #1621). `felixd check` has the same gap.
+grants, but it reads the input and snapshot streams' tails with a refused
+conditional write, so for now it needs publish grants on those streams too
+(Felix #1621). `felixd check` has the same gap. A node reads its input's tail
+with a read past the end instead, which Felix refuses with the tail, so a node
+needs only read on its inputs.
 
 ## Grants
 
@@ -768,7 +824,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (`ps` and `drain` are not built yet, [#17](https://github.com/GetFelix/felixd/issues/17)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines are built, [Pipelines](#pipelines); `ps` and `drain` are not, [#17](https://github.com/GetFelix/felixd/issues/17)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -1006,7 +1062,7 @@ Built: spec records on `sys.specs`, claims that name the record they run,
 and `check` and `replay --diff` judging each input under the limits that
 applied ([Data model](#data-model)). The offset a spec takes effect at is
 where its owner's claim lands, not one the submitter states. Not built:
-incarnations, which Felix does not expose to clients yet, dropping `output`
+incarnations, which Felix does not expose to clients yet (#133), dropping `output`
 from the spec, and module changes at an offset (#64).
 
 Plan 9 resolved a name at every `open`, so a rebind silently changed what a

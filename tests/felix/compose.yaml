@@ -70,8 +70,14 @@ services:
             "initial_admin_principals":["p:admin"],
             "policies":[
               {"subject":"role:broker","object":"cluster:*","action":"node.view"},
-              {"subject":"role:dev","object":"namespace:dev/*","action":"ns.manage"}],
-            "groupings":[{"user":"p:broker","role":"role:broker"},{"user":"p:dev","role":"role:dev"}]}' \
+              {"subject":"role:dev","object":"namespace:dev/*","action":"ns.manage"},
+              {"subject":"role:node","object":"stream:dev/restricted/*","action":"stream.subscribe"},
+              {"subject":"role:node","object":"stream:dev/restricted/wl.wl.out","action":"stream.publish"},
+              {"subject":"role:node","object":"stream:dev/restricted/wl.wl.snap","action":"stream.publish"},
+              {"subject":"role:node","object":"cache:dev/restricted/*","action":"cache.read"},
+              {"subject":"role:node","object":"cache:dev/restricted/*","action":"cache.write"}],
+            "groupings":[{"user":"p:broker","role":"role:broker"},{"user":"p:dev","role":"role:dev"},
+              {"user":"p:node","role":"role:node"}]}' \
             "X-Felix-Bootstrap-Token: $$BT"
           [ -n "$$status" ] && break
           sleep 1
@@ -93,6 +99,10 @@ services:
         # stream.manage is what lets felixctl create and seek consumer groups.
         mint '{"principal":"p:dev","audience":"felix-broker","requested":["stream.publish","stream.subscribe","stream.manage","cache.read","cache.write"]}'
         field felix_token > "$$OUT/client.jwt"
+        # A felixd node with only the grants docs/design.md gives one, in
+        # namespace `restricted`: no publish on the workload's input.
+        mint '{"principal":"p:node","audience":"felix-broker","requested":["stream.publish","stream.subscribe","cache.read","cache.write"]}'
+        field felix_token > "$$OUT/restricted-node.jwt"
 
         admin="Authorization: Bearer $$(cat "$$OUT/controlplane.jwt")"
         post "$$CP/namespaces" '{"namespace":"default","display_name":"default"}' "$$admin"

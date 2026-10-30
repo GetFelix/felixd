@@ -38,6 +38,7 @@ jobs:
       FELIX_CA_FILE: /tmp/felix/broker-cert.pem
       FELIX_CONTROLPLANE_URL: http://127.0.0.1:8443
       FELIX_CONTROLPLANE_TOKEN_FILE: /tmp/felix/controlplane.jwt
+      FELIXD_RESTRICTED_TOKEN_FILE: /tmp/felix/restricted-node.jwt
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -72,7 +73,7 @@ jobs:
           docker compose -f tests/felix/cluster.yaml up -d --wait broker-1 broker-2 broker-3
           docker compose -f tests/felix/cluster.yaml run --rm felix-fleet
           tests/felix/credentials.sh /tmp/felix cluster
-      - run: FELIXD_CLUSTER=$PWD/$FELIXD_CLUSTER cargo test -p felixd --test cluster --test fence --test batches --test answers --locked -- --test-threads=1
+      - run: FELIXD_CLUSTER=$PWD/$FELIXD_CLUSTER cargo test -p felixd --test cluster --test fence --test batches --test answers --test pipeline --locked -- --test-threads=1
       - name: Felix logs
         if: failure()
         run: docker compose -f tests/felix/cluster.yaml logs --no-color
