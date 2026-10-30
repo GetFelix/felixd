@@ -1,6 +1,8 @@
 //! Appends to a workload's merge log, fenced like its output stream: a claim
 //! before anything else, then every append a `publish_if` at the tail.
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow, bail};
 use felix_client::ConditionalWrite;
 use felixd_core::merge::{self, Entry, Reconciled};
@@ -9,6 +11,7 @@ use crate::faults;
 use crate::felix::Felix;
 use crate::input::merge_unreadable;
 use crate::lease::Fence;
+use crate::metrics::WorkloadMetrics;
 use crate::runner::{LostLease, Superseded, poison};
 
 /// Consecutive failed attempts at one write before giving up.
@@ -22,6 +25,8 @@ pub(crate) struct MergeLog<'a> {
     tail: u64,
     /// Each input's next offset after the last record on the log.
     next: Vec<u64>,
+    /// Counts this log's appends when metrics are on.
+    pub(crate) metrics: Option<Arc<WorkloadMetrics>>,
 }
 
 impl<'a> MergeLog<'a> {
@@ -62,6 +67,7 @@ impl<'a> MergeLog<'a> {
                 fence,
                 tail,
                 next,
+                metrics: None,
             };
             if let Some(found) = &decoded {
                 if found.epoch() > fence.epoch() {
@@ -189,6 +195,9 @@ impl<'a> MergeLog<'a> {
             }
         }
         self.next = next;
+        if let Some(m) = &self.metrics {
+            m.merged(entries.len());
+        }
         faults::after_merge();
         Ok(landed)
     }
