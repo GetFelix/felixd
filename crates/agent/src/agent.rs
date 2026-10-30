@@ -974,7 +974,7 @@ async fn run_held(
         }
         ended = work => ended,
         _ = stop.wait_for(|stop| *stop) => Ended::Stopped,
-        _ = draining.wait_for(|draining| *draining) => Ended::Drained,
+        _ = draining.wait_for(|_| false) => Ended::Drained,
     };
     let _ = end_renewals.send(());
     if let Ok((renewed, _)) = (&mut renewals.0).await {
