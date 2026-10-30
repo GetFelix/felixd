@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use felix_client::CacheWatchItem;
 use felixd_core::check::{self, Expected, Finding};
 use felixd_core::output::{self, OutputHeader};
 
@@ -226,18 +225,6 @@ pub(crate) async fn module_bytes(felix: &Felix, hash: &str) -> Result<Vec<u8>> {
 /// Every key in the `workloads` cache. Felix has no call that lists a
 /// cache's keys, so this reads the retained values of a new watch.
 async fn workload_ids(felix: &Felix) -> Result<Vec<String>> {
-    let mut watch = felix.watch_retained(names::WORKLOADS).await?;
-    let count = watch
-        .retained_count()
-        .context("the watch did not say how many workloads it holds")?;
-    let mut ids = Vec::new();
-    while (ids.len() as u64) < count {
-        match watch.recv().await {
-            Some(CacheWatchItem::Change(change)) if change.value.is_some() => ids.push(change.key),
-            Some(CacheWatchItem::Change(_)) => {}
-            _ => bail!("the workloads watch ended early"),
-        }
-    }
-    ids.sort();
-    Ok(ids)
+    let entries = felix.entries(names::WORKLOADS).await?;
+    Ok(entries.into_iter().map(|(id, _)| id).collect())
 }

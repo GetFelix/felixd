@@ -341,6 +341,46 @@ impl Felix {
             )
             .await
     }
+
+    /// The value under `key`, or `None` when `cache` does not exist. Unlike
+    /// [`Felix::cache_get`] it does not wait for a cache that is not served
+    /// yet, for a cache that may never be created.
+    pub async fn cache_get_if_exists(&self, cache: &str, key: &str) -> Result<Option<Bytes>> {
+        match self
+            .client
+            .cache_get(&self.tenant, &self.namespace, cache, key)
+            .await
+        {
+            Err(error) if not_found(&error) => Ok(None),
+            found => found,
+        }
+    }
+
+    /// Every live entry of `cache`, sorted by key, or none when the cache
+    /// does not exist.
+    pub async fn entries(&self, cache: &str) -> Result<Vec<(String, Bytes)>> {
+        let mut watch = match self.watch_retained(cache).await {
+            Ok(watch) => watch,
+            Err(error) if not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let count = watch
+            .retained_count()
+            .with_context(|| format!("the {cache} watch did not say how many entries it holds"))?;
+        let mut entries = Vec::new();
+        while (entries.len() as u64) < count {
+            match watch.recv().await {
+                Some(felix_client::CacheWatchItem::Change(change)) => {
+                    if let Some(value) = change.value {
+                        entries.push((change.key, value));
+                    }
+                }
+                _ => bail!("the {cache} watch ended early"),
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
 }
 
 /// Calls `page` until it gets past `from`. A page stops short at what the
@@ -382,6 +422,12 @@ where
             result => return result,
         }
     }
+}
+
+fn not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<BrokerError>()
+        .is_some_and(|broker| broker.code == ErrorCode::NotFound)
 }
 
 fn not_ready(error: &anyhow::Error) -> bool {

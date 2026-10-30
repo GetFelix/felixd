@@ -4,8 +4,8 @@
 //! - [`names`]: the caches and streams felixd uses, and how a workload id maps
 //!   to its streams.
 //! - [`output`] and [`snapshot`]: the records on output and snapshot streams.
-//! - [`spec`], [`lease`] and [`node`]: the values in the `workloads`, `leases`
-//!   and `nodes` caches.
+//! - [`spec`], [`lease`] and [`node`]: the values in the `workloads`, `leases`,
+//!   `nodes` and `drains` caches.
 //! - [`class`]: error classes and what an operator has to fix.
 //! - [`placement`]: which free workloads a node claims.
 //! - [`module`]: how a module is identified.
@@ -13,6 +13,7 @@
 //! - [`resume`]: where a new owner picks a workload up.
 //! - [`replay`]: where a replay starts and stops.
 //! - [`check`]: what is wrong with an output stream, against a replay.
+//! - [`status`]: what `felixd ps` says about a workload, from its records.
 
 pub mod check;
 pub mod class;
@@ -27,6 +28,7 @@ pub mod replay;
 pub mod resume;
 pub mod snapshot;
 pub mod spec;
+pub mod status;
 
 mod codec;
 

@@ -64,6 +64,9 @@
 //! - `ignore-lease-deletes=1`: ignore every delete the leases watch delivers,
 //!   including the broker's expiry events, so takeover has to go by the
 //!   lease's expiry time alone.
+//! - `miss-drain-marks=1`: the agent's regular read of its drain mark never
+//!   finds one, as when that read has not come round yet, so only the read
+//!   before each claim sees it.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -306,6 +309,10 @@ pub(crate) fn drop_watch(key: &str, written: bool) -> Option<std::time::Duration
 
 pub(crate) fn ignore_lease_delete() -> bool {
     fault("ignore-lease-deletes") == Some(1)
+}
+
+pub(crate) fn miss_drain_marks() -> bool {
+    fault("miss-drain-marks") == Some(1)
 }
 
 pub(crate) fn during_compile() {

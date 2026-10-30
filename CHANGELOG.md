@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `felixd ps` shows each workload's state (running, waiting, needs operator
+  with the reason, failed, stopped), holder, epoch, output stream tail and how
+  far it is along each input, and each node, all read from records (#17).
+- `felixd drain <node>` makes a node release its leases, so other nodes take
+  its workloads over without waiting for them to expire, and claim nothing
+  until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`
+  cache.
+
 ## 0.1.0-preview.1
 
 The first release. Tested against Felix 0.6.2, the version the compose files

@@ -6,6 +6,8 @@
 //! - [`submit`]: what `felixd run` does.
 //! - [`check`]: what `felixd check` does.
 //! - [`replay`]: what `felixd replay` does.
+//! - [`ps`]: what `felixd ps` does.
+//! - [`drain`]: drain marks, which make a node give up its leases.
 //! - [`agent`]: watches the workloads and leases caches and runs what it claims.
 //! - [`lease`]: claims, renews and releases a workload's lease.
 //! - [`runner`]: runs one workload: resume, then step, append and snapshot.
@@ -21,7 +23,9 @@
 pub mod admin;
 pub mod agent;
 pub mod check;
+pub mod drain;
 pub mod felix;
+pub mod ps;
 pub mod replay;
 pub mod settings;
 pub mod submit;

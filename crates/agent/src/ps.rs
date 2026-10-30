@@ -1,0 +1,199 @@
+//! `felixd ps`: each workload's state, holder and positions, and each node,
+//! read from the caches and streams. Needs read grants only.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use anyhow::Result;
+use felixd_core::lease::Lease;
+use felixd_core::node::NodeInfo;
+use felixd_core::spec::WorkloadSpec;
+use felixd_core::status::{self, Found, State};
+use felixd_core::{merge, names, output};
+
+use crate::drain;
+use crate::felix::Felix;
+use crate::runner;
+use crate::settings::Settings;
+use crate::snapshots;
+
+/// What `felixd ps` shows.
+#[derive(Debug)]
+pub struct Report {
+    pub workloads: Vec<Workload>,
+    pub nodes: Vec<Node>,
+}
+
+#[derive(Debug)]
+pub struct Workload {
+    pub id: String,
+    /// `None` when the spec does not decode; `unread` says why.
+    pub state: Option<State>,
+    /// The live lease.
+    pub holder: Option<Lease>,
+    /// Whether the holder is marked as draining.
+    pub holder_draining: bool,
+    /// The output stream's next offset.
+    pub outputs: u64,
+    /// The epoch of the last record on the output stream.
+    pub last_epoch: Option<u64>,
+    /// Where the workload is on each input. For a workload with several
+    /// inputs, how far each has been merged.
+    pub inputs: Vec<Position>,
+    /// For a workload with several inputs, the next step on its merge log.
+    pub steps: Option<Position>,
+    /// Why some of the above could not be read.
+    pub unread: Option<String>,
+}
+
+/// How far a workload is along a stream.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Position {
+    pub stream: String,
+    /// The next offset it takes, as far as the records show.
+    pub next: u64,
+    /// The stream's next offset.
+    pub tail: u64,
+}
+
+impl Position {
+    /// Records on the stream past `next`. Claims and other records that are
+    /// not inputs count too.
+    pub fn lag(&self) -> u64 {
+        self.tail.saturating_sub(self.next)
+    }
+}
+
+#[derive(Debug)]
+pub struct Node {
+    pub id: String,
+    /// Its entry in `nodes`, `None` if it has none, which means it is not
+    /// up.
+    pub info: Option<NodeInfo>,
+    pub draining: bool,
+    /// How many live leases name it.
+    pub leases: usize,
+}
+
+/// Reports on the workloads in `ids`, or every workload when it is empty,
+/// and on every node that is up, holds a lease or is marked as draining.
+pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
+    let felix = Felix::connect(settings).await?;
+    let leases: HashMap<String, Lease> = drain::leases(&felix).await?.into_iter().collect();
+    let draining: BTreeSet<String> = drain::draining(&felix).await?.into_iter().collect();
+    let specs = felix.entries(names::WORKLOADS).await?;
+    let mut workloads = Vec::new();
+    for (id, value) in specs {
+        if !ids.is_empty() && !ids.contains(&id) {
+            continue;
+        }
+        let holder = leases.get(&id).cloned();
+        let holder_draining = holder.as_ref().is_some_and(|l| draining.contains(&l.owner));
+        let mut workload = Workload {
+            id,
+            state: None,
+            holder,
+            holder_draining,
+            outputs: 0,
+            last_epoch: None,
+            inputs: Vec::new(),
+            steps: None,
+            unread: None,
+        };
+        match WorkloadSpec::decode(&value) {
+            Ok(spec) => {
+                if let Err(error) = read_streams(&felix, &spec, &mut workload).await {
+                    workload.unread = Some(format!("{error:#}"));
+                }
+            }
+            Err(error) => workload.unread = Some(format!("the spec does not decode: {error}")),
+        }
+        workloads.push(workload);
+    }
+    for id in ids {
+        anyhow::ensure!(workloads.iter().any(|w| &w.id == id), "no workload {id}");
+    }
+
+    let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
+    for (id, value) in felix.entries(names::NODES).await? {
+        let entry = node_entry(&mut nodes, &id);
+        entry.info = NodeInfo::decode(&value).ok();
+    }
+    for id in &draining {
+        node_entry(&mut nodes, id).draining = true;
+    }
+    for lease in leases.values() {
+        node_entry(&mut nodes, &lease.owner).leases += 1;
+    }
+    Ok(Report {
+        workloads,
+        nodes: nodes.into_values().collect(),
+    })
+}
+
+fn node_entry<'a>(nodes: &'a mut BTreeMap<String, Node>, id: &str) -> &'a mut Node {
+    nodes.entry(id.to_owned()).or_insert_with(|| Node {
+        id: id.to_owned(),
+        info: None,
+        draining: false,
+        leases: 0,
+    })
+}
+
+/// Reads the state and positions from the workload's streams into
+/// `workload`.
+async fn read_streams(felix: &Felix, spec: &WorkloadSpec, workload: &mut Workload) -> Result<()> {
+    let outputs = felix.read_tail(&spec.output).await?;
+    workload.outputs = outputs;
+    let last = felix.last_record(&spec.output, outputs).await?;
+    let last = last.map(|r| r.payload);
+    workload.last_epoch = last
+        .as_deref()
+        .and_then(|r| output::decode(r).ok())
+        .map(|r| r.epoch());
+    workload.state = Some(status::state(Found {
+        spec,
+        lease: workload.holder.as_ref(),
+        last_record: last.as_deref(),
+    }));
+
+    let written = runner::last_output(felix, &spec.output, outputs)
+        .await?
+        .map(|(_, w)| w.header);
+    let snap_stream = names::snapshot_stream(&workload.id);
+    let snap_tail = felix.read_tail(&snap_stream).await?;
+    let snapshot = snapshots::latest(felix, &snap_stream, snap_tail)
+        .await
+        .map_err(snapshots::ReadError::into_anyhow)?
+        .snapshot
+        .map(|s| s.taken().header);
+    let next = status::next_step(written, snapshot);
+    if !spec.merged() {
+        workload.inputs.push(Position {
+            stream: spec.inputs[0].clone(),
+            next,
+            tail: felix.read_tail(&spec.inputs[0]).await?,
+        });
+        return Ok(());
+    }
+    let merge_stream = names::merge_stream(&workload.id);
+    let merge_tail = felix.read_tail(&merge_stream).await?;
+    let last_merged = felix.last_record(&merge_stream, merge_tail).await?;
+    let decoded = last_merged
+        .as_ref()
+        .map(|r| merge::decode(&r.payload))
+        .transpose()?;
+    let cursor = merge::cursor(decoded.as_ref(), spec.inputs.len())?;
+    for (input, merged) in spec.inputs.iter().zip(cursor) {
+        workload.inputs.push(Position {
+            stream: input.clone(),
+            next: merged,
+            tail: felix.read_tail(input).await?,
+        });
+    }
+    workload.steps = Some(Position {
+        stream: merge_stream,
+        next,
+        tail: merge_tail,
+    });
+    Ok(())
+}

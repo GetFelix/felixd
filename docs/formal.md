@@ -258,7 +258,10 @@ composition.
   record's.
 - Spec edits and spec records in `Felixd.tla`. `FelixdSpecs.tla` models them
   ([Spec history](#spec-history)).
-- Several inputs and the merge log (#138), `felixd check` beyond which spec each input ran under, and drain.
+- Several inputs and the merge log (#138), and `felixd check` beyond which spec each input ran under.
+- Drain as an action of its own. A drained holder stops and then deletes its lease, which the model
+  already covers as `Crash` followed at once by `Expire`, with the holder's requests still in flight.
+  Claiming nothing while drained is placement, which the model leaves out.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
