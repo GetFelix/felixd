@@ -494,6 +494,9 @@ pub fn addressed_to<'a>(
     record: &'a [u8],
     name: &str,
 ) -> Result<Option<Addressed<'a>>, DecodeError> {
+    if kind_of(record)? == TRIM {
+        return Err(DecodeError::UnknownKind(TRIM));
+    }
     if kind_of(record)? != OUTPUT {
         return Ok(None);
     }
