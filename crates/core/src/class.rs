@@ -79,6 +79,9 @@ pub enum OperatorReason {
     /// Felix no longer holds a record the workload still needs, on an input
     /// or one of its own streams: retention or a trim passed it.
     HistoryTrimmed,
+    /// Admission runs, and the spec record names no decision of admission
+    /// that accepted exactly this spec.
+    SpecUnadmitted,
 }
 
 impl OperatorReason {
@@ -93,6 +96,7 @@ impl OperatorReason {
             OperatorReason::InputUnreadable => 7,
             OperatorReason::InputBehind => 8,
             OperatorReason::HistoryTrimmed => 9,
+            OperatorReason::SpecUnadmitted => 10,
         }
     }
 
@@ -107,6 +111,7 @@ impl OperatorReason {
             7 => OperatorReason::InputUnreadable,
             8 => OperatorReason::InputBehind,
             9 => OperatorReason::HistoryTrimmed,
+            10 => OperatorReason::SpecUnadmitted,
             other => return Err(DecodeError::UnknownReason(other)),
         })
     }
@@ -124,6 +129,7 @@ impl fmt::Display for OperatorReason {
             OperatorReason::InputUnreadable => "input record unreadable by this build",
             OperatorReason::InputBehind => "input stream behind the workload",
             OperatorReason::HistoryTrimmed => "a record the workload needs was trimmed",
+            OperatorReason::SpecUnadmitted => "spec not admitted",
         })
     }
 }

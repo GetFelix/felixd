@@ -28,6 +28,7 @@ use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::admission::{self, Gate};
 use crate::assignments::{self, Assignments};
 use crate::drain;
 use crate::faults;
@@ -86,6 +87,12 @@ pub struct AgentConfig {
 
 struct Node {
     felix: Felix,
+    /// Where admission was bootstrapped on `sys.specs`, as found.
+    gate: Gate,
+    /// The settings admission's projector creates streams with, on a node
+    /// that has a control plane token. A node without one leaves admission
+    /// to the others.
+    projector: Option<Settings>,
     modules: Modules,
     node_id: String,
     timing: LeaseTiming,
@@ -179,6 +186,11 @@ pub async fn run(
         ^ (u64::from(std::process::id()) << 32);
     let node = Arc::new(Node {
         felix: Felix::connect(settings).await?,
+        gate: Gate::default(),
+        projector: settings
+            .controlplane_token
+            .is_some()
+            .then(|| settings.clone()),
         modules: Modules::new(Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?),
         node_id: config.node_id,
         timing: config.lease,
@@ -580,6 +592,15 @@ fn apply(
     if id == names::SCHEDULER {
         node.assignments.set_scheduler(wanted.is_some());
     }
+    // Admission's decisions reach sys.specs only through a node that can
+    // create the streams they name.
+    let wanted = wanted.filter(|_| {
+        let able = id != names::ADMISSION || node.projector.is_some();
+        if !able {
+            tracing::info!("leaving admission to nodes with a control plane token");
+        }
+        able
+    });
     if let Some(task) = tasks.get(&id) {
         // A changed spec restarts the task, which resumes under it.
         if !task.handle.is_finished() && wanted.as_ref() == Some(&task.spec) {
@@ -697,7 +718,22 @@ async fn own(
                     claim_from,
                     pending: pending.as_ref(),
                 };
+                let projecting = (id == names::ADMISSION)
+                    .then(|| node.projector.clone())
+                    .flatten()
+                    .map(|settings| {
+                        let (stop_projecting, stopped) = watch::channel(false);
+                        let node = node.clone();
+                        let task = tokio::spawn(async move {
+                            admission::project(&node.felix, &settings, stopped).await;
+                        });
+                        (stop_projecting, task)
+                    });
                 let ended = run_held(&node, &id, run, &mut held, &mut stop).await;
+                if let Some((stop_projecting, task)) = projecting {
+                    let _ = stop_projecting.send(true);
+                    let _ = task.await;
+                }
                 drop(holding);
                 match ended {
                     Ended::Stopped => {
@@ -773,7 +809,7 @@ async fn before_claim(
         // Only a spec in the history runs, so check and replay see what ran.
         let past_tail_until = tokio::time::Instant::now() + RECORD_WAIT;
         loop {
-            let Err(error) = specs::check_record(&node.felix, id, spec).await else {
+            let Err(error) = specs::check_record(&node.felix, &node.gate, id, spec).await else {
                 return Some(None);
             };
             if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
@@ -804,7 +840,12 @@ async fn before_claim(
 /// spec record, so a spec with none cannot have one. A stale spec is this
 /// node's alone, and its watch restarts it once it catches up.
 fn recordable(spec: &WorkloadSpec, problem: &NeedsOperator) -> bool {
-    spec.record.is_some() && problem.reason != OperatorReason::SpecStale
+    // An unadmitted spec is not recorded either: recording takes a claim on
+    // the output stream, and a spec admission did not accept must not leave
+    // a claim that check, replay and later specs would read as its lineage.
+    spec.record.is_some()
+        && problem.reason != OperatorReason::SpecStale
+        && problem.reason != OperatorReason::SpecUnadmitted
 }
 
 /// Why, if the last record on the output stream says that the spec record

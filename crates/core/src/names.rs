@@ -21,6 +21,14 @@ pub const SPECS: &str = "sys.specs";
 /// runs ([`crate::schedule`]).
 pub const FACTS: &str = "sys.facts";
 
+/// Stream of requests to run, change or stop workloads, which admission
+/// decides ([`crate::admission`]).
+pub const INTAKE: &str = "sys.intake";
+
+/// The id of the admission workload, which reads [`INTAKE`]. Its spec is the
+/// only one written directly, by `felixd init`.
+pub const ADMISSION: &str = "admission";
+
 /// The id of the scheduler workload, whose outputs are placement
 /// assignments. It reads [`SPECS`] and [`FACTS`].
 pub const SCHEDULER: &str = "scheduler";

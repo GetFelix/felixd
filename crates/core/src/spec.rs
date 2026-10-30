@@ -250,6 +250,10 @@ pub struct SpecRecord {
     pub format: u32,
     pub id: String,
     pub spec: WorkloadSpec,
+    /// The `wl.admission.out` offset of the decision that accepted this spec,
+    /// for a record admission's projector wrote ([`crate::admission`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted: Option<u64>,
 }
 
 impl SpecRecord {
@@ -258,6 +262,7 @@ impl SpecRecord {
             format: RECORD_FORMAT,
             id: id.to_owned(),
             spec,
+            admitted: None,
         }
     }
 

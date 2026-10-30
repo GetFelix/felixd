@@ -80,6 +80,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     admin::ensure_stream(settings, names::SPECS, kind).await?;
     // The scheduler's other input. Nodes append to it only while one runs.
     admin::ensure_stream(settings, names::FACTS, kind).await?;
+    admin::ensure_stream(settings, names::INTAKE, kind).await?;
     let output = names::output_stream(&submission.id);
     admin::ensure_stream(settings, &output, kind).await?;
     admin::ensure_stream(settings, &names::snapshot_stream(&submission.id), kind).await?;

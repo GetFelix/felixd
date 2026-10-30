@@ -50,6 +50,8 @@ pub struct Diffed {
     /// How many outputs matched.
     pub matched: u64,
     pub divergence: Option<Divergence>,
+    /// With `all`, every divergence after the first.
+    pub more: Vec<Divergence>,
 }
 
 /// Rebuilds workload `id` as of `to` on a fresh instance under the limits in
@@ -97,13 +99,17 @@ pub async fn replay(
 /// compares each output it produces with the one recorded on the output
 /// stream, by header and payload digest. It stops at the first divergence,
 /// and at the last input with a recorded output, which the workload may not
-/// have got past yet. `module` is as for [`replay`].
+/// have got past yet. `module` is as for [`replay`]. With `all` it carries
+/// on past divergences and reports each, which says something for a
+/// workload whose outputs depend on their input alone, such as admission:
+/// with another module, which recorded requests it decides otherwise.
 pub async fn diff(
     settings: &Settings,
     id: &str,
     from: u64,
     to: Option<Target>,
     module: Option<&str>,
+    all: bool,
 ) -> Result<Diffed> {
     let (felix, spec) = open(settings, id).await?;
     // The output stream first, so every input a recorded output came from is
@@ -119,7 +125,8 @@ pub async fn diff(
     let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
     let (_, limits) = judged(&felix, id, &spec, &records).await?;
     let mut matched = 0;
-    let divergence = run_inputs(
+    let mut found_all = Vec::new();
+    let first = run_inputs(
         &mut feed,
         &mut workload,
         &limits,
@@ -133,15 +140,21 @@ pub async fn diff(
             if found.is_none() {
                 matched += outputs.len() as u64;
             }
+            if all {
+                found_all.extend(found);
+                return None;
+            }
             found
         },
     )
     .await?;
+    let mut found_all = first.into_iter().chain(found_all);
     Ok(Diffed {
         from,
         end,
         matched,
-        divergence,
+        divergence: found_all.next(),
+        more: found_all.collect(),
     })
 }
 
