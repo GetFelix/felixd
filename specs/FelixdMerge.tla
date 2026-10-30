@@ -173,17 +173,19 @@ OClaim(n) ==
     /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted>>
 
 \* A refused claim, or one whose answer was lost, reads the records past
-\* the tail: a later epoch stops it, its own claim is on, and anything else
-\* means it claims again at the new tail.
+\* the tail: any from a later epoch stops it, its own claim among them means
+\* it is on, and otherwise it claims again at the new tail.
 OClaimAns(n) ==
     /\ nd[n].pc = "oclaimw" /\ nd[n].rep # "none"
     /\ LET past == nd[n].ot + 1..Len(out)
-       IN IF nd[n].rep = "ok" \/ \E p \in past : out[p] = OClaimRec(n)
+       IN IF nd[n].rep = "ok"
           THEN nd' = [nd EXCEPT ![n].pc = AfterOutClaim, ![n].oc = TRUE,
-                                ![n].ot = IF nd[n].rep = "ok" THEN nd[n].ot + 1 ELSE Len(out),
-                                ![n].rep = "none"]
+                                ![n].ot = nd[n].ot + 1, ![n].rep = "none"]
           ELSE IF \E p \in past : out[p].e > nd[n].e
           THEN Stop(n)
+          ELSE IF \E p \in past : out[p] = OClaimRec(n)
+          THEN nd' = [nd EXCEPT ![n].pc = AfterOutClaim, ![n].oc = TRUE,
+                                ![n].ot = Len(out), ![n].rep = "none"]
           ELSE nd' = [nd EXCEPT ![n].pc = "oclaim", ![n].ot = Len(out), ![n].rep = "none"]
     /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
 
