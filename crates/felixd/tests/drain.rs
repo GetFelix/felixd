@@ -320,11 +320,25 @@ async fn drain_wait_covers_a_claim_already_under_way() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     let started = Instant::now();
     drain(&t, "only", true).await;
-    never_held(&t, 12, "drain --wait returned with a claim under way").await;
-    assert!(
-        started.elapsed() > Duration::from_secs(5),
-        "drain --wait returned before the claim it covers"
+    let returned = started.elapsed();
+    // A claim that wins takes an epoch, however soon the drain releases it.
+    let epoch = last_epoch(&t).await;
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        last_epoch(&t).await,
+        epoch,
+        "a claim landed after drain --wait returned"
     );
+    assert!(
+        returned > Duration::from_secs(5),
+        "drain --wait returned after {returned:?}, before the claim it covers"
+    );
+}
+
+/// The last epoch handed out for the workload.
+async fn last_epoch(t: &TestFelix) -> Option<u64> {
+    let value = t.felix.cache_get(names::EPOCHS, ID).await.unwrap();
+    value.map(|v| felixd_core::lease::decode_epoch(&v).unwrap())
 }
 
 /// A node that cannot read its drain mark claims nothing.
