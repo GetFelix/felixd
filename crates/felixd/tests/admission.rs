@@ -553,8 +553,10 @@ async fn pointing_workloads_back_at_an_old_acceptance_after_a_stop_never_runs() 
 async fn a_record_naming_a_decision_without_admission_slows_nothing() {
     let Some(t) = test_felix().await else { return };
     ensure_stream(&t.settings, INPUT, kind()).await.unwrap();
-    // No `felixd init`, so there is no wl.admission.out.
+    // No `felixd init`, so there is no wl.admission.out. A first workload
+    // creates sys.specs.
     let counter = felixd_testkit::workload("counter");
+    assert!(t.run("first", &counter, INPUT, &[]).success());
     let mut odd = SpecRecord::new(
         "odd",
         admission::running("odd", &module::hash(&counter), vec![]),
