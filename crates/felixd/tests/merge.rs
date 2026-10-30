@@ -137,9 +137,11 @@ async fn assert_merged(t: &TestFelix, module: &[u8], records: usize) {
 async fn two_inputs_are_stepped_in_merge_log_order() {
     let Some(t) = test_felix().await else { return };
     let module = submit(&t).await;
+    let mut published = 0;
     for _ in 0..5 {
         t.publish_all(ORDERS, [meta(), meta()]).await;
         t.publish_all(PAYMENTS, [meta()]).await;
+        published += 3;
     }
     let _agent = t.start_agent();
     eventually("the first steps", Duration::from_secs(60), || async {
@@ -150,8 +152,9 @@ async fn two_inputs_are_stepped_in_merge_log_order() {
     for _ in 0..5 {
         t.publish_all(PAYMENTS, [meta()]).await;
         t.publish_all(ORDERS, [meta()]).await;
+        published += 2;
     }
-    assert_merged(&t, &module, 30).await;
+    assert_merged(&t, &module, published).await;
     let log = merge_log(&t).await;
     assert!(log[0].2.is_none(), "the log starts with a claim: {log:?}");
 }
