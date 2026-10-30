@@ -68,9 +68,7 @@ impl<'a> MergeLog<'a> {
                     tracing::info!(stream, epoch = found.epoch(), "a later holder merged");
                     return Err(Superseded(found.epoch()).into());
                 }
-                if found.epoch() == fence.epoch() {
-                    return Ok(log);
-                }
+                // REVERT CHECK: claim again under the same epoch.
             }
             faults::before_merge_claim();
             let claim = merge::encode_claim(fence.epoch(), &log.next, fence.node());
@@ -84,8 +82,10 @@ impl<'a> MergeLog<'a> {
                         "{stream} wrote a claim at {offset}, expected {tail}"
                     )));
                 }
-                // Read the tail again: the records past it decide.
-                Ok(ConditionalWrite::Refused { .. }) => {}
+                // REVERT CHECK: a refused claim gives up.
+                Ok(ConditionalWrite::Refused { .. }) => {
+                    return Err(Superseded(fence.epoch()).into());
+                }
                 Err(error) => {
                     failures += 1;
                     if failures >= MAX_ATTEMPTS {
@@ -109,10 +109,8 @@ impl<'a> MergeLog<'a> {
 
     /// The most entries one [`Self::append`] may take.
     pub(crate) fn per_write(&self) -> usize {
-        let fits = merge::entries_per_write(self.next.len());
-        faults::merge_write_limit()
-            .map_or(fits, |k| k.min(fits))
-            .max(1)
+        // REVERT CHECK: no limit on a write's entries.
+        usize::MAX
     }
 
     /// Appends `entries`, at most [`Self::per_write`] of them, in one write and
