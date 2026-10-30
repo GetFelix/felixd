@@ -33,7 +33,8 @@ Flags of `run`: `--id`, `--input` (up to 64), `--snapshot-every` (1000), `--snap
 The limits are stored in the spec, so every node runs the workload under the same ones.
 
 Flags of `agent`: `--node-id` (`FELIXD_NODE_ID`; host name and process id by default),
-`--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64),
+`--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64;
+refused above about 125,000, where a node's facts would not fit in one record),
 `--claim-delay-ms` (1000), `--assignment-bound-ms` (15000), the longest a free workload is left to
 another node it is assigned to that can take it, `--assignment-grace-ms` (2000), the longest an
 unassigned one waits for a healthy scheduler to read its spec, and `--facts-every-ms` (three lease

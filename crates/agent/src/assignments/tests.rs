@@ -228,7 +228,8 @@ fn only_a_running_scheduler_whose_holder_renews_is_healthy() {
     a.set_scheduler(true);
     assert!(a.healthy(&timing, 10_000));
     // Not expired, but a renewal is overdue: the holder may be dead.
-    assert!(!a.healthy(&timing, 11_600));
+    assert!(a.healthy(&timing, 11_600));
+    assert!(!a.healthy(&timing, 12_100));
     assert!(!a.healthy(&timing, 14_000));
     a.set_holder(None);
     assert!(!a.healthy(&timing, 10_000));

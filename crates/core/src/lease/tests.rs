@@ -90,12 +90,27 @@ fn a_lease_is_live_only_while_recently_renewed() {
     let timing = LeaseTiming {
         ttl: Duration::from_millis(3000),
     };
-    assert_eq!(timing.renewed_within(), Duration::from_millis(1500));
-    // Renewed just now, and just before the next renewal is due.
+    // One renewal interval and the slack.
+    assert_eq!(timing.renewed_within(), Duration::from_millis(2000));
+    // Renewed just now, and with the next renewal a little late.
     assert!(timing.renewed_lately(13_000, 10_000));
-    assert!(timing.renewed_lately(12_000, 10_000));
-    // A renewal is overdue by half an interval: its holder may be gone.
-    assert!(!timing.renewed_lately(11_500, 10_000));
+    assert!(timing.renewed_lately(11_100, 10_000));
+    // Overdue by more than the slack: its holder may be gone.
+    assert!(!timing.renewed_lately(10_900, 10_000));
     assert!(!timing.renewed_lately(9_000, 10_000));
     assert!(!timing.renewed_lately(0, 10_000));
+}
+
+#[test]
+fn the_freshness_window_is_at_least_half_a_ttl_and_below_a_ttl() {
+    let within = |ms| {
+        LeaseTiming {
+            ttl: Duration::from_millis(ms),
+        }
+        .renewed_within()
+    };
+    // The 2 s test TTL: capped at five sixths.
+    assert_eq!(within(2000).as_millis(), 1666);
+    assert_eq!(within(10_000), Duration::from_secs(5));
+    assert_eq!(within(60_000), Duration::from_secs(30));
 }

@@ -25,7 +25,8 @@ pub const FACTS: &str = "sys.facts";
 /// assignments. It reads [`SPECS`] and [`FACTS`].
 pub const SCHEDULER: &str = "scheduler";
 
-const MAX_ID_LEN: usize = 64;
+/// The longest workload id.
+pub const MAX_ID_LEN: usize = 64;
 
 /// Checks that `id` is usable in a stream name: 1 to 64 characters of
 /// lowercase letters, digits and `-`.

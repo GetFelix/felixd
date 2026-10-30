@@ -111,9 +111,16 @@ struct Node {
     facts_every: Duration,
     /// The workloads this node holds, for its facts.
     holding: std::sync::Mutex<BTreeSet<String>>,
-    /// The version of each assignee's `nodes` entry this node last read, and
-    /// when that version was first read.
-    entries: std::sync::Mutex<HashMap<String, (u64, tokio::time::Instant)>>,
+    /// What this node last read of each assignee's `nodes` entry.
+    entries: std::sync::Mutex<HashMap<String, Entry>>,
+}
+
+/// A `nodes` entry as read: its version, when that version was first read,
+/// and when it was last read.
+struct Entry {
+    version: u64,
+    since: tokio::time::Instant,
+    read: tokio::time::Instant,
 }
 
 /// A workload this node holds, named in its facts while this lives.
@@ -159,6 +166,7 @@ pub async fn run(
     config: AgentConfig,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
+    felixd_core::schedule::check_fact_fits(&config.node_id, config.placement.max_workloads)?;
     anyhow::ensure!(
         config.lease.ttl >= MIN_TTL,
         "the lease TTL must be at least {} ms",
@@ -954,19 +962,30 @@ impl Node {
     /// waits on a node that may not come.
     async fn takes_work(&self, node: &str) -> bool {
         let read = self.felix.cache_get_versioned(names::NODES, node);
-        let Ok(Ok(Some(found))) = tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await else {
-            return false;
-        };
+        let found = tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await;
         let now = tokio::time::Instant::now();
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let since = match entries.get(node) {
-            Some(&(version, since)) if version == found.version => since,
-            _ => {
-                entries.insert(node.to_owned(), (found.version, now));
-                now
-            }
+        // Nodes no assignment has named for a while are not kept.
+        let forget = self.timing.ttl * 10;
+        entries.retain(|_, e| now.duration_since(e.read) <= forget);
+        let Ok(Ok(found)) = found else {
+            return false;
         };
-        now.duration_since(since) <= self.timing.renewed_within()
+        let Some(found) = found else {
+            entries.remove(node);
+            return false;
+        };
+        let entry = entries.entry(node.to_owned()).or_insert(Entry {
+            version: found.version,
+            since: now,
+            read: now,
+        });
+        if entry.version != found.version {
+            entry.version = found.version;
+            entry.since = now;
+        }
+        entry.read = now;
+        now.duration_since(entry.since) <= self.timing.renewed_within()
             && NodeInfo::decode(&found.value).is_ok_and(|info| info.takes_work())
     }
 

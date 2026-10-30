@@ -1184,14 +1184,16 @@ never whether output is correct. A scheduler outside felixd is not planned.
   second, starting from the latest table, and keeps its place across failed
   reads and across the scheduler stopping and starting. A node follows
   assignments only while the scheduler is healthy: its spec says `running`
-  and its holder renewed the lease lately, meaning the lease has more than
-  half a TTL left. A lease that has only not yet expired is not enough, since
-  its holder may have died up to a TTL ago. Then a node claims a free
+  and its holder renewed the lease lately: within the freshness window W, one
+  renewal interval (TTL/3) plus 1 s for the renewal's round trip, watch delay
+  and skew, at least TTL/2 and at most five sixths of a TTL. That is 5 s at
+  the default 10 s TTL. A lease that has only not yet expired is not enough,
+  since its holder may have died up to a TTL ago. Then a node claims a free
   workload assigned to it at once. It leaves one to another node only while
   that node's `nodes` entry says it takes work (under `--max-workloads`, not
   draining, not blocked) and was rewritten lately: a read gives no expiry, so
-  an entry whose version has not changed for half a TTL since this node first
-  read it counts as gone. That wait lasts at most `--assignment-bound-ms`
+  an entry whose version has not changed for W since this node first read it
+  counts as gone. That wait lasts at most `--assignment-bound-ms`
   (15 s). It leaves a workload with no assignment only while the scheduler
   has not read its spec record, for at most `--assignment-grace-ms` (2 s): a
   healthy scheduler assigns a new spec in well under a second. Both are
@@ -1208,29 +1210,33 @@ wins:
 
 | Case | Added wait |
 |---|---|
-| No scheduler, or its holder not renewing | None once its lease has gone half a TTL without renewal |
+| No scheduler, or its holder not renewing | None once its lease has gone W without renewal |
 | Assignee down, full, draining or blocked | None (one `nodes` read) |
-| Assignee died but its `nodes` entry has not expired | At most half a TTL from this node's first read, plus a second between reads |
+| Assignee died but its `nodes` entry has not expired | At most W from this node's first read, plus a second between reads |
 | Assigned to this node | Less: it claims with no random delay |
 | Scheduler read the spec and left it unassigned | None |
 | Healthy scheduler not yet at the spec record | Until it is, typically under a second, at most the grace (2 s) |
 | Assignee healthy, with room, but does not claim | The bound (15 s) |
 
 When the scheduler's own node dies, nodes stop counting on it once its lease
-has gone half a TTL without renewal, about one renewal interval after its
-last one. Until then a new workload waits at most the grace, and a workload
+has gone W without renewal, W after its last renewal. Until then a new workload waits at most the grace, and a workload
 on a dead node is first claim wins at once as before.
 
 The scheduler's own view of a dead node is slower: three fact intervals,
 90 s by default. That is deliberate. It only decides where new assignments
 go, while each node's check of the assignee's `nodes` entry decides whether
-anyone waits, so a dead assignee costs a claim at most half a TTL whatever
+anyone waits, so a dead assignee costs a claim at most W whatever
 the scheduler thinks. Matching the scheduler's view to the lease TTL would
 mean a fact per node per TTL, three times the growth below.
 
 Growth. `sys.facts` gets one record per node per `--facts-every-ms`, about
-2,900 a day per node at the default 30 s and 100 bytes each, plus one per
-claim or release, at most two a second per node. `wl.scheduler.out` gets one
+2,900 a day per node at the default 30 s, plus one per claim or release, at
+most two a second per node. A fact is about 150 bytes plus each held
+workload's id and three bytes: about 1.6 KB for a node holding 64 workloads
+with 20-character ids, and at most about 4.5 KB with 64-character ones. A
+full node at the defaults so writes about 4.6 MB a day. The agent refuses a
+`--max-workloads` whose largest possible fact would not fit in one record
+(about 125,000). `wl.scheduler.out` gets one
 record per spec record, one per assignment change and a table every ten
 minutes of input time. Neither is trimmed yet (#164).
 

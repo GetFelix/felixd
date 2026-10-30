@@ -328,3 +328,31 @@ fn records_round_trip() {
     assert_eq!(progress.key(), None);
     assert_eq!(Record::decode(&progress.encode()), Ok(progress));
 }
+
+#[test]
+fn a_fact_never_exceeds_its_worst_case() {
+    let ids: BTreeSet<String> = (0..100)
+        .map(|i| format!("{i:0>width$}", width = names::MAX_ID_LEN))
+        .collect();
+    let fact = NodeFact {
+        node: "node-with-a-long-name".into(),
+        every_ms: u64::MAX,
+        max_workloads: 100,
+        held: 100,
+        holding: ids,
+        draining: true,
+        blocked: true,
+    };
+    let worst = worst_fact_bytes("node-with-a-long-name", 100);
+    assert!(fact.encode().len() <= worst);
+    assert!(worst - fact.encode().len() < 64, "the bound is tight");
+}
+
+#[test]
+fn a_max_workloads_whose_facts_cannot_fit_is_refused() {
+    let fits = (crate::MAX_WRITE_BYTES - 1024) / (names::MAX_ID_LEN + 3);
+    assert_eq!(check_fact_fits("n", 64), Ok(()));
+    assert_eq!(check_fact_fits("n", fits), Ok(()));
+    assert!(check_fact_fits("n", fits * 2).is_err());
+    assert!(check_fact_fits("n", usize::MAX).is_err());
+}

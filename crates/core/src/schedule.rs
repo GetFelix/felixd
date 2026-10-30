@@ -57,6 +57,43 @@ pub struct NodeFact {
     pub blocked: bool,
 }
 
+/// The most bytes the fact of node `node` can take while it holds
+/// `max_workloads` workloads with the longest ids. Ids are `a-z`, `0-9` and
+/// `-`, so each costs its length, two quotes and a comma.
+pub fn worst_fact_bytes(node: &str, max_workloads: usize) -> usize {
+    let bare = NodeFact {
+        node: node.to_owned(),
+        every_ms: u64::MAX,
+        max_workloads,
+        held: max_workloads,
+        holding: BTreeSet::new(),
+        draining: true,
+        blocked: true,
+    };
+    (bare.encode().len() + r#","holding":[]"#.len())
+        .saturating_add(max_workloads.saturating_mul(names::MAX_ID_LEN + 3))
+}
+
+/// Checks that a node's fact always fits in one record, so a node is never
+/// left unheard because of what it holds.
+pub fn check_fact_fits(node: &str, max_workloads: usize) -> Result<(), FactTooLarge> {
+    let worst = worst_fact_bytes(node, max_workloads);
+    if worst > crate::MAX_WRITE_BYTES {
+        return Err(FactTooLarge { worst });
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "a node holding this many workloads would write facts of up to {worst} bytes, over the \
+     {max} a record may take; lower --max-workloads",
+    max = crate::MAX_WRITE_BYTES
+)]
+pub struct FactTooLarge {
+    pub worst: usize,
+}
+
 impl NodeFact {
     pub fn encode(&self) -> Vec<u8> {
         codec::encode_json(FACT_FORMAT, self)
