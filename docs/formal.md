@@ -364,20 +364,20 @@ that read less after a restart is refused by the claim floor, which `FelixdSpecs
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdAdmission` | pass | two projectors that crash and race, two decisions that may be rejected or stops, a forged record, two repoints | STATES_MAIN | TIME_MAIN |
-| `FelixdAdmissionSkip` | pass | missing modules uploaded late, a request for a reserved id, three decisions, two projectors that crash and race, a repoint | STATES_SKIP | TIME_SKIP |
-| `FelixdAdmissionForge` | pass | two forged records over three specs, a repoint, one projector, two decisions | STATES_FORGE | TIME_FORGE |
-| `FelixdAdmissionLive` | pass | `LiveRuns` with no adversary: two projectors, a crash, three decisions | STATES_LIVE | TIME_LIVE |
-| `FelixdAdmissionBeforeAt` | `OnlyAdmittedRuns` | the gate reads only the records before the one it checks, and is on only if admission's record is among them: the record written before admission runs | STATES_BA | under 3 s |
-| `FelixdAdmissionForgedCount` | `OnlyAdmittedRuns` | every record naming a decision counts, verified or not: a forged record past the tail blocks the latest admitted record | STATES_FC | under 3 s |
-| `FelixdAdmissionOldRecord` | `NoRollback` | a record is superseded by a later record, not a later decision: a record of an older decision that lands after a newer one runs after it | STATES_OR | under 3 s |
-| `FelixdAdmissionRetrySkipped` | `SkippedStaysSkipped` | no skip records, and a projector walks the decisions from the first: a new projector records a decision an earlier one passed over, once its module is uploaded | STATES_RS | under 3 s |
-| `FelixdAdmissionReservedIntake` | `ReservedNeverViaIntake` | admission accepts a reserved id | STATES_RI | under 3 s |
-| `FelixdAdmissionNoCondWrite` | `ProjectedAtMostOnce` | projections are plain appends: two projectors record the same decision | STATES_NC | under 3 s |
-| `FelixdAdmissionFoldMemo` | `NoRollback` | a node keeps its verdict on a record it read: a forged record naming a decision past the tail stays unverified after that decision lands, so after running it the node runs an older record | STATES_FM | under 3 s |
+| `FelixdAdmission` | pass | two projectors that crash and race, two decisions that may be rejected or stops, a forged record, two repoints | 6,827,780 | 1 min 26 s |
+| `FelixdAdmissionSkip` | pass | missing modules uploaded late, a request for a reserved id, three decisions, two projectors that crash and race, a repoint | 4,277,794 | 55 s |
+| `FelixdAdmissionForge` | pass | two forged records over three specs, a repoint, one projector, two decisions | 5,346,950 | 1 min 1 s |
+| `FelixdAdmissionLive` | pass | `LiveRuns` with no adversary: two projectors, a crash, three decisions | 323,964 | 1 min 51 s |
+| `FelixdAdmissionBeforeAt` | `OnlyAdmittedRuns` | the gate reads only the records before the one it checks, and is on only if admission's record is among them: the record written before admission runs | about 20 | under 3 s |
+| `FelixdAdmissionForgedCount` | `OnlyAdmittedRuns` | every record naming a decision counts, verified or not: a forged record past the tail blocks the latest admitted record | about 650 | under 3 s |
+| `FelixdAdmissionOldRecord` | `NoRollback` | a record is superseded by a later record, not a later decision: a record of an older decision that lands after a newer one runs after it | about 95,000 | under 3 s |
+| `FelixdAdmissionRetrySkipped` | `SkippedStaysSkipped` | no skip records, and a projector walks the decisions from the first: a new projector records a decision an earlier one passed over, once its module is uploaded | about 150 | under 3 s |
+| `FelixdAdmissionReservedIntake` | `ReservedNeverViaIntake` | admission accepts a reserved id | about 20 | under 3 s |
+| `FelixdAdmissionNoCondWrite` | `ProjectedAtMostOnce` | projections are plain appends: two projectors record the same decision | about 70 | under 3 s |
+| `FelixdAdmissionFoldMemo` | `NoRollback` | a node keeps its verdict on a record it read: a forged record naming a decision past the tail stays unverified after that decision lands, so after running it the node runs an older record | about 75,000 | under 3 s |
 
 Every configuration has one node: nodes do not interact here, and each invariant is about one
-node's checks. Counts and times are from the `tla-admission` job on the CI runner.
+node's checks. Counts and times are from the `tla-admission` job on the CI runner, where the whole script takes about six minutes.
 
 `OnlyAdmittedRuns` restates the rule over the records and decisions the node read, so in the
 passing configurations it checks that the gate is the rule and nothing else; what makes it hold
