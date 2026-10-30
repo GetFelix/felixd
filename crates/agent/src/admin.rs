@@ -67,25 +67,12 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
     .await
 }
 
-/// Deletes a stream. Only tests do this, to recreate one under its name.
-pub async fn delete_stream(settings: &Settings, stream: &str) -> Result<()> {
-    let path = format!("{}/streams/{stream}", namespace_path(settings));
-    send(settings, &path, None).await
-}
-
 fn namespace_path(settings: &Settings) -> String {
     format!("namespaces/{}", settings.namespace)
 }
 
 /// POSTs to `/v1/tenants/{tenant}/{path}`. A 409 means it already exists.
 async fn post(settings: &Settings, path: &str, body: Value) -> Result<()> {
-    send(settings, path, Some(body)).await
-}
-
-/// POSTs `body` to `/v1/tenants/{tenant}/{path}`, or DELETEs it without
-/// one. A 409 counts as done.
-async fn send(settings: &Settings, path: &str, body: Option<Value>) -> Result<()> {
-    let method = if body.is_some() { "POST" } else { "DELETE" };
     let token = settings
         .controlplane_token
         .clone()
@@ -101,21 +88,17 @@ async fn send(settings: &Settings, path: &str, body: Option<Value>) -> Result<()
             .http_status_as_error(false)
             .build()
             .into();
-        let auth = format!("Bearer {token}");
-        let mut response = match body {
-            Some(body) => agent
-                .post(&url)
-                .header("Authorization", &auth)
-                .send_json(&body),
-            None => agent.delete(&url).header("Authorization", &auth).call(),
-        }
-        .with_context(|| format!("{method} {url}"))?;
+        let mut response = agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {token}"))
+            .send_json(&body)
+            .with_context(|| format!("POST {url}"))?;
         let text = response.body_mut().read_to_string().unwrap_or_default();
         Ok((response.status().as_u16(), text))
     })
     .await??;
     match status {
         200..=299 | 409 => Ok(()),
-        _ => bail!("{method} {path} failed with HTTP {status}: {text}"),
+        _ => bail!("creating {path} failed with HTTP {status}: {text}"),
     }
 }
