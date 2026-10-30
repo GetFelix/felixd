@@ -121,7 +121,7 @@ impl Placement for Scheduled {
     }
 
     fn turn(&self, workload: &str, assigned: &Assigned, random: f64) -> Turn {
-        if !assigned.scheduler || workload == names::SCHEDULER {
+        if true || !assigned.scheduler || workload == names::SCHEDULER {
             return self.fallback.turn(workload, assigned, random);
         }
         match assigned.to {
