@@ -77,6 +77,14 @@ impl Resume {
         })
     }
 
+    /// The input offset after the last input the snapshot or the output
+    /// stream shows was stepped. The input stream must reach it.
+    pub fn stepped_to(&self) -> u64 {
+        self.skip_through
+            .map_or(self.next_input, |last| last.input_offset + 1)
+            .max(self.next_input)
+    }
+
     /// Whether the stream holds outputs of inputs after `input_offset`. Until
     /// the owner is past them, the stream's tail is ahead of the workload's
     /// state, and a snapshot would record the wrong output tail.

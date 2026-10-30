@@ -32,6 +32,7 @@ fn a_new_workload_starts_from_input_zero() {
     assert!(!resume.restore);
     assert_eq!(resume.next_input, 0);
     assert!(!resume.already_written(0, 0));
+    assert_eq!(resume.stepped_to(), 0);
 }
 
 #[test]
@@ -47,6 +48,7 @@ fn no_snapshot_but_outputs_replays_from_zero_and_skips_them() {
     assert!(resume.already_written(0, 0));
     assert!(resume.already_written(7, 0));
     assert!(!resume.already_written(8, 0));
+    assert_eq!(resume.stepped_to(), 8);
 }
 
 #[test]
@@ -60,6 +62,7 @@ fn a_snapshot_with_no_later_output_resumes_after_it_and_skips_nothing() {
     assert!(resume.restore);
     assert_eq!(resume.next_input, 100);
     assert!(!resume.already_written(100, 0));
+    assert_eq!(resume.stepped_to(), 100);
 }
 
 #[test]
@@ -90,6 +93,7 @@ fn outputs_past_the_snapshot_are_skipped_up_to_the_last_one() {
     assert!(resume.already_written(104, 1));
     assert!(!resume.already_written(104, 2));
     assert!(!resume.already_written(105, 0));
+    assert_eq!(resume.stepped_to(), 105);
 }
 
 #[test]
