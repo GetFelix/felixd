@@ -138,3 +138,15 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: TLA_MODULE=FelixdSpecs TLC_WORKERS=4 scripts/check_tla.sh
+
+  # specs/FelixdMerge.tla, the merge log of a workload with several inputs.
+  tla-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: TLA_MODULE=FelixdMerge TLC_WORKERS=4 scripts/check_tla.sh
