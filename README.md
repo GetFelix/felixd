@@ -204,6 +204,14 @@ workloads `waiting`, and the command says so. The node reads its mark every
 second and again before each claim, so a node drained while it was stopped
 does not take work back when it wakes.
 
+`felixd agent --metrics-bind 127.0.0.1:9464` serves Prometheus metrics at
+`/metrics` (plain HTTP, no authentication, off unless given). Each node
+reports its own leases, claims, handoffs, steps and step latency, input lag,
+output writes and fenced refusals, restarts, needs-operator stops by reason,
+snapshot size and time, merge log appends and whether it is draining. Series
+per workload are capped at `--metrics-max-workloads` (100). See
+[docs/metrics.md](docs/metrics.md) for every metric.
+
 What no node can get past without an operator, such as a module that is
 still missing after 30 seconds, a 0.1 module or a restore out of fuel, is
 not a failure: the spec stays `running`, and the node writes one
@@ -444,7 +452,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps` and `drain` done; metrics not yet |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain` and metrics done |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates
@@ -462,6 +470,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 
 - [docs/design.md](docs/design.md): goals, design, data model and build order
 - [docs/records.md](docs/records.md): record formats and the resume fold
+- [docs/metrics.md](docs/metrics.md): the Prometheus metrics a node serves
 - [Felix docs](https://docs.getfelix.dev/)
 
 ## Contributing

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `felixd agent --metrics-bind <addr>` (or `FELIXD_METRICS_BIND`) serves
+  Prometheus metrics at `/metrics` on that address, and `/live`. Off unless
+  given. Per node: leases held, claims by result, handoffs, workloads that
+  need an operator by reason, failures, snapshots and their time. Per
+  workload: held, steps and step latency, input lag per input, output
+  records and fenced refusals, merge log appends, restarts and snapshot
+  size. Workloads past `--metrics-max-workloads` (100) are reported together
+  as `workload="_other"`. The endpoint is plain HTTP with no authentication
+  (#18, [docs/metrics.md](docs/metrics.md)).
 - `felixd ps` shows each workload's state (running, waiting, needs operator
   with the reason, failed, stopped), holder, epoch, output stream tail and how
   far it is along each input, and each node, all read from records (#17).

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
 use felix_client::ConditionalWrite;
 use felixd_core::class;
@@ -6,6 +8,7 @@ use felixd_core::output::{self, Reconciled, Record};
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
+use crate::metrics::WorkloadMetrics;
 use crate::runner::{
     FailedOnStream, LostLease, NeedsOperator, NeedsOperatorOnStream, Superseded, poison,
 };
@@ -26,6 +29,8 @@ pub(crate) struct OutputLog<'a> {
     /// claim.
     spec_record: u64,
     tail: u64,
+    /// Counts this log's appends when metrics are on.
+    pub(crate) metrics: Option<Arc<WorkloadMetrics>>,
 }
 
 /// How [`record_failure`] or [`record_needs_operator`] ended.
@@ -229,6 +234,7 @@ impl<'a> OutputLog<'a> {
             spec_version,
             spec_record,
             tail,
+            metrics: None,
         }
     }
 
@@ -393,6 +399,7 @@ impl<'a> OutputLog<'a> {
     pub(crate) async fn append(&mut self, mut batch: Vec<Vec<u8>>) -> Result<()> {
         let mut failures = 0;
         while !batch.is_empty() {
+            let mut refused = false;
             if !self.fence.holds() {
                 return Err(LostLease.into());
             }
@@ -412,6 +419,9 @@ impl<'a> OutputLog<'a> {
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == self.tail => {
                     self.tail += batch.len() as u64;
+                    if let Some(m) = &self.metrics {
+                        m.output_written(batch.len());
+                    }
                     return Ok(());
                 }
                 Ok(ConditionalWrite::Written { offset }) => {
@@ -420,7 +430,10 @@ impl<'a> OutputLog<'a> {
                         self.stream, self.tail
                     )));
                 }
-                Ok(ConditionalWrite::Refused { tail }) => tail,
+                Ok(ConditionalWrite::Refused { tail }) => {
+                    refused = true;
+                    tail
+                }
                 Err(error) => {
                     failures += 1;
                     if failures >= MAX_ATTEMPTS {
@@ -430,7 +443,14 @@ impl<'a> OutputLog<'a> {
                     self.felix.tail(self.stream).await?
                 }
             };
-            self.skip_written(&mut batch, seen_tail).await?;
+            let settled = self.skip_written(&mut batch, seen_tail).await;
+            if refused && let Some(m) = &self.metrics {
+                // Fenced when what was found ends this holder, reconciled
+                // when it was this holder's own earlier write or a race.
+                let fenced = settled.as_ref().is_err_and(|e| e.is::<Superseded>());
+                m.output_refused(fenced);
+            }
+            settled?;
         }
         Ok(())
     }

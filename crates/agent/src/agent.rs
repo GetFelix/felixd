@@ -29,6 +29,7 @@ use crate::drain;
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held};
+use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
 use crate::runner::{LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload};
 use crate::settings::Settings;
@@ -372,6 +373,7 @@ fn note_drain(node: &Node, marked: bool) {
         }
         node.announce_now.notify_one();
     }
+    metrics::draining(marked);
 }
 
 /// A task between its read of the drain mark and the end of its claim.
@@ -576,6 +578,8 @@ async fn own(
         drop(under_way);
         match claimed {
             Ok(Some(mut held)) => {
+                metrics::claim(Claim::Won);
+                let holding = metrics::Holding::start(&metrics::workload(&id));
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let run = Run {
@@ -584,8 +588,14 @@ async fn own(
                     pending: pending.as_ref(),
                 };
                 let ended = run_held(&node, &id, run, &mut held, &mut stop).await;
+                drop(holding);
                 match ended {
-                    Ended::Failed | Ended::Stopped => {
+                    Ended::Stopped => {
+                        lease::release(&node.felix, &held).await;
+                        return;
+                    }
+                    Ended::Failed => {
+                        metrics::failed();
                         lease::release(&node.felix, &held).await;
                         return;
                     }
@@ -597,14 +607,16 @@ async fn own(
                     // Released at once rather than left to expire, so the
                     // next node need not wait out the TTL.
                     Ended::Drained => {
+                        metrics::handoff(Handoff::Drained);
                         lease::release(&node.felix, &held).await;
                         tracing::info!(workload = %id, "released for the drain");
                     }
-                    Ended::Lost => {}
+                    Ended::Lost => metrics::handoff(Handoff::Lost),
                 }
             }
-            Ok(None) => {}
+            Ok(None) => metrics::claim(Claim::Contended),
             Err(error) => {
+                metrics::claim(Claim::Error);
                 tracing::warn!(workload = %id, error = %format!("{error:#}"), "claim failed");
             }
         }
@@ -708,6 +720,7 @@ async fn pause(stop: &mut watch::Receiver<bool>) -> bool {
 /// Logs that the workload needs an operator and waits for its spec to
 /// change or go, which restarts or stops the task.
 async fn needs_operator(id: &str, problem: &NeedsOperator, stop: &mut watch::Receiver<bool>) {
+    metrics::needs_operator(problem.reason);
     tracing::error!(workload = %id, reason = %problem, "the workload needs an operator, not running it");
     let _ = stop.wait_for(|stop| *stop).await;
 }
@@ -879,6 +892,11 @@ async fn run_held(
     }));
     let epoch = held.epoch;
     let mut draining = node.draining.subscribe();
+    let workload_metrics = metrics::workload(id);
+    let _sampler = workload_metrics.as_ref().map(|(w, shared)| {
+        w.set_inputs(&spec.inputs, *shared);
+        AbortOnDrop(tokio::spawn(sample_tails(node.clone(), w.clone())))
+    });
     let work = async {
         if let Some(problem) = pending {
             return record_needs_operator(node, id, spec, problem, &fence, &confirmer).await;
@@ -900,6 +918,9 @@ async fn run_held(
                 Ok(outcome) => break outcome,
                 Err(error) => {
                     tracing::warn!(workload = %id, error = %format!("{error:#}"), "retrying");
+                    if let Some((w, _)) = &workload_metrics {
+                        w.restarted();
+                    }
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
@@ -983,6 +1004,29 @@ async fn run_held(
         *held = renewed;
     }
     ended
+}
+
+/// Reads the tail of each input of the workload now and then, for the lag
+/// metric. A few failed reads in a row drop the lag until one succeeds.
+async fn sample_tails(node: Arc<Node>, workload: Arc<metrics::WorkloadMetrics>) {
+    let mut failed = 0u32;
+    loop {
+        let inputs = workload.inputs();
+        let mut all_read = true;
+        for (at, input) in inputs.iter().enumerate() {
+            match node.felix.read_tail(&input.stream).await {
+                Ok(tail) => metrics::WorkloadMetrics::tail(&inputs, at, tail),
+                Err(_) => all_read = false,
+            }
+        }
+        failed = if all_read { 0 } else { failed + 1 };
+        if failed >= metrics::FORGET_TAIL_AFTER {
+            for at in 0..inputs.len() {
+                metrics::WorkloadMetrics::forget_tail(&inputs, at);
+            }
+        }
+        tokio::time::sleep(metrics::sample_wait()).await;
+    }
 }
 
 /// Aborts the task when dropped, so renewals end with the workload's task.

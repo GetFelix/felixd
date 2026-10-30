@@ -4,6 +4,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -25,6 +26,7 @@ use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed, StepInput, merge_unreadable};
 use crate::lease::Fence;
 use crate::merge::MergeLog;
+use crate::metrics::{self, InputMetrics, WorkloadMetrics};
 use crate::output::OutputLog;
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
@@ -389,9 +391,14 @@ async fn run(
 ) -> Result<Infallible> {
     let spec_version = spec_version(felix, id, spec).await?;
     let spec_record = spec.record.context("the spec names no spec record")?;
+    let workload_metrics = metrics::workload(id).map(|(w, _)| w);
+    let positions = workload_metrics
+        .as_ref()
+        .map(|w| w.inputs())
+        .unwrap_or_default();
     // The claim comes first, so that from here on a stale owner's append is
     // refused, whether or not this owner ever writes an output.
-    let log = OutputLog::claim(
+    let mut log = OutputLog::claim(
         felix,
         &spec.output,
         fence,
@@ -411,11 +418,15 @@ async fn run(
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
     specs::refuse_stale_or_foreign(felix, id, spec).await?;
+    log.metrics = workload_metrics.clone();
     let merge_stream = names::merge_stream(id);
     let mut merge = match spec.merged() {
         true => Some(MergeLog::claim(felix, &merge_stream, fence, spec.inputs.len()).await?),
         false => None,
     };
+    if let Some(merge) = &mut merge {
+        merge.metrics = workload_metrics.clone();
+    }
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
@@ -526,7 +537,17 @@ async fn run(
         previous_stamp,
         hold,
         last_trim,
+        metrics: workload_metrics,
+        positions,
     };
+    match &merge {
+        None => steps.position(0, resume.next_input),
+        Some(merge) => {
+            for (input, &next) in merge.next().iter().enumerate() {
+                steps.position(input, next);
+            }
+        }
+    }
     if let Some(merge) = &mut merge {
         return merged(felix, id, spec, &mut steps, merge, resume.next_input).await;
     }
@@ -572,6 +593,7 @@ async fn run(
         let stamp = event.timestamp_micros.unwrap_or(0);
         steps.read(input, offset, stamp, event.payload).await?;
         next_input = offset + 1;
+        steps.position(0, next_input);
         if faults::restart_input_after(offset) {
             events = felix.subscribe_from(input, 0).await?;
         }
@@ -720,6 +742,7 @@ async fn merge_and_step(
         {
             steps.step(at, input).await?;
         }
+        steps.position(usize::from(entry.input), entry.offset + 1);
     }
     Ok(())
 }
@@ -827,11 +850,18 @@ struct Steps<'a> {
     previous_stamp: Option<u64>,
     /// No snapshot is taken at an input below this.
     hold: &'a mut u64,
-    /// The last trim this owner wrote.
+    /// The last trim this owner wrote, or the last on `.out` when it resumed.
     last_trim: Option<Trim>,
+    metrics: Option<Arc<WorkloadMetrics>>,
+    positions: Vec<Arc<InputMetrics>>,
 }
 
 impl Steps<'_> {
+    /// Notes that `input` is stepped up to `next`.
+    fn position(&self, input: usize, next: u64) {
+        WorkloadMetrics::position(&self.positions, input, next);
+    }
+
     /// Steps the record at `offset` on input `stream`, unless it is passed
     /// over.
     async fn read(&mut self, stream: &str, offset: u64, stamp: u64, record: Bytes) -> Result<()> {
@@ -850,11 +880,15 @@ impl Steps<'_> {
             .snapshot_every_ms
             .is_some_and(|ms| snapshot::starts_interval(ms, self.previous_stamp, stamp));
         self.previous_stamp = Some(stamp);
+        let started = self.metrics.is_some().then(Instant::now);
         let stepped = blocking(&self.modules.calls, &mut self.workload, move |w| {
             w.step(input.as_input())
         })
         .await?
         .map_err(failed)?;
+        if let (Some(m), Some(started)) = (&self.metrics, started) {
+            m.step(started.elapsed());
+        }
         let mut batch = Vec::new();
         for (index, produced) in input::produced(stepped).iter().enumerate() {
             let index = index as u32;
@@ -896,6 +930,7 @@ impl Steps<'_> {
         if !self.fence.holds() {
             return Err(LostLease.into());
         }
+        let started = Instant::now();
         let chunks =
             match blocking(&self.modules.calls, &mut self.workload, Workload::snapshot).await? {
                 Ok(chunks) => chunks,
@@ -903,6 +938,7 @@ impl Steps<'_> {
                     // Nothing has been written, so the previous snapshot is still
                     // the latest. Fuel is metered deterministically, so every
                     // replica skips the same snapshots.
+                    metrics::snapshot(None);
                     let skipped = SNAPSHOTS_SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
                     tracing::warn!(
                         workload = self.snap_stream,
@@ -924,6 +960,10 @@ impl Steps<'_> {
         };
         faults::before_snapshot_write();
         let manifest = self.write_snapshot(taken, &chunks).await?;
+        metrics::snapshot(Some(started.elapsed()));
+        if let Some(m) = &self.metrics {
+            m.snapshot_size(chunks.iter().map(|c| c.len() as u64).sum());
+        }
         self.previous = Some(manifest);
         faults::after_snapshot();
         self.trim().await
