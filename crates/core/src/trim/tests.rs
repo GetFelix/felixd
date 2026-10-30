@@ -30,7 +30,7 @@ fn keeps_the_last_snapshots_and_what_they_read() {
             // A chunk the kept snapshot shares with an older one is kept.
             snap_floor: 12,
             merge_floor: 0,
-            input_floors: vec![201],
+            input_floors: vec![200],
         }
     );
 }
@@ -53,7 +53,7 @@ fn the_oldest_kept_is_the_lowest_step_not_the_oldest_record() {
     ];
     let trim = plan(4, 3, &newest, one_input, None).unwrap();
     assert_eq!((trim.snapshot, trim.step), (40, 90));
-    assert_eq!(trim.input_floors, vec![91]);
+    assert_eq!(trim.input_floors, vec![90]);
     assert_eq!(trim.snap_floor, 30);
 }
 

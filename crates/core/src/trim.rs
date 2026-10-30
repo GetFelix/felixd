@@ -1,7 +1,9 @@
 //! Where a workload's history may be trimmed, by its last `keep` snapshots.
 //!
-//! A trim record on `.out` says which offsets of the snapshot stream, the
-//! merge log and each input no felixd reader of this workload needs again.
+//! A trim record on `.out` says below which offsets of the snapshot stream,
+//! the merge log and each input this workload's resume reads nothing.
+//! `felixd check` and `felixd replay` read from the start while records are
+//! there.
 //! Nothing is deleted yet: Felix has no call to trim a stream at an offset
 //! (Felix#1662). The record is what that deletion will follow.
 
@@ -26,15 +28,16 @@ pub struct Kept {
 pub struct Trim {
     /// The `.snap` offset of the oldest kept snapshot.
     pub snapshot: u64,
-    /// The last input that snapshot includes. Steps up to it are never run
-    /// again by a resume, a replay or a check of this workload.
+    /// The last input that snapshot includes. A resume of this workload
+    /// never steps an input up to it again.
     pub step: u64,
     /// `.snap` records below it are not read.
     pub snap_floor: u64,
     /// Merge log records below it are not read; 0 with one input.
     pub merge_floor: u64,
-    /// Per input, in the spec's order, the offset below which this workload
-    /// reads nothing.
+    /// Per input, in the spec's order, the offset below which this
+    /// workload's resume reads nothing. Other readers of a shared input may
+    /// need more.
     pub input_floors: Vec<u64>,
 }
 
@@ -53,9 +56,10 @@ pub enum Skip {
 }
 
 /// The trim a holder at `epoch` writes, from `newest`, the snapshots on
-/// `.snap` newest first (at least `keep` of them when there are). `merge_next`
-/// is the merge log's `next` at the entry of the oldest kept step, for a
-/// workload with several inputs; `None` with one input.
+/// `.snap` newest first (at least `keep` of them when there are).
+/// `merge_floors` gives the input floors at a merge log step, for a workload
+/// with several inputs: the entry's `next`, lowered to the entry's own record
+/// for its input. `None` with one input.
 ///
 /// The oldest kept snapshot is the one with the lowest step, not the oldest
 /// on the stream: a stale holder's snapshot can land after a newer holder's
@@ -64,7 +68,7 @@ pub fn plan(
     epoch: u64,
     keep: usize,
     newest: &[Kept],
-    merge_next: impl FnOnce(u64) -> Option<Vec<u64>>,
+    merge_floors: impl FnOnce(u64) -> Option<Vec<u64>>,
     previous: Option<&Trim>,
 ) -> Result<Trim, Skip> {
     let keep = keep.max(1);
@@ -84,11 +88,12 @@ pub fn plan(
         .flat_map(|k| std::iter::once(k.offset).chain(k.chunks.iter().copied()))
         .min()
         .expect("keep is at least 1");
-    let (merge_floor, input_floors) = match merge_next(oldest.step) {
-        // The entry at the step is kept, since its `next` is where each
-        // input carries on.
-        Some(next) => (oldest.step, next),
-        None => (0, vec![oldest.step + 1]),
+    // The record at the step itself is kept: a resume reads it back for the
+    // last append time (`snapshot_every_ms`), and the merge log entry there
+    // holds the `next` each input carries on from.
+    let (merge_floor, input_floors) = match merge_floors(oldest.step) {
+        Some(floors) => (oldest.step, floors),
+        None => (0, vec![oldest.step]),
     };
     let trim = Trim {
         snapshot: oldest.offset,

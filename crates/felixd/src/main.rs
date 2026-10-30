@@ -1,6 +1,7 @@
 //! The felixd command line.
 
 mod connection;
+mod ps;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,6 +11,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::agent::AgentConfig;
 use felixd_agent::check::check;
+use felixd_agent::drain;
 use felixd_agent::replay::{Target, diff, replay};
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
@@ -99,6 +101,44 @@ enum Command {
         /// state. With `--diff` this checks an upgrade.
         #[arg(long)]
         module: Option<String>,
+    },
+    /// Show each workload's state, holder, epoch, output stream tail and how
+    /// far it is along each input, and each node: whether it is up, the
+    /// leases it holds and whether it is draining. Reads the caches and
+    /// streams only, so it needs read grants and writes nothing.
+    Ps {
+        #[command(flatten)]
+        connection: Connection,
+        /// The workload to show. Repeat for several; every workload when
+        /// left out.
+        #[arg(long = "id")]
+        ids: Vec<String>,
+    },
+    /// Mark a node as draining. It stops each workload it holds and releases
+    /// the lease, so another node takes it over without waiting for the
+    /// lease to expire, and claims nothing until `felixd undrain`.
+    Drain {
+        #[command(flatten)]
+        connection: Connection,
+        /// The node, by the id it runs with (`felixd agent --node-id`).
+        node: String,
+        /// Wait until no live lease names the node and it has said it will
+        /// claim nothing, or it is not up.
+        #[arg(long)]
+        wait: bool,
+        /// With `--wait`, give up after this many seconds and exit with 1.
+        #[arg(long, default_value_t = 300, requires = "wait")]
+        timeout_secs: u64,
+        /// Replicas of the `drains` cache, if this creates it.
+        #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
+        replication_factor: u32,
+    },
+    /// Lift a node's drain mark, so it claims work again.
+    Undrain {
+        #[command(flatten)]
+        connection: Connection,
+        /// The node, by the id it runs with.
+        node: String,
     },
     /// Submit a workload: store its module, create its streams and start it.
     Run {
@@ -199,6 +239,76 @@ async fn main() -> Result<()> {
             }
             if found {
                 std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::Ps { connection, ids } => {
+            let report = felixd_agent::ps::ps(&connection.settings()?, &ids).await?;
+            print!("{}", ps::render(&report));
+            Ok(())
+        }
+        Command::Drain {
+            connection,
+            node,
+            wait,
+            timeout_secs,
+            replication_factor,
+        } => {
+            let settings = connection.settings()?;
+            drain::mark(&settings, &node, replication_factor).await?;
+            println!("node {node} is draining");
+            let report = felixd_agent::ps::ps(&settings, &[]).await?;
+            if !report
+                .nodes
+                .iter()
+                .any(|n| n.id != node && n.up && !n.draining)
+            {
+                eprintln!(
+                    "no other node is up and not draining, so its workloads wait until one is"
+                );
+            }
+            if !wait {
+                return Ok(());
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+            let felix = felixd_agent::felix::Felix::connect(&settings).await?;
+            let mut last = None;
+            loop {
+                // Each read is bounded so the timeout holds; a failed one is
+                // tried again until then.
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match tokio::time::timeout(left, drain::progress(&felix, &node)).await {
+                    Ok(Ok(progress)) if progress.done() => {
+                        println!("node {node} holds no leases and claims nothing");
+                        return Ok(());
+                    }
+                    Ok(Ok(progress)) => last = Some(progress),
+                    Ok(Err(error)) => eprintln!("reading the drain's progress: {error:#}"),
+                    Err(_) => {}
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    eprintln!("node {node} has not finished draining after {timeout_secs} s");
+                    if let Some(progress) = last {
+                        if !progress.held.is_empty() {
+                            eprintln!("it still holds {}", progress.held.join(", "));
+                        }
+                        if !progress.acknowledged {
+                            eprintln!(
+                                "it has not said it read this drain mark; a node of an older \
+                                 build, or one without read on the drains cache, never does"
+                            );
+                        }
+                    }
+                    std::process::exit(1);
+                }
+                tokio::time::sleep(Duration::from_millis(500).min(left)).await;
+            }
+        }
+        Command::Undrain { connection, node } => {
+            if drain::lift(&connection.settings()?, &node).await? {
+                println!("node {node} is no longer draining");
+            } else {
+                println!("node {node} was not draining");
             }
             Ok(())
         }

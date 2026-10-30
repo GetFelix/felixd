@@ -58,6 +58,9 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     if submission.snapshot_every == 0 {
         bail!("snapshot_every must be at least 1");
     }
+    if submission.keep_snapshots == Some(0) {
+        bail!("keep_snapshots must be at least 1");
+    }
     if submission.snapshot_every_ms == Some(0) {
         bail!("snapshot_every_ms must be at least 1");
     }
@@ -70,6 +73,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         names::LEASES,
         names::EPOCHS,
         names::NODES,
+        names::DRAINS,
     ] {
         admin::ensure_cache(settings, cache, kind).await?;
     }

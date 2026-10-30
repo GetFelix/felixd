@@ -152,8 +152,8 @@ workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input
 still gets snapshots and every node takes them at the same inputs. With
 `--keep-snapshots 3` the holder records, after each snapshot, what history
-before the oldest of the last three no resume, replay or check needs (a trim
-record on the output stream). Nothing is deleted until Felix can trim a stream
+before the oldest of the last three its resume no longer reads (a trim record
+on the output stream). Nothing is deleted until Felix can trim a stream
 at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
 (`wit/workload.wit`). Each step gets the input's stream, offset, append time,
@@ -180,6 +180,29 @@ effect request, a chunk over 4 MiB) or finds its streams in a state it can't res
 output stream, fenced by epoch like an output, so a node that was frozen
 while another took over can't fail it. Its class says whether it is poison or
 needs an operator.
+
+`felixd ps` shows where every workload is: its state (`running`, `waiting`
+for a holder, `needs-operator` with the reason, `failed` with the reason, or
+`stopped`), the node holding it and its epoch, the output stream's tail, and
+for each input the next offset it steps, the input's tail and the lag between
+them. A workload with several inputs gets a line per input, for how far each
+is merged, and one for its merge log. Below that it lists the nodes: up or
+not, leases held, `--max-workloads`, version and whether draining. It reads
+everything from the caches and streams, so it shows the same on any machine,
+and it writes nothing. A workload's position comes from its last output or
+snapshot, so one that writes nothing for a while shows behind where it is.
+
+`felixd drain node-1` takes a node out of service without waiting out lease
+TTLs: the node stops each workload it holds and deletes the lease, so another
+node claims it at once and carries on from the same input, and the node
+claims nothing more. `--wait` returns once it holds no lease and has said it
+claims nothing, or gives up after `--timeout-secs` (300) with exit code 1.
+Nodes need read on the `drains` cache; one that cannot read its mark claims
+nothing, and `ps` shows a mark it has not acknowledged as `pending`. `felixd undrain
+node-1` lets it claim again. Draining the only node that is up leaves its
+workloads `waiting`, and the command says so. The node reads its mark every
+second and again before each claim, so a node drained while it was stopped
+does not take work back when it wakes.
 
 What no node can get past without an operator, such as a module that is
 still missing after 30 seconds, a 0.1 module or a restore out of fuel, is
@@ -211,9 +234,20 @@ minutes. `counter` counts the records the producer publishes to `in`. Find
 the node that holds it, kill that node and watch another claim it:
 
 ```
-docker compose -f deploy/compose.yaml logs felixd-1 felixd-2 felixd-3 | grep claimed
+docker compose -f deploy/compose.yaml run --rm felixd ps
 docker kill felixd-node-1
-docker compose -f deploy/compose.yaml logs -f felixd-2 felixd-3
+docker compose -f deploy/compose.yaml run --rm felixd ps
+```
+
+`ps` names the holder `node-N`, whose container is `felixd-node-N`; kill that
+one. To move the workload off a node
+without killing it, drain it instead; the next `ps` shows another holder
+straight away:
+
+```
+docker compose -f deploy/compose.yaml run --rm felixd drain node-2 --wait
+docker compose -f deploy/compose.yaml run --rm felixd ps
+docker compose -f deploy/compose.yaml run --rm felixd undrain node-2
 ```
 
 Stop the producer, then check the output stream. Run `felixd check` as often
@@ -410,7 +444,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines and several inputs done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps` and `drain` done; metrics not yet |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates

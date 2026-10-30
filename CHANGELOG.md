@@ -2,17 +2,32 @@
 
 ## Unreleased
 
+- `felixd ps` shows each workload's state (running, waiting, needs operator
+  with the reason, failed, stopped), holder, epoch, output stream tail and how
+  far it is along each input, and each node, all read from records (#17).
+- `felixd drain <node>` makes a node release its leases, so other nodes take
+  its workloads over without waiting for them to expire, and claim nothing
+  until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`
+  cache. `--wait` waits until the node holds nothing and says it claims
+  nothing, up to `--timeout-secs`.
+- Upgrading: a node must be able to read the `drains` cache, or it claims
+  nothing. Grant node credentials read on `drains` before upgrading the
+  nodes; `felixd ps` then shows a drain mark as `pending` on any node that
+  has not said it read it.
 - `felixd run --keep-snapshots K` keeps a workload's last K snapshots. After
   each snapshot of its own, the holder appends a trim record to the output
-  stream naming what no resume, replay or check of the workload reads again:
-  the snapshot stream below the oldest kept snapshot's records and chunks, the
-  merge log before that snapshot's step, and each input before where that
-  snapshot carries on. It is fenced by the lease epoch like an output.
-  Nothing is deleted yet: Felix has no call to trim a stream at an offset
-  ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). The output
-  stream itself is not trimmed. A trim record is a new output record kind (7),
-  so upgrade every node before setting `--keep-snapshots` on a workload that
-  another workload reads.
+  stream naming the floors below which this workload's resume reads nothing:
+  on the snapshot stream, the merge log and each input. It is fenced by the
+  lease epoch like an output. Nothing is deleted yet: Felix has no call to
+  trim a stream at an offset
+  ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). `felixd
+  check` and `felixd replay` still read from the start. The output stream is
+  not trimmed, and a shared input will be trimmed only below every reader's
+  floor (#150).
+- Upgrading: a trim record is a new output record kind (7). A node from an
+  earlier build that takes over a workload with one fails it as poison, and
+  one whose workload reads that output stream leaves it to an operator. Upgrade
+  every node before setting `--keep-snapshots`.
 - A record a running workload needs that Felix no longer holds, after
   retention passed it, now leaves the workload to an operator (reason 9,
   history trimmed) instead of retrying. `felixd replay` and `felixd check`

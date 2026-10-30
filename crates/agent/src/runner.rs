@@ -406,6 +406,9 @@ async fn run(
         false => None,
     };
     let output_tail = log.tail();
+    if faults::enforce_trim_floors() {
+        enforce_floors(felix, id, spec, output_tail).await?;
+    }
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
         runtime
@@ -731,8 +734,34 @@ fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
     .into())
 }
 
-/// The merge log's `next` at the entry at `step`: where each input carries
-/// on after it.
+/// Under the `enforce-trim-floors` fault, refuses reads below the floors of
+/// the last trim record on `.out`, as if they were deleted.
+async fn enforce_floors(felix: &Felix, id: &str, spec: &WorkloadSpec, tail: u64) -> Result<()> {
+    let records = felix.read_range(&spec.output, 0, tail).await?;
+    let Some(trim) = records
+        .iter()
+        .filter_map(|r| output::decode(&r.payload).ok()?.trim())
+        .last()
+    else {
+        return Ok(());
+    };
+    faults::set_floor(&names::snapshot_stream(id), trim.snap_floor);
+    if spec.merged() {
+        faults::set_floor(&names::merge_stream(id), trim.merge_floor);
+    }
+    for (input, &floor) in spec.inputs.iter().zip(&trim.input_floors) {
+        faults::set_floor(input, floor);
+    }
+    tracing::info!(
+        workload = id,
+        ?trim,
+        "reads below the trim floors are refused"
+    );
+    Ok(())
+}
+
+/// The input floors at merge log step `step`: the entry's `next`, where
+/// each input carries on, with the entry's own input lowered to its record.
 async fn merge_next_at(felix: &Felix, spec: &WorkloadSpec, step: u64) -> Result<Vec<u64>> {
     let id = names::output_of(&spec.output).context("the output is not a workload's")?;
     let stream = names::merge_stream(id);
@@ -744,7 +773,14 @@ async fn merge_next_at(felix: &Felix, spec: &WorkloadSpec, step: u64) -> Result<
     })?;
     let decoded = merge::decode(&record.payload)
         .map_err(|e| poison(format!("merge log at {stream}:{step}: {e}")))?;
-    Ok(decoded.next().to_vec())
+    let mut floors = decoded.next().to_vec();
+    // A resume reads the stepped record back for its append time.
+    if let Some(entry) = decoded.entry()
+        && let Some(floor) = floors.get_mut(usize::from(entry.input))
+    {
+        *floor = (*floor).min(entry.offset);
+    }
+    Ok(floors)
 }
 
 /// Runs inputs through the workload in order, writing what they produce.
@@ -869,8 +905,8 @@ impl Steps<'_> {
         self.trim().await
     }
 
-    /// With `keep_snapshots` set, records on `.out` what history before the
-    /// oldest kept snapshot no reader of this workload needs again. It goes
+    /// With `keep_snapshots` set, records on `.out` the floors below the
+    /// oldest kept snapshot that this workload's resume no longer reads. It goes
     /// on `.out` with `publish_if` at the tail, so a stale holder's is
     /// refused like its outputs. It deletes nothing (Felix#1662).
     async fn trim(&mut self) -> Result<()> {
@@ -1030,10 +1066,14 @@ async fn last_input_stamp(
     let mut window = 16;
     while end > 0 {
         let from = end.saturating_sub(window);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
             if !(skip_claims && output::passed_over(&record.payload, output::DEFAULT_NAME)) {
                 return Ok(Some(record.timestamp_micros));
             }
+        }
+        if ended {
+            break;
         }
         end = from;
         window = window.saturating_mul(8);
@@ -1053,7 +1093,8 @@ async fn last_merged_stamp(
     let mut window = 16;
     while end > 0 {
         let from = end.saturating_sub(window);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
             let decoded = merge::decode(&record.payload)
                 .map_err(|e| merge_unreadable(stream, record.offset, e))?;
             let Some(entry) = decoded.entry() else {
@@ -1075,6 +1116,9 @@ async fn last_merged_stamp(
             }
             return Ok(Some(entry.timestamp_micros));
         }
+        if ended {
+            break;
+        }
         end = from;
         window = window.saturating_mul(8);
     }
@@ -1083,7 +1127,7 @@ async fn last_merged_stamp(
 
 /// The last output or rejection below `tail` and where it is, passing over
 /// claims and failures.
-async fn last_output(
+pub(crate) async fn last_output(
     felix: &Felix,
     stream: &str,
     tail: u64,
@@ -1092,12 +1136,16 @@ async fn last_output(
     let mut window = 16;
     while end > 0 {
         let from = end.saturating_sub(window);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
             let found = output::decode(&record.payload)
                 .map_err(|e| poison(format!("output at {stream}:{}: {e}", record.offset)))?;
             if let Some(written) = found.written() {
                 return Ok(Some((record.offset, written)));
             }
+        }
+        if ended {
+            break;
         }
         end = from;
         window = window.saturating_mul(8);

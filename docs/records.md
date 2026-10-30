@@ -102,9 +102,10 @@ an input, so the workload is recorded as needing an operator (reason 7), and upg
 fixes it. That includes kinds 5 and 6 read by a build from before them, so upgrade every node before
 a workload can write them. An output that does not decode is poison.
 
-A trim, kind 7, says which history no resume, replay or check of the workload reads again
-([design.md](design.md#retention)). Its holder appends it after a snapshot of its own when the spec
-sets `keep_snapshots`, with `publish_if` at the tail like an output. It continues with:
+A trim, kind 7, names the floors below which this workload's resume reads nothing
+([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start
+while the records are there. Its holder appends it after a snapshot of its own when the spec sets
+`keep_snapshots`, with `publish_if` at the tail like an output. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -113,10 +114,11 @@ sets `keep_snapshots`, with `publish_if` at the tail like an output. It continue
 | 8 | the `.snap` floor: the lowest offset a kept snapshot's manifest or chunks sit at |
 | 8 | the merge log floor, the step's own entry, kept for its `next`; 0 with one input |
 | 2 | input count |
-| 8 each | per input, in the spec's order, the offset before which the workload reads nothing |
+| 8 each | per input, in the spec's order, this workload's floor: the record the step read with one input; the entry's `next`, lowered to the entry's own record, with several |
 
 Bytes after the last floor are refused. Readers pass over a trim like a claim, and only its epoch is
-checked. Nothing is deleted at these floors yet (Felix #1662).
+checked. Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's:
+an input shared with other readers is deleted only below all of theirs (#150).
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
@@ -206,7 +208,7 @@ the stream is the spec history. Records are never rewritten; `failed` stays in t
 
 ## Caches
 
-Values in `workloads`, `leases`, `epochs` and `nodes` are JSON of the form
+Values in `workloads`, `leases`, `epochs`, `nodes` and `drains` are JSON of the form
 `{"format": 1, "value": ...}`, each with its own format number. A reader refuses a format it does
 not know. The value sits under its own key so that a build from before formats, which reads the
 fields at the top, refuses it instead of reading what it can. A value with no `format` is from such
@@ -224,7 +226,12 @@ needs an operator). A spec without `limits` gets the defaults. A failed spec
   One with several has `inputs`, a list of 2 to 64 distinct names and no `input`, so a build that
   reads only `input` refuses it.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a number.
-- A node has `version`, `max_workloads` and `held`.
+- A node has `version`, `max_workloads` and `held`, and `draining`, the nonce of the drain mark
+  it has read, once it also has no claim under way. `draining` is left out when there is none.
+- A drain mark is `nonce`, a number other than 0 that `felixd drain` picks anew each time, under a
+  node's id, with no TTL. A mark without `nonce` reads as 0, which no node acknowledges. `felixd drain` writes it and
+  `felixd undrain` deletes it. While it is there the node gives up its leases and claims nothing.
+  A mark in a format this build does not know still counts as a drain.
 
 ## The resume fold
 

@@ -57,15 +57,15 @@ async fn a_crash_with_a_trim_in_flight_resumes_and_checks() {
         assert!(after.snap_floor >= before.snap_floor, "{found:?}");
     }
     for (_, trim) in &found {
-        // The record names a snapshot of the step it says, and its input
-        // floor is the next input.
+        // The record names a snapshot of the step it says, and keeps the
+        // input it stepped last.
         let (_, record) = snapshots
             .iter()
             .find(|(offset, _)| *offset == trim.snapshot)
             .expect("the trim names a snapshot record");
         let taken = snapshot::decode(record).unwrap().taken().unwrap();
         assert_eq!(taken.header.input_offset, trim.step);
-        assert_eq!(trim.input_floors, vec![trim.step + 1]);
+        assert_eq!(trim.input_floors, vec![trim.step]);
         assert!(trim.snap_floor <= trim.snapshot);
     }
     let (ok, report) = t.check(&["--id", ID, "--complete"]);
@@ -127,4 +127,50 @@ async fn a_stale_holders_trim_is_refused_by_the_claim() {
         "a stale holder's trim landed: {found:?}"
     );
     assert!(frozen.alive(), "the frozen node exited");
+}
+
+/// Whether a needs-operator record is on the output stream.
+async fn parked(t: &common::TestFelix) -> bool {
+    t.read_all(OUTPUT)
+        .await
+        .iter()
+        .any(|(_, r)| matches!(output::decode(r).unwrap(), Record::NeedsOperator { .. }))
+}
+
+/// A resume after a trim reads nothing below its floors, the last input's
+/// append time for `snapshot_every_ms` included: with every read below them
+/// refused, as once they are deleted, the next holder carries on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_reads_nothing_below_the_trim_floors() {
+    let Some(t) = test_felix().await else { return };
+    let module = t
+        .submit(
+            "counter",
+            &[
+                "--snapshot-every",
+                "5",
+                "--snapshot-every-ms",
+                "3600000",
+                "--keep-snapshots",
+                "1",
+            ],
+        )
+        .await;
+    t.publish_all(INPUT, (0..22).map(count)).await;
+    let mut first = t.start_agent();
+    eventually("a trim past the start", Duration::from_secs(60), || async {
+        trims(&t)
+            .await
+            .iter()
+            .any(|(_, trim)| trim.step >= 14)
+            .then_some(())
+    })
+    .await;
+    first.kill();
+
+    let mut next = t.start_agent_with_faults("enforce-trim-floors=1");
+    t.publish_all(INPUT, (22..30).map(count)).await;
+    assert_uninterrupted(&t, &module, 30).await;
+    next.kill();
+    assert!(!parked(&t).await, "the resume read below the floors");
 }

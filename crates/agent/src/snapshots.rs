@@ -63,9 +63,10 @@ pub(crate) async fn latest(felix: &Felix, stream: &str, tail: u64) -> Result<Lat
     while end > 0 {
         let from = end.saturating_sub(window);
         let records = felix
-            .read_range(stream, from, end)
+            .read_back(stream, from, end)
             .await
             .map_err(ReadError::Felix)?;
+        let (records, ended) = records;
         for record in records.iter().rev() {
             let at = |e: &dyn std::fmt::Display| {
                 ReadError::Bad(format!("snapshot at {stream}:{}: {e}", record.offset))
@@ -76,6 +77,9 @@ pub(crate) async fn latest(felix: &Felix, stream: &str, tail: u64) -> Result<Lat
                 latest.snapshot = Some(found);
                 return Ok(latest);
             }
+        }
+        if ended {
+            break;
         }
         end = from;
         window = window.saturating_mul(8);
@@ -97,9 +101,10 @@ pub(crate) async fn newest(
     while end > 0 && found.len() < keep {
         let from = end.saturating_sub(window);
         let records = felix
-            .read_range(stream, from, end)
+            .read_back(stream, from, end)
             .await
             .map_err(ReadError::Felix)?;
+        let (records, ended) = records;
         for record in records.iter().rev() {
             let snapshot = Snapshot::decode(&record.payload).map_err(|e| {
                 ReadError::Bad(format!("snapshot at {stream}:{}: {e}", record.offset))
@@ -119,6 +124,9 @@ pub(crate) async fn newest(
                     break;
                 }
             }
+        }
+        if ended {
+            break;
         }
         end = from;
         window = window.saturating_mul(8);

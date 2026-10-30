@@ -62,4 +62,5 @@ c stop producer
 caught_up() { c run --rm -T felixd check --complete >/tmp/felixd-check.out 2>&1; }
 within 90 caught_up || { cat /tmp/felixd-check.out; echo "felixd check found problems"; c logs --no-color; exit 1; }
 cat /tmp/felixd-check.out
+c run --rm -T felixd ps
 echo "failover ok"

@@ -15,6 +15,8 @@ binary depends on it.
 | `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, and `wl.<id>.merge` for several inputs, appends the spec record to `sys.specs` and points `workloads` at it. |
 | `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ, and checks a merge log against its inputs. |
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
+| `ps` | What `felixd ps` does: each workload's state, holder and positions, and each node, read from the caches and streams. |
+| `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. |
 
 Behaviour that matters:
@@ -40,6 +42,11 @@ Behaviour that matters:
 - **Resume.** The owner restores the newest snapshot, steps the inputs the output stream already
   covers and compares each result with the record in its place (`felixd_core::resume`), then
   carries on. Each output lands once through lost answers, partial batches and crashes.
+- **Drain.** Each agent reads its own drain mark every second and again right before each claim.
+  While marked it stops what it holds, deletes those leases so another node can claim at once, and
+  claims nothing; once no claim is under way it says `draining` in `nodes`. A failed read means no
+  claim, and a broker that does not know the `drains` cache counts as no mark only until the node
+  has once found it. The output stays fenced as in any takeover.
 - **Failure.** A trap, running out of fuel or `poison` writes a failure record, then `failed` into
   the spec, and the workload stops. A rejection does not fail it. A component of the old contract
   is left unclaimed rather than failed.

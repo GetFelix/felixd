@@ -530,8 +530,13 @@ async fn a_merged_workload_trims_by_the_merge_log() {
             .find(|(at, _)| *at == trim.step)
             .expect("the trim's step is on the merge log");
         let record = merge::decode(entry).unwrap();
-        assert!(record.entry().is_some(), "{trim:?} names a claim");
-        assert_eq!(trim.input_floors, record.next(), "{trim:?}");
+        let entry = record.entry().expect("the trim's step is an entry");
+        // Each input carries on from `next`; the entry's own record is kept
+        // for its append time.
+        let mut want = record.next().to_vec();
+        let own = usize::from(entry.input);
+        want[own] = want[own].min(entry.offset);
+        assert_eq!(trim.input_floors, want, "{trim:?}");
     }
 }
 
@@ -541,4 +546,51 @@ async fn trims(t: &TestFelix) -> Vec<felixd_core::trim::Trim> {
         .iter()
         .filter_map(|(_, r)| output::decode(r).unwrap().trim())
         .collect()
+}
+
+/// As `a_resume_reads_nothing_below_the_trim_floors` in `trim.rs`, for a
+/// merged workload: the merge log entry at the step and its input record are
+/// kept for the resume's append time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit_with(
+        &t,
+        &[
+            "--snapshot-every",
+            "4",
+            "--snapshot-every-ms",
+            "3600000",
+            "--keep-snapshots",
+            "1",
+        ],
+    )
+    .await;
+    for _ in 0..10 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    let mut first = t.start_agent();
+    eventually("a trim past the start", Duration::from_secs(60), || async {
+        trims(&t)
+            .await
+            .iter()
+            .any(|trim| trim.step >= 8)
+            .then_some(())
+    })
+    .await;
+    first.kill();
+    let _next = t.start_agent_with_faults("enforce-trim-floors=1");
+    for _ in 0..5 {
+        t.publish_all(PAYMENTS, [meta()]).await;
+        t.publish_all(ORDERS, [meta()]).await;
+    }
+    assert_merged(&t, &module, 30).await;
+    let parked = t.read_all(OUTPUT).await.iter().any(|(_, r)| {
+        matches!(
+            output::decode(r).unwrap(),
+            output::Record::NeedsOperator { .. }
+        )
+    });
+    assert!(!parked, "the resume read below the floors");
 }

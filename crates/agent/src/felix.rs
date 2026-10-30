@@ -31,6 +31,15 @@ pub struct Felix {
 
 pub use felix_client::{ClusterSubscription as Subscription, Event};
 
+/// What [`Felix::cache_lookup`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// The broker does not know the cache, right now.
+    NoCache,
+    /// The value under the key, if any.
+    Value(Option<Bytes>),
+}
+
 impl Felix {
     pub async fn connect(settings: &Settings) -> Result<Felix> {
         let roots = match &settings.ca_file {
@@ -262,6 +271,14 @@ impl Felix {
         from: u64,
         end: u64,
     ) -> Result<(Vec<StreamRecord>, u64)> {
+        if let Some(oldest) = crate::faults::trimmed_below(stream, from) {
+            return Err(Trimmed {
+                stream: stream.to_owned(),
+                requested: from,
+                oldest,
+            }
+            .into());
+        }
         let page = self
             .client
             .read(
@@ -278,15 +295,38 @@ impl Felix {
         Ok((page.records, page.next_offset))
     }
 
+    /// The records at `from..end` for a reader walking back from a tail.
+    /// When Felix has trimmed below `end`, it reads from the oldest offset
+    /// still held instead, and says the walk ends there, so a reader that
+    /// only needs records above a trim point never asks for one below it.
+    pub(crate) async fn read_back(
+        &self,
+        stream: &str,
+        from: u64,
+        end: u64,
+    ) -> Result<(Vec<StreamRecord>, bool)> {
+        match self.read_range(stream, from, end).await {
+            Ok(records) => Ok((records, from == 0)),
+            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
+                Some(oldest) if oldest > from && oldest >= end => Ok((Vec::new(), true)),
+                Some(oldest) if oldest > from => {
+                    Ok((self.read_range(stream, oldest, end).await?, true))
+                }
+                _ => Err(error),
+            },
+        }
+    }
+
     /// The last record of the stream, given its `tail`.
     pub async fn last_record(&self, stream: &str, tail: u64) -> Result<Option<StreamRecord>> {
         let mut window = 16;
         loop {
             let from = tail.saturating_sub(window);
-            if let Some(last) = self.read_range(stream, from, tail).await?.pop() {
+            let (mut records, ended) = self.read_back(stream, from, tail).await?;
+            if let Some(last) = records.pop() {
                 return Ok(Some(last));
             }
-            if from == 0 {
+            if ended {
                 return Ok(None);
             }
             window *= 8;
@@ -306,6 +346,14 @@ impl Felix {
 
     /// Subscribes to the stream starting at input offset `from`.
     pub async fn subscribe_from(&self, stream: &str, from: u64) -> Result<Subscription> {
+        if let Some(oldest) = crate::faults::trimmed_below(stream, from) {
+            return Err(Trimmed {
+                stream: stream.to_owned(),
+                requested: from,
+                oldest,
+            }
+            .into());
+        }
         self.client
             .subscribe_from(
                 &self.tenant,
@@ -342,6 +390,49 @@ impl Felix {
                 felix_client::CacheWatchFilter::Prefix(String::new()),
             )
             .await
+    }
+
+    /// The value under `key`, telling a cache the broker does not know
+    /// apart from a missing key, and without [`Felix::cache_get`]'s wait for
+    /// a cache that is not served yet. A broker that is restarting or has
+    /// not loaded the cache answers the same way as for one never created,
+    /// so [`Lookup::NoCache`] is not proof that the cache does not exist.
+    pub async fn cache_lookup(&self, cache: &str, key: &str) -> Result<Lookup> {
+        match self
+            .client
+            .cache_get(&self.tenant, &self.namespace, cache, key)
+            .await
+        {
+            Ok(value) => Ok(Lookup::Value(value)),
+            Err(error) if not_found(&error) => Ok(Lookup::NoCache),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every live entry of `cache`, sorted by key, or none when the cache
+    /// does not exist.
+    pub async fn entries(&self, cache: &str) -> Result<Vec<(String, Bytes)>> {
+        let mut watch = match self.watch_retained(cache).await {
+            Ok(watch) => watch,
+            Err(error) if not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let count = watch
+            .retained_count()
+            .with_context(|| format!("the {cache} watch did not say how many entries it holds"))?;
+        let mut entries = Vec::new();
+        while (entries.len() as u64) < count {
+            match watch.recv().await {
+                Some(felix_client::CacheWatchItem::Change(change)) => {
+                    if let Some(value) = change.value {
+                        entries.push((change.key, value));
+                    }
+                }
+                _ => bail!("the {cache} watch ended early"),
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
     }
 }
 
@@ -384,6 +475,12 @@ where
             result => return result,
         }
     }
+}
+
+fn not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<BrokerError>()
+        .is_some_and(|broker| broker.code == ErrorCode::NotFound)
 }
 
 fn not_ready(error: &anyhow::Error) -> bool {

@@ -7,6 +7,9 @@
 //!   sent, before its answer is acted on. The record may have landed.
 //! - `freeze-before-trim=N`: stop the process with `SIGSTOP` just before its
 //!   Nth trim record is sent. It carries on at `SIGCONT`.
+//! - `enforce-trim-floors=1`: when a run starts, read the workload's last
+//!   trim record and refuse every read or subscription below its floors with
+//!   the error Felix gives for trimmed history, as if they were deleted.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-append-sent=N`: abort once the Nth output append has been
@@ -68,6 +71,15 @@
 //! - `ignore-lease-deletes=1`: ignore every delete the leases watch delivers,
 //!   including the broker's expiry events, so takeover has to go by the
 //!   lease's expiry time alone.
+//! - `miss-drain-marks=1`: the agent's regular read of its drain mark never
+//!   finds one, as when that read has not come round yet, so only the read
+//!   before each claim sees it.
+//! - `drains-gone-after-mark=1`: once a read has found this node's drain
+//!   mark, every later read is answered as if the broker did not know the
+//!   `drains` cache, as during a broker restart.
+//! - `drain-read-error=1`: every read of the drain mark fails.
+//! - `delay-claim-after-drain-read=MS`: wait MS milliseconds between a
+//!   claim's read of the drain mark and the claim itself.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -163,6 +175,31 @@ pub(crate) fn skip_snapshot() -> bool {
             (n < skip).then_some(n + 1)
         })
         .is_ok()
+}
+
+/// Floors below which reads are refused, by stream, under
+/// `enforce-trim-floors`.
+static FLOORS: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether to act as if history below each trim floor were deleted.
+pub(crate) fn enforce_trim_floors() -> bool {
+    fault("enforce-trim-floors") == Some(1)
+}
+
+/// Refuses reads of `stream` below `floor` from now on.
+pub(crate) fn set_floor(stream: &str, floor: u64) {
+    let mut floors = FLOORS.lock().unwrap_or_else(|e| e.into_inner());
+    floors.retain(|(s, _)| s != stream);
+    floors.push((stream.to_owned(), floor));
+}
+
+/// The oldest offset `stream` still holds, if a read from `from` is below it.
+pub(crate) fn trimmed_below(stream: &str, from: u64) -> Option<u64> {
+    let floors = FLOORS.lock().unwrap_or_else(|e| e.into_inner());
+    floors
+        .iter()
+        .find(|(s, floor)| s == stream && from < *floor)
+        .map(|(_, floor)| *floor)
 }
 
 pub(crate) fn before_trim() {
@@ -324,6 +361,37 @@ pub(crate) fn drop_watch(key: &str, written: bool) -> Option<std::time::Duration
 
 pub(crate) fn ignore_lease_delete() -> bool {
     fault("ignore-lease-deletes") == Some(1)
+}
+
+pub(crate) fn drain_read_error() -> bool {
+    fault("drain-read-error") == Some(1)
+}
+
+/// What a read of the drain mark returns, given what Felix answered.
+pub(crate) fn drain_lookup(found: crate::felix::Lookup) -> crate::felix::Lookup {
+    use crate::felix::Lookup;
+    static MARK_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if fault("drains-gone-after-mark") != Some(1) {
+        return found;
+    }
+    if MARK_FOUND.load(Ordering::SeqCst) {
+        return Lookup::NoCache;
+    }
+    if matches!(found, Lookup::Value(Some(_))) {
+        MARK_FOUND.store(true, Ordering::SeqCst);
+    }
+    found
+}
+
+/// Waits between a claim's read of the drain mark and the claim.
+pub(crate) async fn after_drain_read() {
+    if let Some(ms) = fault("delay-claim-after-drain-read") {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
+
+pub(crate) fn miss_drain_marks() -> bool {
+    fault("miss-drain-marks") == Some(1)
 }
 
 pub(crate) fn during_compile() {
