@@ -429,7 +429,7 @@ async fn run(
     not_behind(
         &spec.input,
         felix.tail(&spec.input).await?,
-        resume.next_input,
+        resume.stepped_to(),
     )?;
     if let Some(snapshot) = snapshot.as_ref().filter(|_| resume.restore) {
         let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
@@ -526,8 +526,8 @@ async fn run(
     }
 }
 
-/// Refuses an input stream whose `tail` is below `next_input`, the next
-/// input to step. Stepping on would treat another stream's records as the
+/// Refuses an input stream whose `tail` is below `next_input`, the input
+/// after the last one stepped. Stepping on would treat another stream's records as the
 /// rest of this one. A recreated stream that has already grown past
 /// `next_input` is not caught here; that needs incarnations.
 fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {

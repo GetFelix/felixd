@@ -424,9 +424,10 @@ upstream's stream name, so pointing it at another upstream once it has output
 is refused by `felixd run` and left to an operator by an agent. Recreating an
 upstream under the same id is the incarnation problem ([Names and
 incarnations](#names-and-incarnations)), solved only in part: a node that
-finds its input ending below the next input it would step, when it resumes
-or when its subscription goes back below it, records needs-operator. A
-recreated input that has already grown past that offset is not detected and
+finds its input ending before the inputs its output or snapshot shows it
+stepped, when it resumes or when its subscription goes back below its
+position, records needs-operator. A recreated input that has already grown
+past that offset is not detected and
 is read as if it continued the old one, until Felix exposes incarnations to
 clients (#133).
 
