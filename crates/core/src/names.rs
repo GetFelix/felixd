@@ -17,6 +17,13 @@ pub const DRAINS: &str = "drains";
 
 /// Stream of spec records: every version of every workload's spec.
 pub const SPECS: &str = "sys.specs";
+/// Stream of node facts: what each node says about itself while a scheduler
+/// runs ([`crate::schedule`]).
+pub const FACTS: &str = "sys.facts";
+
+/// The id of the scheduler workload, whose outputs are placement
+/// assignments. It reads [`SPECS`] and [`FACTS`].
+pub const SCHEDULER: &str = "scheduler";
 
 const MAX_ID_LEN: usize = 64;
 

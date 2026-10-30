@@ -6,12 +6,21 @@ use felixd_agent::ps::Report;
 use felixd_core::status::State;
 
 /// The report as two tables, workloads then nodes, each followed by the
-/// details that do not fit in a column.
+/// details that do not fit in a column. While a scheduler runs, the
+/// workloads table has an ASSIGNED column: the node the scheduler assigned
+/// and the offset of that assignment on its output stream.
 pub(crate) fn render(report: &Report) -> String {
     let mut out = String::new();
-    let mut rows = vec![row(&[
+    let mut header = row(&[
         "WORKLOAD", "STATE", "HOLDER", "EPOCH", "OUTPUTS", "INPUT", "NEXT", "TAIL", "LAG",
-    ])];
+    ]);
+    // Columns before the input ones, which continuation lines leave blank.
+    let mut leading = 5;
+    if report.scheduled {
+        header.insert(3, "ASSIGNED".to_owned());
+        leading += 1;
+    }
+    let mut rows = vec![header];
     let mut details = Vec::new();
     for w in &report.workloads {
         let holder = match &w.holder {
@@ -42,10 +51,17 @@ pub(crate) fn render(report: &Report) -> String {
             epoch,
             w.outputs.to_string(),
         ];
+        if report.scheduled {
+            let assigned = match &w.assigned {
+                Some(placed) => format!("{}@{}", placed.node, placed.offset),
+                None => "-".to_owned(),
+            };
+            cells.insert(3, assigned);
+        }
         cells.extend(first);
         rows.push(cells);
         for more in lines {
-            let mut cells = vec![String::new(); 5];
+            let mut cells = vec![String::new(); leading];
             cells.extend(more);
             rows.push(cells);
         }

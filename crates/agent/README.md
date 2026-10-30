@@ -11,11 +11,12 @@ binary depends on it.
 
 | Module | Does |
 |---|---|
-| `agent` | `run` watches the `workloads` and `leases` caches, writes this node to `nodes`, and runs each workload it manages to claim while the lease holds. `AgentConfig` sets the node id, lease timing and placement. |
+| `agent` | `run` watches the `workloads` and `leases` caches, writes this node to `nodes`, and runs each workload it manages to claim while the lease holds. `AgentConfig` sets the node id, lease timing, placement and the assignment bound. |
+| `assignments` | While a scheduler runs: follows its assignments on `wl.scheduler.out`, and appends this node's facts to `sys.facts`. `read` returns the assignments in force, for `ps`. |
 | `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, and `wl.<id>.merge` for several inputs, appends the spec record to `sys.specs` and points `workloads` at it. |
 | `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ, and checks a merge log against its inputs. |
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
-| `ps` | What `felixd ps` does: each workload's state, holder and positions, and each node, read from the caches and streams. |
+| `ps` | What `felixd ps` does: each workload's state, holder, assignment and positions, and each node, read from the caches and streams. |
 | `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. |
 
@@ -47,6 +48,15 @@ Behaviour that matters:
   claims nothing; once no claim is under way it says `draining` in `nodes`. A failed read means no
   claim, and a broker that does not know the `drains` cache counts as no mark only until the node
   has once found it. The output stays fenced as in any takeover.
+- **Placement.** With no scheduler, first claim wins: every node with room claims a free workload
+  after a random delay of up to `--claim-delay-ms`. While the `scheduler` workload runs, a node
+  claims what is assigned to it at once, leaves a workload assigned to another node that is up in
+  `nodes` (or not assigned yet) alone for up to `--assignment-bound-ms`, and then falls back to
+  first claim wins. A workload assigned to a node that is not up is first claim wins at once.
+  Every claim still goes through the lease and the fence, so an assignment can delay work but
+  never makes two owners. Each node appends a fact (its id, its interval, `--max-workloads` and
+  whether it is draining) to `sys.facts` once a lease TTL, and at once when it starts or stops
+  draining.
 - **Failure.** A trap, running out of fuel or `poison` writes a failure record, then `failed` into
   the spec, and the workload stops. A rejection does not fail it. A component of the old contract
   is left unclaimed rather than failed.

@@ -9,6 +9,8 @@
 //! - [`ps`]: what `felixd ps` does.
 //! - [`metrics`]: the Prometheus endpoint and what feeds it.
 //! - [`drain`]: drain marks, which make a node give up its leases.
+//! - [`assignments`]: the scheduler's assignments as a node follows them, and
+//!   the node facts it writes for the scheduler.
 //! - [`agent`]: watches the workloads and leases caches and runs what it claims.
 //! - [`lease`]: claims, renews and releases a workload's lease.
 //! - [`runner`]: runs one workload: resume, then step, append and snapshot.
@@ -23,6 +25,7 @@
 
 pub mod admin;
 pub mod agent;
+pub mod assignments;
 pub mod check;
 pub mod drain;
 pub mod felix;

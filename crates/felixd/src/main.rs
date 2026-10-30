@@ -52,6 +52,12 @@ enum Command {
         /// workload, so that the first node to see it does not take everything.
         #[arg(long, default_value_t = placement::DEFAULT_CLAIM_DELAY.as_millis() as u64)]
         claim_delay_ms: u64,
+        /// While a scheduler runs, how long, in milliseconds, a free workload
+        /// is left to the node it is assigned to, or waits to be assigned,
+        /// before this node claims it by first claim wins. A workload
+        /// assigned to a node that is not up is claimed at once.
+        #[arg(long, default_value_t = placement::DEFAULT_ASSIGNMENT_BOUND.as_millis() as u64)]
+        assignment_bound_ms: u64,
         /// Serve Prometheus metrics at `/metrics` on this address, such as
         /// 127.0.0.1:9464. Off when left out. Plain HTTP with no
         /// authentication: it names workloads and streams, so keep it on an
@@ -213,6 +219,7 @@ async fn main() -> Result<()> {
             lease_ttl_ms,
             max_workloads,
             claim_delay_ms,
+            assignment_bound_ms,
             metrics_bind,
             metrics_max_workloads,
         } => {
@@ -232,6 +239,7 @@ async fn main() -> Result<()> {
                     max_workloads,
                     max_delay: Duration::from_millis(claim_delay_ms),
                 },
+                assignment_bound: Duration::from_millis(assignment_bound_ms),
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
         }

@@ -24,7 +24,7 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
 | `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
 | `felixd replay` | Rebuilds a workload as of `--to` and prints what its `inspect` returns, or with `--diff` compares a replay with the recorded outputs. Writes nothing. |
-| `felixd ps` | Shows each workload's state, holder, epoch, output stream tail and position on each input, and each node. Reads only. |
+| `felixd ps` | Shows each workload's state, holder, assignment (while a scheduler runs), epoch, output stream tail and position on each input, and each node. Reads only. |
 | `felixd drain <node>` | Marks a node as draining: it releases its leases so other nodes take its workloads over at once, and claims nothing. |
 | `felixd undrain <node>` | Lifts the mark, so the node claims work again. |
 
@@ -33,8 +33,9 @@ Flags of `run`: `--id`, `--input` (up to 64), `--snapshot-every` (1000), `--snap
 The limits are stored in the spec, so every node runs the workload under the same ones.
 
 Flags of `agent`: `--node-id` (`FELIXD_NODE_ID`; host name and process id by default),
-`--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64)
-and `--claim-delay-ms` (1000).
+`--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64),
+`--claim-delay-ms` (1000) and `--assignment-bound-ms` (15000), how long a free workload is left to
+the node the scheduler assigned it to, or waits for an assignment, before first claim wins.
 
 Flags of `check`: `--id` (repeat for several; every workload by default), `--complete`, which
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every
@@ -57,6 +58,17 @@ Connection flags, each also read from an environment variable: `--brokers` (`FEL
 `--controlplane-url` (`FELIX_CONTROLPLANE_URL`) and `--controlplane-token-file`
 (`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `run` and `drain`). A node needs read on the `drains`
 cache, or it claims nothing. `felixd <command> --help` lists them all.
+
+To place workloads with the scheduler, submit it as the workload `scheduler` reading `sys.specs`
+and `sys.facts` (the container image has it at `/usr/local/share/felixd/scheduler.wasm`):
+
+```
+felixd run --id scheduler --input sys.specs --input sys.facts scheduler.wasm
+```
+
+Nodes then follow its assignments, with first claim wins as the fallback. Stopping it (removing
+its spec) puts every node back on first claim wins. A node needs publish on `sys.facts` and read
+on `wl.scheduler.out` for this.
 
 Submit a workload and start a node (set the variables as in the top-level
 [README](../../README.md#try-it) first):

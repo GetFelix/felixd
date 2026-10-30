@@ -3,6 +3,8 @@
 //! until the lease looks free and the placement policy lets it, then tries to
 //! claim it. It runs a workload only while it holds the lease. While the node
 //! is marked in `drains` it gives up what it holds and claims nothing.
+//! While a scheduler runs, it follows the scheduler's assignments and appends
+//! this node's facts for it.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -17,7 +19,8 @@ use felix_client::{CacheChange, CacheCondition, CacheWatchItem, ClusterCacheWatc
 use felixd_core::class::{ErrorClass, Failure, OperatorReason};
 use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
-use felixd_core::placement::{FirstClaimWins, Placement};
+use felixd_core::placement::{Assigned, AssignedTo, FirstClaimWins, Placement, Scheduled, Turn};
+use felixd_core::schedule::NodeFact;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::{names, output, snapshot, status};
 use felixd_runtime::Runtime;
@@ -25,9 +28,10 @@ use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::assignments::{self, Assignments};
 use crate::drain;
 use crate::faults;
-use crate::felix::Felix;
+use crate::felix::{Felix, Lookup};
 use crate::lease::{self, Confirmer, Fence, Held};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
@@ -56,6 +60,10 @@ const READ_DRAIN_EVERY: Duration = Duration::from_secs(1);
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
 
+/// How often a node leaving a workload to its assignee checks that the
+/// assignee is still up.
+const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
+
 /// Who this node is and how it holds and claims leases.
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -63,7 +71,11 @@ pub struct AgentConfig {
     /// agent needs its own.
     pub node_id: String,
     pub lease: LeaseTiming,
+    /// How it claims when no assignment says otherwise.
     pub placement: FirstClaimWins,
+    /// How long a free workload is left to the node it is assigned to, or
+    /// waits for an assignment, while a scheduler runs.
+    pub assignment_bound: Duration,
 }
 
 struct Node {
@@ -87,6 +99,7 @@ struct Node {
     claiming: AtomicUsize,
     /// Notified when what this node writes to `nodes` should change now.
     announce_now: Notify,
+    assignments: Assignments,
 }
 
 /// What the leases watch last said about one workload's lease.
@@ -130,7 +143,10 @@ pub async fn run(
         node_id: config.node_id,
         timing: config.lease,
         max_workloads: config.placement.max_workloads,
-        placement: Box::new(config.placement),
+        placement: Box::new(Scheduled {
+            fallback: config.placement,
+            bound: config.assignment_bound,
+        }),
         held: AtomicUsize::new(0),
         room: Notify::new(),
         random: AtomicU64::new(seed | 1),
@@ -138,12 +154,18 @@ pub async fn run(
         mark_reads: drain::MarkReads::default(),
         claiming: AtomicUsize::new(0),
         announce_now: Notify::new(),
+        assignments: Assignments::new(),
     });
     tracing::info!(node = %node.node_id, "agent started");
     let presence = tokio::spawn({
         let node = node.clone();
         async move {
-            tokio::join!(announce(node.clone()), follow_drain(node));
+            tokio::join!(
+                announce(node.clone()),
+                follow_drain(node.clone()),
+                assignments::follow(&node.felix, &node.assignments),
+                write_facts(node.clone()),
+            );
         }
     });
     let mut tasks: HashMap<String, Task> = HashMap::new();
@@ -211,7 +233,7 @@ pub async fn run(
                         if let Some(r) = redelivery.as_mut()
                             && r.note(&id, offset)
                         {
-                            prune(&mut tasks, &r.seen);
+                            prune(&node, &mut tasks, &r.seen);
                             redelivery = None;
                         }
                         continue;
@@ -242,7 +264,7 @@ pub async fn run(
             }
         };
         if let Some(r) = redelivery.as_ref().filter(|r| r.done()) {
-            prune(&mut tasks, &r.seen);
+            prune(&node, &mut tasks, &r.seen);
             redelivery = None;
         }
     }
@@ -359,6 +381,26 @@ async fn follow_drain(node: Arc<Node>) {
     }
 }
 
+/// Appends this node's facts for the scheduler while one runs, once a lease
+/// TTL, which is also how long `nodes` keeps its entry.
+async fn write_facts(node: Arc<Node>) {
+    let fact = |draining| NodeFact {
+        node: node.node_id.clone(),
+        every_ms: node.timing.ttl_millis(),
+        max_workloads: node.max_workloads,
+        draining,
+    };
+    let draining = node.draining.subscribe();
+    assignments::write_facts(
+        &node.felix,
+        &node.assignments,
+        draining,
+        node.timing.ttl,
+        fact,
+    )
+    .await;
+}
+
 const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \
                                 until it can (a node needs read on the drains cache)";
 
@@ -431,7 +473,10 @@ impl Redelivery {
 }
 
 /// Stops the tasks of workloads not in `current`.
-fn prune(tasks: &mut HashMap<String, Task>, current: &HashSet<String>) {
+fn prune(node: &Node, tasks: &mut HashMap<String, Task>, current: &HashSet<String>) {
+    if !current.contains(names::SCHEDULER) {
+        node.assignments.set_scheduler(false);
+    }
     tasks.retain(|id, task| {
         let keep = current.contains(id);
         if !keep {
@@ -474,6 +519,9 @@ fn apply(
         }
         _ => None,
     };
+    if id == names::SCHEDULER {
+        node.assignments.set_scheduler(wanted.is_some());
+    }
     if let Some(task) = tasks.get(&id) {
         // A changed spec restarts the task, which resumes under it.
         if !task.handle.is_finished() && wanted.as_ref() == Some(&task.spec) {
@@ -748,7 +796,7 @@ impl Drop for Slot<'_> {
 
 impl Node {
     /// Waits until the lease looks free, this node has room and the placement
-    /// policy's delay has passed. `false` means stop.
+    /// policy lets it claim. `false` means stop.
     async fn wait_for_chance(
         &self,
         id: &str,
@@ -756,6 +804,10 @@ impl Node {
         stop: &mut watch::Receiver<bool>,
     ) -> bool {
         let mut draining = self.draining.subscribe();
+        let mut assignments = self.assignments.changes();
+        // When this node first saw the workload free under the assignment at
+        // this offset, or with none.
+        let mut free_since: Option<(Option<u64>, tokio::time::Instant)> = None;
         loop {
             if *draining.borrow_and_update() {
                 tokio::select! {
@@ -770,6 +822,7 @@ impl Node {
                 }
             };
             if !wait.is_zero() {
+                free_since = None;
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     _ = lease.changed() => continue,
@@ -786,14 +839,63 @@ impl Node {
                 }
                 continue;
             }
-            let delay = self.placement.claim_delay(id, self.random());
-            tokio::select! {
-                () = tokio::time::sleep(delay) => return true,
-                // Someone may have claimed it meanwhile.
-                _ = lease.changed() => {}
-                _ = stop.wait_for(|stop| *stop) => return false,
+            assignments.mark_unchanged();
+            let assigned = self.assigned(id, &mut free_since).await;
+            match self.placement.turn(id, &assigned, self.random()) {
+                Turn::Claim(delay) => tokio::select! {
+                    () = tokio::time::sleep(delay) => return true,
+                    // Someone may have claimed it meanwhile.
+                    _ = lease.changed() => {}
+                    _ = stop.wait_for(|stop| *stop) => return false,
+                },
+                Turn::Defer(left) => tokio::select! {
+                    () = tokio::time::sleep(left.min(CHECK_ASSIGNEE_EVERY)) => {}
+                    _ = lease.changed() => {}
+                    _ = assignments.changed() => {}
+                    _ = stop.wait_for(|stop| *stop) => return false,
+                },
             }
         }
+    }
+
+    /// What this node knows of the free workload `id`'s assignment.
+    /// `free_since` starts again when the assignment changes.
+    async fn assigned(
+        &self,
+        id: &str,
+        free_since: &mut Option<(Option<u64>, tokio::time::Instant)>,
+    ) -> Assigned {
+        if !self.assignments.scheduler() {
+            return Assigned::NONE;
+        }
+        let placed = self.assignments.get(id);
+        let at = placed.as_ref().map(|p| p.offset);
+        let since = match *free_since {
+            Some((offset, since)) if offset == at => since,
+            _ => free_since.insert((at, tokio::time::Instant::now())).1,
+        };
+        let to = match placed {
+            None => AssignedTo::Nobody,
+            Some(p) if p.node == self.node_id => AssignedTo::ThisNode,
+            Some(p) => AssignedTo::Elsewhere {
+                up: self.up(&p.node).await,
+            },
+        };
+        Assigned {
+            scheduler: true,
+            to,
+            waited: since.elapsed(),
+        }
+    }
+
+    /// Whether `node` has an entry in `nodes`. A read that fails or finds no
+    /// cache counts as up, so the workload waits out the bound instead.
+    async fn up(&self, node: &str) -> bool {
+        let read = self.felix.cache_lookup(names::NODES, node);
+        !matches!(
+            tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await,
+            Ok(Ok(Lookup::Value(None)))
+        )
     }
 
     /// Uniform in `[0, 1)`, from an xorshift. It only spreads claims.

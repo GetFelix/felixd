@@ -206,6 +206,21 @@ workload spec as below with `state` `running` or `stopped`. A reader refuses ano
 record's offset is the spec's version, so a later record for an id supersedes an earlier one and
 the stream is the spec history. Records are never rewritten; `failed` stays in the cache.
 
+## Node facts and assignments
+
+Node facts are on `sys.facts`, one shard, and are the scheduler's second input. Each is
+`{"format": 1, "value": ...}` with `node`, the node's id, `every_ms`, how often it appends one,
+`max_workloads`, and `draining`, a boolean that is left out or false unless the node is draining.
+An agent appends one once a lease TTL while the `scheduler` workload runs, and at once when it
+starts or stops draining. The scheduler counts a node as gone once the append times of its inputs
+have moved more than three of the node's `every_ms` past its last fact.
+
+Assignments are the scheduler's outputs on `wl.scheduler.out`: ordinary output records under the
+name `out`, keyed by the workload id. The payload is `{"format": 1, "value": ...}` with `workload`
+and `node`, the node it should run on. `node` is left out once the workload no longer runs. The
+last assignment for a workload on the stream is the one in force, and its offset is what
+`felixd ps` shows after the node.
+
 ## Caches
 
 Values in `workloads`, `leases`, `epochs`, `nodes` and `drains` are JSON of the form

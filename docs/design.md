@@ -248,9 +248,9 @@ OSDI 2021; Peter et al., "Arrakis", OSDI 2014 (abstract only).
 - **Pipelines:** one workload's output is another's input, and failover in the
   middle of the chain loses nothing.
 
-Out of scope for felixd: placement policy beyond "first claim wins", CPU and
-memory limits beyond Wasm fuel and memory caps, networking, and native
-processes.
+Out of scope for felixd: placement policy beyond "first claim wins" and the
+simple scheduler below, CPU and memory limits beyond Wasm fuel and memory
+caps, networking, and native processes.
 
 ## Architecture
 
@@ -540,16 +540,16 @@ a TTL. A clock ahead of the broker's costs a refused claim, never a second
 owner, since only the broker decides that a lease is gone.
 
 Each agent writes itself to `nodes` every TTL/3 with a TTL, so a dead node's
-entry goes away about when its leases do. Nothing reads `nodes` to make
-decisions yet; it says which agents are up and how full they are, and
-`felixd ps` shows it.
+entry goes away about when its leases do. It says which agents are up and
+how full they are, and `felixd ps` shows it. The only decision that reads it
+is whether to wait for a workload's assignee ([Placement](#placement)).
 
-v0 placement is "first claim wins" with a per-node cap: an agent holding
-`--max-workloads` (default 64) claims nothing more until one of its
-workloads ends, and every claim waits a random time of up to
+Without a scheduler, placement is "first claim wins" with a per-node cap: an
+agent holding `--max-workloads` (default 64) claims nothing more until one of
+its workloads ends, and every claim waits a random time of up to
 `--claim-delay-ms` (default 1 s). The agent sees placement only through the
-`Placement` trait in `core`, so the open question below (#26) can be settled
-without touching the lease code.
+`Placement` trait in `core`, so the scheduler ([Placement](#placement)) came
+in without touching the lease code.
 
 `felixd drain <node>` writes a mark under the node's id in the `drains` cache,
 with no TTL; `felixd undrain` deletes it. Each agent reads its own mark every
@@ -591,6 +591,12 @@ or one that cannot read `drains` gets, since it never says `draining`.
 node that is up leaves its workloads with no holder; they stay `running` and
 `felixd ps` shows them waiting until a node can take them.
 
+While a scheduler runs, a node that reads its mark appends a node fact saying
+it is draining at once. The scheduler moves the node's assignments to other
+nodes, so the workloads it releases go where the scheduler puts them instead
+of to whichever node claims first. A node's assignments are left alone after
+an undrain; nothing is moved back.
+
 ## Operating a cluster
 
 `felixd ps` reads everything it shows from the caches and streams, so any
@@ -614,6 +620,11 @@ it. For each workload:
   `next`), and a separate line gives the next step on the merge log against
   its tail. Lag counts records on the stream, claims included when the input
   is another workload's output.
+
+- **Assigned.** While a scheduler runs, an `ASSIGNED` column gives the node the
+  scheduler assigned the workload to and the offset of that assignment on
+  `wl.scheduler.out`, such as `node-2@912`. A holder that differs from it took
+  the workload by first claim wins, or before the assignment changed.
 
 For each node: whether it has an entry in `nodes`, how many live leases name
 it, its `--max-workloads`, its version and whether it is draining: `yes`, or
@@ -1124,16 +1135,52 @@ log and runs as before.
 
 ## Placement
 
-Agents place workloads by first claim wins: when a lease is free or expired,
-an agent with room claims it after a random delay, and the broker's
-conditional write picks one winner. It sits behind the `Placement` seam.
+Without a scheduler, agents place workloads by first claim wins: when a lease
+is free or expired, an agent with room claims it after a random delay, and the
+broker's conditional write picks one winner. It sits behind the `Placement`
+seam.
 
-When that limits us (balancing, labels, graceful drain), placement moves to a
-scheduler that is itself a felixd workload (#60). It writes assignments as
+Built (#60): placement can come from a scheduler that is itself a felixd
+workload, `scheduler`, submitted with `felixd run --id scheduler --input
+sys.specs --input sys.facts scheduler.wasm`. It writes assignments as
 records, so placement is replayable and survives failover like any workload.
 Agents still claim through the lease, so the scheduler decides where work runs,
-never whether output is correct. First claim wins stays as the fallback when an
-assignment is missing or stale. A scheduler outside felixd is not planned.
+never whether output is correct. A scheduler outside felixd is not planned.
+
+- **Inputs.** Spec records on `sys.specs`, and node facts on `sys.facts`. While
+  the `scheduler` workload runs, each agent appends a fact once a lease TTL,
+  and at once when it starts or stops draining: its id, how often it appends,
+  its `--max-workloads` and whether it is draining. The scheduler's clock is
+  the append time of the inputs it steps, never a wall clock, so a replay
+  assigns the same way. A node takes work while it has written a fact within
+  three of its own intervals and is not draining.
+- **Policy.** A running workload with no assignment, or one assigned to a node
+  that no longer takes work, goes to the node with the fewest assignments and
+  room, the lowest id first. Nothing is moved off a node that still takes work,
+  and a returning node gets nothing back. A stopped workload's assignment is
+  dropped. The scheduler never assigns itself; it is always placed by first
+  claim wins.
+- **Agents.** Each agent reads `wl.scheduler.out` every half second while the
+  scheduler runs. A node claims a free workload assigned to it at once. It
+  leaves one assigned to another node, or not assigned yet, to the scheduler
+  for up to `--assignment-bound-ms` (15 s) from when it saw the workload free
+  under that assignment, then claims it by first claim wins. A workload whose
+  assignee has no entry in `nodes` is first claim wins at once, so a dead
+  node's workloads move within a lease TTL as before, and the scheduler
+  reassigns them once the node has been silent for three intervals.
+- **Fallback.** First claim wins whenever the scheduler is not running, its
+  assignment for a workload is missing or names a node that is down, or the
+  bound has passed. A stale or bad assignment can delay a claim by at most the
+  bound. It cannot make two owners, since the lease and the `publish_if`
+  fence still decide.
+
+What is not built yet: moving a running workload to its assignee (the
+scheduler only places free workloads), labels and other node facts beyond
+the four above, and replacing per-workload lease watching with assignments
+([Upgrading felixd and scale](#upgrading-felixd-and-scale)). Agents read the
+scheduler's whole output stream when they start, so retention on
+`wl.scheduler.out` would drop assignments still in force; those read as
+missing.
 
 Rules for the scheduler and the records it writes (#100):
 

@@ -16,8 +16,10 @@ A node agent that runs programs across a cluster with
 > replay, or a new module, against the recorded outputs. Workloads implement
 > [contract 0.2](docs/contract.md): named and keyed outputs, rejections and
 > chunked snapshots. Pipelines, where one workload reads another's output,
-> survive failover at every stage; the rest of milestone 4, operations, is
-> next. The plan is in
+> survive failover at every stage. Operations so far: `felixd ps`, `felixd
+> drain`, Prometheus metrics, and an optional scheduler, itself a felixd
+> workload, whose assignments the nodes follow with first claim wins as the
+> fallback. The plan is in
 > [docs/design.md](docs/design.md) and the work is tracked in
 > [milestones](https://github.com/GetFelix/felixd/milestones).
 
@@ -204,6 +206,18 @@ workloads `waiting`, and the command says so. The node reads its mark every
 second and again before each claim, so a node drained while it was stopped
 does not take work back when it wakes.
 
+Placement is first claim wins unless a scheduler runs. `felixd run --id
+scheduler --input sys.specs --input sys.facts scheduler.wasm` starts one: a
+workload that reads spec records and the facts each node appends to
+`sys.facts`, and writes an assignment each time where a workload should run
+changes. Nodes claim what is assigned to them at once and leave other
+workloads to their assignee for up to `--assignment-bound-ms` (15 s), or not
+at all when the assignee is down, before falling back to first claim wins.
+Every claim still goes through the lease and the fence, so a bad assignment
+delays work and nothing else. `ps` then shows each workload's assignment, and
+a drained node's workloads go where the scheduler moves them. See
+[Placement](docs/design.md#placement).
+
 `felixd agent --metrics-bind 127.0.0.1:9464` serves Prometheus metrics at
 `/metrics` (plain HTTP, no authentication, off unless given). Each node
 reports its own leases, claims, handoffs, steps and step latency, input lag,
@@ -267,7 +281,8 @@ docker compose -f deploy/compose.yaml run --rm felixd check --complete
 docker compose -f deploy/compose.yaml down -v
 ```
 
-`window.wasm` is in the same directory. `FELIX_VERSION` picks the Felix image
+`window.wasm` and `scheduler.wasm` are in the same directory; run the
+scheduler with `--id scheduler --input sys.specs --input sys.facts`. `FELIX_VERSION` picks the Felix image
 tag. The compose file publishes no ports, so the CLI runs in the stack.
 `scripts/compose-failover.sh` runs this sequence and CI runs it on every
 pull request, under Docker and under rootless Podman.

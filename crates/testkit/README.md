@@ -6,7 +6,7 @@ dev-dependency of `felixd-runtime` and `felixd`. It depends on no other felixd c
 ## What it provides
 
 - `workload(name)` builds the example workload `name` (a directory under `workloads/`: `counter`,
-  `window` or `faulty`) with `cargo build --release --target wasm32-unknown-unknown` and wraps the
+  `window`, `scheduler` or `faulty`) with `cargo build --release --target wasm32-unknown-unknown` and wraps the
   core module into a component with `wit-component`. It returns the component's bytes and panics
   if the build fails. It builds into `$CARGO_TARGET_DIR/workloads`, or `target/workloads` when that
   is unset, and takes a lock so tests in one process do not build at once.
