@@ -1529,7 +1529,12 @@ holds needs an operator; no admitted workload may read admission's streams,
 so no trim record marks a decision trimmable, and `felixd init` sets no
 `keep_snapshots` on admission. System workloads (`admission`, `scheduler`)
 are refused through intake: an operator writes their specs directly, and the
-gate lets those through. The scheduler reads every spec record, admitted or
+gate lets those through by id alone, so whoever can write `sys.specs` can run
+any module with any inputs as the scheduler, as before admission. Only records
+whose decision accepted exactly their spec count as earlier decisions, so a
+forged record naming a huge or absent decision blocks nothing. The gate and
+the projector read `sys.specs` from its first record, so it must never be
+trimmed. The scheduler reads every spec record, admitted or
 not, so it can assign one admission did not accept; the assignee refuses it
 at the gate, and the assignment only delays others until the bound.
 `felixd replay --id admission --diff --all --module <hash>` lists the recorded

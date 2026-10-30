@@ -8,7 +8,9 @@
 //! it names an accepting decision for exactly its spec, later than any an
 //! earlier record of the workload named. Whoever writes `sys.specs` cannot get
 //! past it; a principal that can write `wl.admission.out`, which in v0 is any
-//! node, can forge a decision until per-lease tokens (#74).
+//! node, can forge a decision until per-lease tokens (#74). System workloads
+//! (`admission`, `scheduler`) are let through by id alone: whoever can write
+//! `sys.specs` can run any module under those ids, as before admission.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -43,8 +45,10 @@ struct Scanned {
     /// The first record that is admission's own, or does not decode and so
     /// might be.
     first: Option<u64>,
-    /// Per workload, `(record offset, decision)` for each record naming a
-    /// decision, in record order.
+    /// Per workload, `(record offset, decision)` for each record whose
+    /// decision accepted exactly its spec, in record order. A record naming a
+    /// decision that does not, such as a forged one, is not counted, so it
+    /// cannot block the workload's later records.
     named: HashMap<String, Vec<(u64, u64)>>,
 }
 
@@ -52,7 +56,8 @@ struct Scanned {
 struct Before {
     /// The first record that is, or might be, admission's own.
     admission_from: Option<u64>,
-    /// The latest decision an earlier record of the same workload named.
+    /// The latest decision an earlier record of the same workload named
+    /// that accepted that record's spec.
     latest_decision: Option<u64>,
 }
 
@@ -62,6 +67,11 @@ impl Gate {
     /// build's admission record is not missed.
     async fn before(&self, felix: &Felix, id: &str, at: u64) -> Result<Before> {
         let mut scanned = self.0.lock().await;
+        let decisions_tail = if scanned.to < at {
+            felix.tail(&names::output_stream(names::ADMISSION)).await?
+        } else {
+            0
+        };
         while scanned.to < at {
             let from = scanned.to;
             let (page, after) = felix.read_page(names::SPECS, from, at).await?;
@@ -71,7 +81,9 @@ impl Gate {
                         if found.id == names::ADMISSION && scanned.first.is_none() {
                             scanned.first = Some(record.offset);
                         }
-                        if let Some(decision) = found.admitted {
+                        if let Some(decision) = found.admitted
+                            && verified(felix, decisions_tail, &found, decision).await?
+                        {
                             let named = scanned.named.entry(found.id).or_default();
                             named.push((record.offset, decision));
                         }
@@ -126,7 +138,10 @@ pub(crate) async fn check_admitted(
         .into());
     };
     let stream = names::output_stream(names::ADMISSION);
-    let found = match felix.read_range(&stream, decision, decision + 1).await {
+    let Some(end) = admission::decision_end(decision, u64::MAX) else {
+        return Err(unadmitted(format!("no decision at {stream}:{decision}")).into());
+    };
+    let found = match felix.read_range(&stream, decision, end).await {
         Ok(found) => found.into_iter().find(|r| r.offset == decision),
         // Retrying would wait forever on a record that is gone.
         Err(error) if Trimmed::of(&error).is_some() => {
@@ -152,10 +167,10 @@ pub(crate) async fn check_admitted(
             names::SPECS
         ))
     })?;
-    if let Some(latest) = before.latest_decision.filter(|&latest| latest >= decision) {
+    if let Some(latest) = before.latest_decision.filter(|&latest| latest > decision) {
         return Err(unadmitted(format!(
             "the spec record at {}:{at} names decision {decision}, and an earlier record of \
-             workload {id} names decision {latest}",
+             workload {id} names the later decision {latest}",
             names::SPECS
         ))
         .into());
@@ -195,23 +210,63 @@ pub(crate) async fn project(felix: &Felix, settings: &Settings, mut stop: watch:
     }
 }
 
+/// Whether `record`, naming `decision`, is what that decision on
+/// `wl.admission.out`, whose tail is `tail`, accepted. A decision past the
+/// tail, out of range or gone is not: the projector writes a record only
+/// after reading its decision.
+async fn verified(felix: &Felix, tail: u64, record: &SpecRecord, decision: u64) -> Result<bool> {
+    let Some(end) = admission::decision_end(decision, tail) else {
+        return Ok(false);
+    };
+    let stream = names::output_stream(names::ADMISSION);
+    let found = match felix.read_range(&stream, decision, end).await {
+        Ok(found) => found,
+        Err(error) if Trimmed::of(&error).is_some() => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(found.into_iter().any(|r| {
+        r.offset == decision && admission::admits(&r.payload, &record.id, &record.spec).is_ok()
+    }))
+}
+
+/// The latest decision recorded for each workload by a record that it
+/// verifies, which is all the projector trusts of `sys.specs`. A decision no
+/// later than its workload's is not recorded again: the gate would refuse it.
+#[derive(Debug, Default)]
+pub(crate) struct Recorded(HashMap<String, u64>);
+
+impl Recorded {
+    pub(crate) fn note(&mut self, id: &str, decision: u64) {
+        let latest = self.0.entry(id.to_owned()).or_insert(decision);
+        *latest = (*latest).max(decision);
+    }
+
+    /// Whether decision `decision` for workload `id` is still to record.
+    pub(crate) fn wants(&self, id: &str, decision: u64) -> bool {
+        self.0.get(id).is_none_or(|&latest| latest < decision)
+    }
+}
+
 /// What the projector knows of `sys.specs` and `wl.admission.out`.
 struct Projector {
     /// The tail of `sys.specs` as last read.
     specs_tail: u64,
-    /// The first decision not yet recorded or passed over.
+    /// The next decision to look at. A projector starts from the first, since
+    /// records on `sys.specs` say only which decisions are recorded, not that
+    /// every earlier one is.
     next: u64,
+    recorded: Recorded,
 }
 
 impl Projector {
-    /// Reads `sys.specs` for the last decision recorded and points
-    /// `workloads` at its record again, in case a projector stopped between
-    /// the two.
+    /// Folds `sys.specs` and points `workloads` at the last record that
+    /// verifies again, in case a projector stopped between the two.
     async fn start(felix: &Felix) -> Result<Projector> {
         let specs_tail = felix.tail(names::SPECS).await?;
         let mut projector = Projector {
             specs_tail: 0,
             next: 0,
+            recorded: Recorded::default(),
         };
         let last = projector.fold(felix, specs_tail).await?;
         if let Some((at, record)) = last {
@@ -222,18 +277,20 @@ impl Projector {
         Ok(projector)
     }
 
-    /// Reads `sys.specs` from where it last read up to `end`, moving `next`
-    /// past every decision recorded there. Returns the last record naming a
-    /// decision, with its offset.
+    /// Reads `sys.specs` from where it last read up to `end`, noting each
+    /// record whose decision verifies. Returns the last of them, with its
+    /// offset.
     async fn fold(&mut self, felix: &Felix, end: u64) -> Result<Option<(u64, SpecRecord)>> {
+        let tail = felix.tail(&names::output_stream(names::ADMISSION)).await?;
         let mut last = None;
         while self.specs_tail < end {
             let (page, after) = felix.read_page(names::SPECS, self.specs_tail, end).await?;
             for found in page {
                 if let Ok(record) = SpecRecord::decode(&found.payload)
                     && let Some(decision) = record.admitted
+                    && verified(felix, tail, &record, decision).await?
                 {
-                    self.next = self.next.max(decision + 1);
+                    self.recorded.note(&record.id, decision);
                     last = Some((found.offset, record));
                 }
             }
@@ -258,7 +315,9 @@ impl Projector {
                 };
                 let decision = Decision::decode(addressed.payload)
                     .with_context(|| format!("the decision at {stream}:{}", found.offset))?;
-                self.record(felix, settings, found.offset, decision).await?;
+                if self.recorded.wants(&decision.id, found.offset) {
+                    self.record(felix, settings, found.offset, decision).await?;
+                }
                 self.next = found.offset + 1;
             }
             self.next = self.next.max(after);
@@ -308,12 +367,12 @@ impl Projector {
             match sent? {
                 ConditionalWrite::Written { offset } => {
                     self.specs_tail = offset + 1;
-                    self.next = at + 1;
+                    self.recorded.note(&id, at);
                     break offset;
                 }
                 ConditionalWrite::Refused { tail } => {
                     self.fold(felix, tail).await?;
-                    if self.next > at {
+                    if !self.recorded.wants(&id, at) {
                         return Ok(());
                     }
                 }
@@ -534,3 +593,6 @@ pub fn decision_of(found: &[u8]) -> Result<Decision> {
     };
     Ok(Decision::decode(addressed.payload)?)
 }
+
+#[cfg(test)]
+mod tests;

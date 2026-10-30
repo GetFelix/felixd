@@ -212,7 +212,9 @@ record of any other workload only if `admitted` names a decision accepting that 
 exactly that spec; otherwise the spec needs an operator with reason `spec_unadmitted` (code 10),
 which is logged and counted but not written to the output stream. So is a record whose decision is
 no later than one an earlier record of the same workload names, and one whose decision Felix no
-longer holds. Records of the system workloads, `admission` and `scheduler`, need no decision. A record that does not decode
+longer holds. Records of the system workloads, `admission` and `scheduler`, need no decision. Only earlier
+records whose own decision verifies count. Nodes read `sys.specs` from offset 0, so it must
+never be trimmed. A record that does not decode
 counts as admission's, so a node fails closed on one from a newer build.
 
 ## Requests and decisions

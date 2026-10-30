@@ -98,8 +98,17 @@ async fn admission_held_by(t: &TestFelix, node: &str) {
 /// Appends `record` to `sys.specs` and points `workloads` at it, the way a
 /// submitter with direct write rights could, skipping admission.
 async fn write_around_admission(t: &TestFelix, record: SpecRecord) -> u64 {
+    let offset = append_record(t, &record).await;
+    let mut spec = record.spec;
+    spec.record = Some(offset);
+    t.put_cache_spec(&spec).await;
+    offset
+}
+
+/// Appends `record` to `sys.specs` alone.
+async fn append_record(t: &TestFelix, record: &SpecRecord) -> u64 {
     let payload = record.encode();
-    let offset = loop {
+    loop {
         let tail = t.felix.tail(names::SPECS).await.unwrap();
         let sent = t
             .felix
@@ -109,11 +118,7 @@ async fn write_around_admission(t: &TestFelix, record: SpecRecord) -> u64 {
         if let ConditionalWrite::Written { offset } = sent {
             break offset;
         }
-    };
-    let mut spec = record.spec;
-    spec.record = Some(offset);
-    t.put_cache_spec(&spec).await;
-    offset
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -434,4 +439,59 @@ async fn an_old_acceptance_replayed_after_a_stop_never_runs() {
         5,
         "a replayed acceptance ran the workload again after its stop"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_record_naming_a_huge_decision_blocks_nothing() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let _a = t.start_agent();
+    let counter = felixd_testkit::workload("counter");
+    assert!(t.run(ID, &counter, INPUT, &[]).success());
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    eventually("the first outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
+    })
+    .await;
+    let (_, running) = records(&t)
+        .await
+        .into_iter()
+        .rfind(|(_, r)| r.id == ID)
+        .unwrap();
+    let mut forged = running.clone();
+    forged.admitted = Some(u64::MAX);
+    append_record(&t, &forged).await;
+
+    // A stop through admission still takes effect.
+    let mut stopped = running.spec.clone();
+    stopped.state = WorkloadState::Stopped;
+    let submitted = admission::request(
+        &t.felix,
+        ID,
+        counter.clone(),
+        stopped,
+        replication_factor(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(submitted, Submitted::Accepted { .. }),
+        "{submitted}"
+    );
+    eventually("the workload to stop", Duration::from_secs(30), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+
+    // And so does running it again: the forged record is not counted as a
+    // later decision.
+    assert!(t.run(ID, &counter, INPUT, &[]).success());
+    t.publish_all(INPUT, (5..10).map(count)).await;
+    eventually(
+        "the outputs after the restart",
+        Duration::from_secs(60),
+        || async { (t.outputs(OUTPUT).await.len() >= 10).then_some(()) },
+    )
+    .await;
 }

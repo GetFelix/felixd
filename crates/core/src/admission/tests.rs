@@ -95,10 +95,22 @@ fn system_streams_and_admissions_are_no_admitted_workloads_input() {
 }
 
 #[test]
-fn system_workloads_are_refused_through_intake() {
-    let mut scheduler = request(names::SCHEDULER);
-    scheduler.spec.inputs = vec![names::SPECS.to_owned(), names::FACTS.to_owned()];
-    assert_eq!(rejected(&decided(&scheduler)), Reason::Reserved);
+fn system_workloads_are_refused_through_intake_and_need_no_decision() {
+    // One list, `names::SYSTEM`, decides both, so a system workload added to
+    // it is reserved and exempt together.
+    for id in names::SYSTEM {
+        assert_eq!(rejected(&decided(&request(id))), Reason::Reserved, "{id}");
+        assert!(!needs_decision(id, 10, Some(9)), "{id}");
+    }
+    assert!(names::is_system(names::SCHEDULER));
+}
+
+#[test]
+fn decisions_at_or_past_the_tail_or_at_the_end_of_offsets_are_never_read() {
+    assert_eq!(decision_end(3, 10), Some(4));
+    assert_eq!(decision_end(10, 10), None);
+    assert_eq!(decision_end(11, 10), None);
+    assert_eq!(decision_end(u64::MAX, u64::MAX), None);
 }
 
 #[test]

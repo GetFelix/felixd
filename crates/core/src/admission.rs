@@ -356,5 +356,13 @@ pub fn needs_decision(id: &str, at: u64, admission_from: Option<u64>) -> bool {
     !names::is_system(id) && admission_from.is_some_and(|from| from < at)
 }
 
+/// The end of a one-record read of decision `decision` on
+/// `wl.admission.out`, whose tail is `tail`. `None` for a decision at or past
+/// the tail, or at `u64::MAX`, which no read reaches: such a decision is not
+/// on the stream, and is never read or trusted.
+pub fn decision_end(decision: u64, tail: u64) -> Option<u64> {
+    decision.checked_add(1).filter(|_| decision < tail)
+}
+
 #[cfg(test)]
 mod tests;
