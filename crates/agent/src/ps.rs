@@ -105,7 +105,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             && WorkloadSpec::decode(value).is_ok_and(|s| s.state == WorkloadState::Running)
     });
     let mut placed = if scheduled {
-        assignments::read(&felix).await?
+        assignments::read(&felix).await?.table
     } else {
         HashMap::new()
     };

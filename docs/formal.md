@@ -363,10 +363,11 @@ composition.
 - Placement, `max_workloads`, the claim delay and the scheduler's assignments: any idle node may
   claim at any time. Assignments (#60) only narrow which node tries first and when, and every
   claim still goes through `Claim`, `TakeEpoch` and the marker, so they remove behaviours and add
-  none, and the safety invariants carry over. For `FreeIsClaimed`, a node that is not the assignee
-  defers for at most `--assignment-bound-ms`, then claims as before, so a free workload is still
-  claimed. The scheduler itself is a workload with two inputs, which `Felixd.tla` and
-  `FelixdMerge.tla` already cover.
+  none, and the safety invariants carry over. For `FreeIsClaimed`, a node waits on an assignment
+  only for at most `--assignment-bound-ms` from when it first saw the workload free, whatever the
+  assignment does meanwhile, then claims as before, so a free workload is still claimed. The
+  scheduler itself is a workload with two inputs, which `Felixd.tla` and `FelixdMerge.tla` already
+  cover.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
 

@@ -209,17 +209,27 @@ the stream is the spec history. Records are never rewritten; `failed` stays in t
 ## Node facts and assignments
 
 Node facts are on `sys.facts`, one shard, and are the scheduler's second input. Each is
-`{"format": 1, "value": ...}` with `node`, the node's id, `every_ms`, how often it appends one,
-`max_workloads`, and `draining`, a boolean that is left out or false unless the node is draining.
-An agent appends one once a lease TTL while the `scheduler` workload runs, and at once when it
-starts or stops draining. The scheduler counts a node as gone once the append times of its inputs
-have moved more than three of the node's `every_ms` past its last fact.
+`{"format": 1, "value": ...}` with `node`, the node's id, `every_ms`, how often it appends one when
+nothing changes, `max_workloads`, `held`, how many workloads it holds, and the booleans
+`draining` and `blocked` (it cannot read its drain mark). The last three default to 0 and false.
+An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
+a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
+is more than three of the node's `every_ms` past its last fact, and forgets it after thirty.
 
-Assignments are the scheduler's outputs on `wl.scheduler.out`: ordinary output records under the
-name `out`, keyed by the workload id. The payload is `{"format": 1, "value": ...}` with `workload`
-and `node`, the node it should run on. `node` is left out once the workload no longer runs. The
-last assignment for a workload on the stream is the one in force, and its offset is what
-`felixd ps` shows after the node.
+The scheduler's outputs on `wl.scheduler.out` are ordinary output records under the name `out`.
+Each payload is `{"format": 1, "value": ...}` with `specs`, the next `sys.specs` offset it has not
+stepped, and `kind`:
+
+- `assign`, keyed by the workload id, with `workload` and `node`, the node it should run on.
+  `node` is left out once the workload no longer runs.
+- `table`, with no key, with `assignments`, an object from workload id to node. It replaces every
+  assignment before it. The first step writes one, and another follows every ten minutes of input
+  time.
+- `progress`, with no key: a spec record that changed no assignment.
+
+A reader starts at the latest table and folds what follows; the last word on a workload is in
+force, and its offset is what `felixd ps` shows after the node. A running workload with no
+assignment whose spec record is below `specs` was left unassigned on purpose, for want of room.
 
 ## Caches
 

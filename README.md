@@ -210,9 +210,10 @@ Placement is first claim wins unless a scheduler runs. `felixd run --id
 scheduler --input sys.specs --input sys.facts scheduler.wasm` starts one: a
 workload that reads spec records and the facts each node appends to
 `sys.facts`, and writes an assignment each time where a workload should run
-changes. Nodes claim what is assigned to them at once and leave other
-workloads to their assignee for up to `--assignment-bound-ms` (15 s), or not
-at all when the assignee is down, before falling back to first claim wins.
+changes. Nodes claim what is assigned to them at once. They leave a workload
+to its assignee only while the scheduler has a live holder and the assignee
+can take it, for at most `--assignment-bound-ms` (15 s); otherwise it is
+first claim wins at once.
 Every claim still goes through the lease and the fence, so a bad assignment
 delays work and nothing else. `ps` then shows each workload's assignment, and
 a drained node's workloads go where the scheduler moves them. See

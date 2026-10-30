@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -73,9 +73,12 @@ pub struct AgentConfig {
     pub lease: LeaseTiming,
     /// How it claims when no assignment says otherwise.
     pub placement: FirstClaimWins,
-    /// How long a free workload is left to the node it is assigned to, or
-    /// waits for an assignment, while a scheduler runs.
+    /// The longest a free workload is left to the node it is assigned to,
+    /// or waits for the scheduler to read its spec, while a scheduler runs.
     pub assignment_bound: Duration,
+    /// How often this node appends its facts for the scheduler when they
+    /// have not changed.
+    pub facts_every: Duration,
 }
 
 struct Node {
@@ -100,6 +103,9 @@ struct Node {
     /// Notified when what this node writes to `nodes` should change now.
     announce_now: Notify,
     assignments: Assignments,
+    /// It cannot read its drain mark, so it claims nothing.
+    blocked: AtomicBool,
+    facts_every: Duration,
 }
 
 /// What the leases watch last said about one workload's lease.
@@ -155,6 +161,8 @@ pub async fn run(
         claiming: AtomicUsize::new(0),
         announce_now: Notify::new(),
         assignments: Assignments::new(),
+        blocked: AtomicBool::new(false),
+        facts_every: config.facts_every,
     });
     tracing::info!(node = %node.node_id, "agent started");
     let presence = tokio::spawn({
@@ -196,7 +204,7 @@ pub async fn run(
                 match item {
                     Some(CacheWatchItem::Change(change)) => {
                         if change.value.is_some() || !faults::ignore_lease_delete() {
-                            note_lease(&mut seen, change);
+                            note_lease(&node, &mut seen, change);
                         }
                     }
                     // A new watch redelivers every live lease.
@@ -308,7 +316,11 @@ async fn reopen(node: &Node, cache: &str, delay: Duration) -> ClusterCacheWatch 
     }
 }
 
-fn note_lease(seen: &mut HashMap<String, watch::Sender<Seen>>, change: CacheChange) {
+fn note_lease(node: &Node, seen: &mut HashMap<String, watch::Sender<Seen>>, change: CacheChange) {
+    if change.key == names::SCHEDULER {
+        let expires = change.value.is_some().then_some(change.expires_at_millis);
+        node.assignments.set_holder(expires);
+    }
     let now = match change.value {
         Some(_) => Seen::Held {
             expires_at_millis: change.expires_at_millis,
@@ -340,6 +352,7 @@ async fn announce(node: Arc<Node>) {
             draining: (draining && node.claiming.load(Ordering::SeqCst) == 0)
                 .then(|| node.mark_reads.nonce())
                 .flatten(),
+            blocked: node.blocked.load(Ordering::SeqCst),
         };
         let put = node
             .felix
@@ -377,28 +390,28 @@ async fn follow_drain(node: Arc<Node>) {
             }
             Err(_) => {}
         }
+        // A claim reads the mark too, so a node that cannot read it says it
+        // takes no work, and nobody waits for it.
+        if node.blocked.swap(failing, Ordering::SeqCst) != failing {
+            node.announce_now.notify_one();
+        }
         tokio::time::sleep(READ_DRAIN_EVERY).await;
     }
 }
 
-/// Appends this node's facts for the scheduler while one runs, once a lease
-/// TTL, which is also how long `nodes` keeps its entry.
+/// Appends this node's facts for the scheduler while one runs: every
+/// `facts_every`, and soon after what it holds or whether it can take work
+/// changes.
 async fn write_facts(node: Arc<Node>) {
-    let fact = |draining| NodeFact {
+    let fact = || NodeFact {
         node: node.node_id.clone(),
-        every_ms: node.timing.ttl_millis(),
+        every_ms: u64::try_from(node.facts_every.as_millis()).unwrap_or(u64::MAX),
         max_workloads: node.max_workloads,
-        draining,
+        held: node.held.load(Ordering::SeqCst),
+        draining: *node.draining.borrow(),
+        blocked: node.blocked.load(Ordering::SeqCst),
     };
-    let draining = node.draining.subscribe();
-    assignments::write_facts(
-        &node.felix,
-        &node.assignments,
-        draining,
-        node.timing.ttl,
-        fact,
-    )
-    .await;
+    assignments::write_facts(&node.felix, &node.assignments, node.facts_every, fact).await;
 }
 
 const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \
@@ -554,7 +567,10 @@ async fn own(
         return;
     };
     loop {
-        if !node.wait_for_chance(&id, &mut lease, &mut stop).await {
+        if !node
+            .wait_for_chance(&id, spec.record, &mut lease, &mut stop)
+            .await
+        {
             return;
         }
         match recorded_needs_operator(&node.felix, &spec).await {
@@ -800,14 +816,16 @@ impl Node {
     async fn wait_for_chance(
         &self,
         id: &str,
+        record: Option<u64>,
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
     ) -> bool {
         let mut draining = self.draining.subscribe();
         let mut assignments = self.assignments.changes();
-        // When this node first saw the workload free under the assignment at
-        // this offset, or with none.
-        let mut free_since: Option<(Option<u64>, tokio::time::Instant)> = None;
+        // When this node first saw the workload free, whatever its
+        // assignment, so assignments that keep changing cannot defer it for
+        // longer than the bound.
+        let mut free_since: Option<tokio::time::Instant> = None;
         loop {
             if *draining.borrow_and_update() {
                 tokio::select! {
@@ -840,7 +858,8 @@ impl Node {
                 continue;
             }
             assignments.mark_unchanged();
-            let assigned = self.assigned(id, &mut free_since).await;
+            let since = *free_since.get_or_insert_with(tokio::time::Instant::now);
+            let assigned = self.assigned(id, record, since).await;
             match self.placement.turn(id, &assigned, self.random()) {
                 Turn::Claim(delay) => tokio::select! {
                     () = tokio::time::sleep(delay) => return true,
@@ -858,27 +877,26 @@ impl Node {
         }
     }
 
-    /// What this node knows of the free workload `id`'s assignment.
-    /// `free_since` starts again when the assignment changes.
+    /// What this node knows of the free workload `id`'s assignment. `record`
+    /// is the `sys.specs` offset of its spec, and `since` when this node
+    /// first saw it free.
     async fn assigned(
         &self,
         id: &str,
-        free_since: &mut Option<(Option<u64>, tokio::time::Instant)>,
+        record: Option<u64>,
+        since: tokio::time::Instant,
     ) -> Assigned {
-        if !self.assignments.scheduler() {
+        if !self.assignments.healthy(now_millis()) {
             return Assigned::NONE;
         }
-        let placed = self.assignments.get(id);
-        let at = placed.as_ref().map(|p| p.offset);
-        let since = match *free_since {
-            Some((offset, since)) if offset == at => since,
-            _ => free_since.insert((at, tokio::time::Instant::now())).1,
-        };
+        let (placed, specs) = self.assignments.get(id);
         let to = match placed {
-            None => AssignedTo::Nobody,
+            None => AssignedTo::Nobody {
+                decided: record.is_none_or(|record| specs > record),
+            },
             Some(p) if p.node == self.node_id => AssignedTo::ThisNode,
             Some(p) => AssignedTo::Elsewhere {
-                up: self.up(&p.node).await,
+                coming: self.takes_work(&p.node).await,
             },
         };
         Assigned {
@@ -888,14 +906,17 @@ impl Node {
         }
     }
 
-    /// Whether `node` has an entry in `nodes`. A read that fails or finds no
-    /// cache counts as up, so the workload waits out the bound instead.
-    async fn up(&self, node: &str) -> bool {
+    /// Whether `node`'s entry in `nodes` says it would claim one more
+    /// workload. No entry, one this build cannot read, or a read that fails
+    /// all count as no, so nothing waits on a node that may not come.
+    async fn takes_work(&self, node: &str) -> bool {
         let read = self.felix.cache_lookup(names::NODES, node);
-        !matches!(
-            tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await,
-            Ok(Ok(Lookup::Value(None)))
-        )
+        match tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await {
+            Ok(Ok(Lookup::Value(Some(value)))) => {
+                NodeInfo::decode(&value).is_ok_and(|info| info.takes_work())
+            }
+            _ => false,
+        }
     }
 
     /// Uniform in `[0, 1)`, from an xorshift. It only spreads claims.

@@ -143,14 +143,17 @@ fn window_restored_from_a_snapshot_continues_the_same() {
 /// Node facts and spec records as the scheduler's merged inputs: three
 /// nodes, workloads coming and going, one node draining and one going
 /// silent.
-fn scheduler_inputs() -> Vec<(&'static str, u64, Vec<u8>)> {
+/// Each is `(stream, offset on it, append time, payload)`.
+fn scheduler_inputs() -> Vec<(&'static str, u64, u64, Vec<u8>)> {
     use felixd_core::schedule::NodeFact;
     use felixd_core::spec::{Limits, SpecRecord, WorkloadSpec, WorkloadState};
     let fact = |node: &str, draining| NodeFact {
         node: node.into(),
         every_ms: 1000,
         max_workloads: 8,
+        held: 0,
         draining,
+        blocked: false,
     };
     let spec = |id: &str, state| {
         let spec = WorkloadSpec {
@@ -168,13 +171,15 @@ fn scheduler_inputs() -> Vec<(&'static str, u64, Vec<u8>)> {
         SpecRecord::new(id, spec).encode()
     };
     let mut inputs = Vec::new();
+    let (mut specs, mut facts) = (0, 0);
     for i in 0..60u64 {
         let at = i * 500_000;
         let node = ["n-1", "n-2", "n-3"][(i % 3) as usize];
         // n-3 goes quiet halfway through; n-2 drains for a while.
         if node != "n-3" || i < 30 {
             let draining = node == "n-2" && (20..40).contains(&i);
-            inputs.push((names::FACTS, at, fact(node, draining).encode()));
+            inputs.push((names::FACTS, facts, at, fact(node, draining).encode()));
+            facts += 1;
         }
         if i % 4 == 1 {
             let id = format!("w{}", i % 13);
@@ -183,18 +188,19 @@ fn scheduler_inputs() -> Vec<(&'static str, u64, Vec<u8>)> {
             } else {
                 WorkloadState::Running
             };
-            inputs.push((names::SPECS, at, spec(&id, state)));
+            inputs.push((names::SPECS, specs, at, spec(&id, state)));
+            specs += 1;
         }
     }
-    inputs.push((names::FACTS, 31_000_000, b"not a fact".to_vec()));
+    inputs.push((names::FACTS, facts, 31_000_000, b"not a fact".to_vec()));
     inputs
 }
 
-fn scheduler_input<'a>(offset: u64, (stream, at, payload): &'a (&str, u64, Vec<u8>)) -> Input<'a> {
+fn scheduler_input<'a>((stream, offset, at, payload): &'a (&str, u64, u64, Vec<u8>)) -> Input<'a> {
     Input {
         stream,
         incarnation: 0,
-        offset,
+        offset: *offset,
         timestamp_micros: *at,
         key: None,
         payload,
@@ -203,21 +209,21 @@ fn scheduler_input<'a>(offset: u64, (stream, at, payload): &'a (&str, u64, Vec<u
 
 #[test]
 fn scheduler_assigns_as_the_core_fold_does() {
-    use felixd_core::schedule::{Assignment, Scheduler};
+    use felixd_core::schedule::{Record, Scheduler};
     let inputs = scheduler_inputs();
     let mut wl = load("scheduler");
     let mut fold = Scheduler::default();
     let mut assigned = 0;
     for (offset, record) in (0..).zip(&inputs) {
-        let stepped = wl.step(scheduler_input(offset, record)).unwrap();
-        match (fold.step(record.0, record.1, &record.2), stepped) {
+        let stepped = wl.step(scheduler_input(record)).unwrap();
+        match (fold.step(record.0, record.1, record.2, &record.3), stepped) {
             (Ok(want), Stepped::Outputs(got)) => {
-                let got: Vec<Assignment> = got
+                let got: Vec<Record> = got
                     .iter()
                     .map(|o| {
-                        let a = Assignment::decode(&o.payload).unwrap();
-                        assert_eq!(o.key.as_deref(), Some(a.workload.as_bytes()));
-                        a
+                        let r = Record::decode(&o.payload).unwrap();
+                        assert_eq!(o.key.as_deref(), r.key().map(str::as_bytes));
+                        r
                     })
                     .collect();
                 assigned += got.len();
@@ -244,7 +250,7 @@ fn scheduler_restored_from_a_snapshot_continues_the_same() {
         if i == cut {
             snapshot = original.snapshot().unwrap();
         }
-        let stepped = original.step(scheduler_input(i as u64, record)).unwrap();
+        let stepped = original.step(scheduler_input(record)).unwrap();
         if i >= cut {
             expected.push(stepped);
         }
@@ -254,13 +260,22 @@ fn scheduler_restored_from_a_snapshot_continues_the_same() {
     restored.restore(&chunks).unwrap();
     let got: Vec<_> = inputs[cut..]
         .iter()
-        .enumerate()
-        .map(|(i, record)| {
-            restored
-                .step(scheduler_input((cut + i) as u64, record))
-                .unwrap()
-        })
+        .map(|record| restored.step(scheduler_input(record)).unwrap())
         .collect();
     assert_eq!(got, expected);
     assert_eq!(restored.inspect().unwrap(), original.inspect().unwrap());
+}
+
+#[test]
+fn scheduler_with_a_snapshot_it_cannot_read_fails_with_the_reason() {
+    let mut wl = load("scheduler");
+    wl.restore(&[b"not json"]).unwrap();
+    let inputs = scheduler_inputs();
+    let error = wl.step(scheduler_input(&inputs[0])).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the scheduler snapshot does not decode"),
+        "{error}"
+    );
 }

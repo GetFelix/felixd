@@ -28,12 +28,18 @@ thread_local! {
     static CHUNKS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// How many chunks the restore under way has.
     static RESTORING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Why the last restore failed. Every step then poisons the workload
+    /// with it, rather than a trap in `restore-chunk` that says nothing.
+    static BROKEN: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 struct Component;
 
 impl step::Guest for Component {
     fn step(input: Input) -> Result<Vec<Output>, StepError> {
+        if let Some(reason) = BROKEN.with_borrow(Clone::clone) {
+            return Err(StepError::Poison(reason));
+        }
         let InputBody::Record(record) = input.body else {
             return Err(StepError::Poison(
                 "the scheduler takes no effect responses".to_string(),
@@ -42,6 +48,7 @@ impl step::Guest for Component {
         let changed = STATE.with_borrow_mut(|s| {
             s.step(
                 &input.source.stream,
+                input.offset,
                 input.timestamp_micros,
                 &record.payload,
             )
@@ -54,11 +61,11 @@ impl step::Guest for Component {
         })?;
         Ok(changed
             .into_iter()
-            .map(|a| {
+            .map(|r| {
                 Output::Record(Addressed {
                     name: "out".to_string(),
-                    key: Some(a.workload.clone().into_bytes()),
-                    payload: a.encode(),
+                    key: r.key().map(|k| k.as_bytes().to_vec()),
+                    payload: r.encode(),
                 })
             })
             .collect())
@@ -89,7 +96,12 @@ impl state::Guest for Component {
         CHUNKS.with_borrow_mut(|bytes| bytes.extend(chunk));
         if index + 1 == RESTORING.get() {
             let bytes = CHUNKS.take();
-            STATE.set(Scheduler::decode(&bytes).expect("a scheduler snapshot decodes"));
+            match Scheduler::decode(&bytes) {
+                Ok(state) => STATE.set(state),
+                Err(error) => BROKEN.set(Some(format!(
+                    "the scheduler snapshot does not decode: {error}"
+                ))),
+            }
         }
     }
 

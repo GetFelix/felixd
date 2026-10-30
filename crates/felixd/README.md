@@ -34,8 +34,10 @@ The limits are stored in the spec, so every node runs the workload under the sam
 
 Flags of `agent`: `--node-id` (`FELIXD_NODE_ID`; host name and process id by default),
 `--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64),
-`--claim-delay-ms` (1000) and `--assignment-bound-ms` (15000), how long a free workload is left to
-the node the scheduler assigned it to, or waits for an assignment, before first claim wins.
+`--claim-delay-ms` (1000), `--assignment-bound-ms` (15000), the longest a free workload is left to
+an assignee that can take it, or waits for the scheduler to read its spec, before first claim
+wins, and `--facts-every-ms` (three lease TTLs), how often the node appends its facts for the
+scheduler when they have not changed.
 
 Flags of `check`: `--id` (repeat for several; every workload by default), `--complete`, which
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every

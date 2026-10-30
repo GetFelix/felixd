@@ -24,9 +24,20 @@ pub struct NodeInfo {
     /// same as before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draining: Option<u64>,
+    /// It cannot claim now: it cannot read its drain mark. Left out when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
 }
 
 impl NodeInfo {
+    /// Whether the node would claim one more workload now: it has room, is
+    /// not draining and can claim. Another node waits for an assignee only
+    /// while this holds.
+    pub fn takes_work(&self) -> bool {
+        self.held < self.max_workloads && self.draining.is_none() && !self.blocked
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         crate::codec::encode_json(FORMAT, self)
     }

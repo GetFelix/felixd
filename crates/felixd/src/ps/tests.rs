@@ -34,6 +34,7 @@ fn node(id: &str, up: bool, draining: bool, leases: usize) -> Node {
             max_workloads: 64,
             held: leases,
             draining: draining.then_some(1),
+            blocked: false,
         }),
         draining,
         mark: draining.then_some(Drain { nonce: 1 }),

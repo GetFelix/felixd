@@ -52,12 +52,20 @@ enum Command {
         /// workload, so that the first node to see it does not take everything.
         #[arg(long, default_value_t = placement::DEFAULT_CLAIM_DELAY.as_millis() as u64)]
         claim_delay_ms: u64,
-        /// While a scheduler runs, how long, in milliseconds, a free workload
-        /// is left to the node it is assigned to, or waits to be assigned,
-        /// before this node claims it by first claim wins. A workload
-        /// assigned to a node that is not up is claimed at once.
+        /// While a scheduler runs, the longest, in milliseconds, a free
+        /// workload is left to the node it is assigned to, or waits for the
+        /// scheduler to read its spec, before this node claims it by first
+        /// claim wins. Counted from when this node first saw it free. A
+        /// workload assigned to a node that cannot take it, or while the
+        /// scheduler has no live holder, is claimed at once.
         #[arg(long, default_value_t = placement::DEFAULT_ASSIGNMENT_BOUND.as_millis() as u64)]
         assignment_bound_ms: u64,
+        /// While a scheduler runs, how often, in milliseconds, this node
+        /// appends its facts to sys.facts when they have not changed. A
+        /// change is appended within half a second. Three lease TTLs when
+        /// left out.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        facts_every_ms: Option<u64>,
         /// Serve Prometheus metrics at `/metrics` on this address, such as
         /// 127.0.0.1:9464. Off when left out. Plain HTTP with no
         /// authentication: it names workloads and streams, so keep it on an
@@ -220,6 +228,7 @@ async fn main() -> Result<()> {
             max_workloads,
             claim_delay_ms,
             assignment_bound_ms,
+            facts_every_ms,
             metrics_bind,
             metrics_max_workloads,
         } => {
@@ -240,6 +249,10 @@ async fn main() -> Result<()> {
                     max_delay: Duration::from_millis(claim_delay_ms),
                 },
                 assignment_bound: Duration::from_millis(assignment_bound_ms),
+                facts_every: facts_every_ms.map_or(
+                    3 * Duration::from_millis(lease_ttl_ms),
+                    Duration::from_millis,
+                ),
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
         }

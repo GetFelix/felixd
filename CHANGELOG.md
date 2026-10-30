@@ -6,20 +6,24 @@
   `scheduler.wasm` (in the container image) as `felixd run --id scheduler
   --input sys.specs --input sys.facts`. It reads spec records and node facts
   and writes an assignment, workload to node, to `wl.scheduler.out` each time
-  one changes; its clock is its inputs' append times, so a replay assigns the
-  same way, and it fails over like any workload. While it runs, each node
-  appends a fact to the new `sys.facts` stream once a lease TTL and when it
-  starts or stops draining, claims what is assigned to it at once, and leaves
-  other free workloads to their assignee for up to `--assignment-bound-ms`
-  (15 s) before falling back to first claim wins; one whose assignee has no
-  `nodes` entry is first claim wins at once. Claims still go through the
-  lease and the fence. A drained node's workloads move to where the scheduler
-  assigns them, and `felixd ps` shows an `ASSIGNED` column. Without the
-  scheduler nothing changes.
+  one changes, a progress record for a spec record that changes nothing, and
+  its whole table every ten minutes of input time. Its clocks are its inputs'
+  append times, so a replay assigns the same way, and it fails over like any
+  workload. While it runs, each node appends a fact to the new `sys.facts`
+  stream every `--facts-every-ms` (three lease TTLs) and within half a second
+  of a change. A node follows assignments only while the scheduler's lease has
+  a live holder: it claims what is assigned to it at once, and leaves a
+  workload to an assignee that can take it, or to a scheduler that has not
+  read its spec yet, for at most `--assignment-bound-ms` (15 s). Anything
+  else is first claim wins at once. Claims still go through the lease and the
+  fence. A drained node's workloads move to where the scheduler assigns them,
+  and `felixd ps` shows an `ASSIGNED` column. Without the scheduler nothing
+  changes. `nodes` entries gain `blocked`, set while a node cannot read its
+  drain mark.
 - Upgrading: `felixd run` creates `sys.facts`. To use the scheduler, grant
-  nodes publish on `sys.facts` and read on `wl.scheduler.out`, and upgrade
-  every node first: an older node ignores assignments and claims by first
-  claim wins.
+  nodes publish on `sys.facts` and read on `wl.scheduler.out`. An older node
+  ignores assignments and claims by first claim wins, which is safe; upgrade
+  every node to get the placement. `sys.facts` is not trimmed yet (#164).
 - `felixd agent --metrics-bind <addr>` (or `FELIXD_METRICS_BIND`) serves
   Prometheus metrics at `/metrics` on that address, and `/live`. Off unless
   given. Per node: leases held, claims by result, handoffs, workloads that
