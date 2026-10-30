@@ -1,7 +1,7 @@
 //! Appends to a workload's merge log, fenced like its output stream: a claim
 //! before anything else, then every append a `publish_if` at the tail.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use felix_client::ConditionalWrite;
 use felixd_core::merge::{self, Entry, Reconciled};
 
@@ -72,8 +72,9 @@ impl<'a> MergeLog<'a> {
                     return Ok(log);
                 }
             }
+            faults::before_merge_claim();
             let claim = merge::encode_claim(fence.epoch(), &log.next, fence.node());
-            match felix.publish_if(stream, vec![claim], tail).await {
+            match send(felix, stream, vec![claim], tail, faults::Write::MergeClaim).await {
                 Ok(ConditionalWrite::Written { offset }) if offset == tail => {
                     log.tail += 1;
                     return Ok(log);
@@ -106,8 +107,16 @@ impl<'a> MergeLog<'a> {
         &self.next
     }
 
-    /// Appends `entries` and returns the offset each landed at, which is the
-    /// offset of its step. A refused write, or one whose answer was lost, is
+    /// The most entries one [`Self::append`] may take.
+    pub(crate) fn per_write(&self) -> usize {
+        let fits = merge::entries_per_write(self.next.len());
+        faults::merge_write_limit()
+            .map_or(fits, |k| k.min(fits))
+            .max(1)
+    }
+
+    /// Appends `entries`, at most [`Self::per_write`] of them, in one write and
+    /// returns the offset each landed at, which is the offset of its step. A refused write, or one whose answer was lost, is
     /// settled by [`merge::reconcile`]: this holder's own records are taken as
     /// written, and a later holder's end the run.
     pub(crate) async fn append(&mut self, entries: &[Entry]) -> Result<Vec<u64>> {
@@ -123,10 +132,8 @@ impl<'a> MergeLog<'a> {
                 return Err(LostLease.into());
             }
             faults::before_merge();
-            let sent = self
-                .felix
-                .publish_if(self.stream, batch.clone(), self.tail)
-                .await;
+            let write = faults::Write::Merge;
+            let sent = send(self.felix, self.stream, batch.clone(), self.tail, write).await;
             let seen_tail = match sent {
                 Ok(ConditionalWrite::Written { offset }) if offset == self.tail => {
                     let count = batch.len() as u64;
@@ -183,5 +190,30 @@ impl<'a> MergeLog<'a> {
         self.next = next;
         faults::after_merge();
         Ok(landed)
+    }
+}
+
+/// `publish_if`, or the dropped request, lost answer or refused oversized
+/// write a test fault asks for.
+async fn send(
+    felix: &Felix,
+    stream: &str,
+    records: Vec<Vec<u8>>,
+    at: u64,
+    write: faults::Write,
+) -> Result<ConditionalWrite> {
+    if faults::merge_write_limit().is_some_and(|limit| records.len() > limit) {
+        bail!(
+            "injected: a write of {} merge records is too large",
+            records.len()
+        );
+    }
+    match faults::answer(write) {
+        faults::Answer::Sent => felix.publish_if(stream, records, at).await,
+        faults::Answer::Dropped => Err(anyhow!("injected: the request was dropped")),
+        faults::Answer::Lost => {
+            felix.publish_if(stream, records, at).await?;
+            Err(anyhow!("injected: the answer was lost"))
+        }
     }
 }

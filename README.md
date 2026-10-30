@@ -134,7 +134,9 @@ seeing anything but the same outputs in the same order.
 
 `felixd replay --id counter --to 41` rebuilds the workload's state after
 input 41, and `--to 2026-10-29T14:02:00Z` its state after every input appended
-before that time. It restores the nearest snapshot at or before that point on a
+before that time. For a workload with several inputs both count on its merge
+log: an offset is a merge log offset, and a time covers the records merged
+before it, which is not when they were appended to their own inputs. It restores the nearest snapshot at or before that point on a
 fresh instance, runs the inputs after it and prints what the workload's
 `inspect` returns. `--diff` replays a range (`--from`, `--to`, by default every
 input with a recorded output) and compares each output with the one on the

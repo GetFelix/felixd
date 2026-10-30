@@ -618,8 +618,7 @@ async fn merged(
         {
             arrived.push(more);
         }
-        let mut entries = Vec::new();
-        let mut payloads = Vec::new();
+        let mut pending = Vec::new();
         for (input, event) in arrived {
             let event = event?;
             let stream = &spec.inputs[input];
@@ -633,38 +632,75 @@ async fn merged(
             if faults::drop_input(offset) {
                 continue;
             }
-            let mut found = Vec::new();
-            if offset > cursor[input] {
-                // A dropped delivery or offsets holding no event, as for one
-                // input.
-                for record in felix.read_range(stream, cursor[input], offset).await? {
-                    found.push((record.offset, record.timestamp_micros, record.payload));
+            // A dropped delivery or offsets holding no event, as for one input.
+            // A long gap is read a page at a time and merged in writes that
+            // fit, so neither the reply nor the write grows with it.
+            let mut from = cursor[input];
+            while from < offset {
+                let (page, after) = felix.read_page(stream, from, offset).await?;
+                for record in page {
+                    let found = (record.offset, record.timestamp_micros, record.payload);
+                    take(&mut pending, &mut cursor, input, found);
+                    if pending.len() >= merge.per_write() {
+                        merge_and_step(spec, steps, merge, &mut pending).await?;
+                    }
                 }
+                from = after;
             }
-            found.push((offset, event.timestamp_micros.unwrap_or(0), event.payload));
-            for (offset, timestamp_micros, payload) in found {
-                entries.push(Entry {
-                    input: u16::try_from(input).expect("at most MAX_INPUTS inputs"),
-                    offset,
-                    timestamp_micros,
-                });
-                payloads.push(payload);
-                cursor[input] = offset + 1;
+            let stamp = event.timestamp_micros.unwrap_or(0);
+            take(
+                &mut pending,
+                &mut cursor,
+                input,
+                (offset, stamp, event.payload),
+            );
+            if pending.len() >= merge.per_write() {
+                merge_and_step(spec, steps, merge, &mut pending).await?;
             }
         }
-        if entries.is_empty() {
-            continue;
-        }
-        let landed = merge.append(&entries).await?;
-        for ((entry, payload), at) in entries.iter().zip(payloads).zip(landed) {
-            let stream = &spec.inputs[usize::from(entry.input)];
-            if let Some(input) =
-                StepInput::read(stream, entry.offset, entry.timestamp_micros, &payload)?
-            {
-                steps.step(at, input).await?;
-            }
+        merge_and_step(spec, steps, merge, &mut pending).await?;
+    }
+}
+
+/// Adds the record `(offset, append time, payload)` of input `input` to
+/// `pending` and moves that input's cursor past it.
+fn take(
+    pending: &mut Vec<(Entry, Bytes)>,
+    cursor: &mut [u64],
+    input: usize,
+    (offset, timestamp_micros, payload): (u64, u64, Bytes),
+) {
+    let entry = Entry {
+        input: u16::try_from(input).expect("at most MAX_INPUTS inputs"),
+        offset,
+        timestamp_micros,
+    };
+    pending.push((entry, payload));
+    cursor[input] = offset + 1;
+}
+
+/// Appends the `pending` entries to the merge log, then steps each at the
+/// offset it landed at.
+async fn merge_and_step(
+    spec: &WorkloadSpec,
+    steps: &mut Steps<'_>,
+    merge: &mut MergeLog<'_>,
+    pending: &mut Vec<(Entry, Bytes)>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let entries: Vec<Entry> = pending.iter().map(|(entry, _)| *entry).collect();
+    let landed = merge.append(&entries).await?;
+    for ((entry, payload), at) in pending.drain(..).zip(landed) {
+        let stream = &spec.inputs[usize::from(entry.input)];
+        if let Some(input) =
+            StepInput::read(stream, entry.offset, entry.timestamp_micros, &payload)?
+        {
+            steps.step(at, input).await?;
         }
     }
+    Ok(())
 }
 
 /// Refuses an input stream whose `tail` is below `next_input`, the input

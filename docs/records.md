@@ -169,14 +169,17 @@ step got.
 The log is fenced like the output stream. A holder appends a claim after its claim on `.out` has
 landed and before it merges anything, at the tail it reads, once it has checked that the last record
 there is from an epoch no later than its own. A later epoch means it stops. Its claim carries `next`
-from the record before it. Every append after that is a `publish_if` at the tail it expects, so a
-stale holder's append is refused once the claim is on. A refused append reads the records past the
+from the record before it. Every append after that is a `publish_if` at the tail it expects, of at most as many entries
+as fit in 8 MiB (`merge::entries_per_write`), so a long gap read back after a dropped delivery goes
+out in several writes rather than one Felix would refuse on every retry. A stale holder's append
+is refused once the claim is on. A refused append reads the records past the
 tail: its own, whose answer was lost, are taken as written, and one from a later epoch ends the run.
 
 Entries an earlier holder appended before the claim stay. Every record of every input appears once,
 in its input's order, and `felixd check` reports one merged twice, out of order, missing from its
-input or passed over, a `next` that does not follow from the entries before it, and an epoch that
-goes backwards. With `--complete` it also reports records no entry names yet.
+input or passed over, an entry whose append time is not its record's, an entry of an epoch whose
+claim is not the last claim before it, a `next` that does not follow from the entries before it,
+and an epoch that goes backwards. With `--complete` it also reports records no entry names yet.
 
 ## Spec records
 

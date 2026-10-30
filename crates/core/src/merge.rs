@@ -22,6 +22,7 @@
 
 use std::fmt;
 
+use crate::MAX_WRITE_BYTES;
 use crate::codec::{DecodeError, Reader};
 
 const VERSION: u8 = 1;
@@ -80,6 +81,19 @@ impl Record<'_> {
     }
 }
 
+/// How many entries of a workload with `inputs` inputs one write holds,
+/// within [`MAX_WRITE_BYTES`]. A holder that finds a long gap in an input
+/// appends it in writes of this many, since Felix refuses a write too large
+/// for one frame and would refuse it again on every retry.
+pub fn entries_per_write(inputs: usize) -> usize {
+    MAX_WRITE_BYTES / (10 + entry_body(inputs))
+}
+
+/// The bytes of an entry after its 10-byte header, for `inputs` inputs.
+fn entry_body(inputs: usize) -> usize {
+    20 + 8 * inputs
+}
+
 /// Builds the claim a holder at `epoch` on node `node` appends, carrying
 /// `next` from the record before it.
 pub fn encode_claim(epoch: u64, next: &[u64], node: &str) -> Vec<u8> {
@@ -93,7 +107,7 @@ pub fn encode_claim(epoch: u64, next: &[u64], node: &str) -> Vec<u8> {
 /// place for the entry's input.
 pub fn encode_entry(epoch: u64, entry: Entry, next: &mut [u64]) -> Vec<u8> {
     next[usize::from(entry.input)] = entry.offset + 1;
-    let mut out = header(ENTRY, epoch, 20 + 8 * next.len());
+    let mut out = header(ENTRY, epoch, entry_body(next.len()));
     out.extend(entry.input.to_be_bytes());
     out.extend(entry.offset.to_be_bytes());
     out.extend(entry.timestamp_micros.to_be_bytes());

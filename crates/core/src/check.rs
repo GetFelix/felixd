@@ -189,8 +189,20 @@ pub enum Finding {
         expected: Option<u64>,
     },
     /// A merge record whose next offsets are not where the records before it
-    /// leave each input, or that names an input the spec does not have.
+    /// leave each input.
     MergeCursor { offset: u64 },
+    /// A merge entry naming an input the spec does not have.
+    MergeUnknownInput { offset: u64, input: u16 },
+    /// A merge entry whose append time is not its record's.
+    MergeTimestamp {
+        offset: u64,
+        input: String,
+        named: u64,
+        recorded: u64,
+        found: u64,
+    },
+    /// A merge entry of an epoch whose claim is not the last claim before it.
+    MergeUnclaimed { offset: u64, epoch: u64 },
     /// Records of an input that are not on the merge log. Only a finding
     /// when the log should be complete.
     MergeBehind {
@@ -340,14 +352,19 @@ pub fn check_snapshots(
     findings
 }
 
+/// One input of a merged workload as [`check_merge`] reads it: its name and,
+/// for each record in offset order, its offset and append time.
+pub type InputRecords<'a> = (&'a str, Vec<(u64, u64)>);
+
 /// Checks a merge log, as `(offset, record)` in offset order, against
-/// `inputs`: each input's name and the offsets of its records, read after the
-/// log. Every record of every input must be merged once, in its input's order,
-/// and each record's next offsets must follow from the entries before it.
-/// `complete` says every record of every input should be merged already.
+/// `inputs`, read after the log. Every record of every input must be merged
+/// once, in its input's order, with its own append time; each record's next
+/// offsets must follow from the entries before it; and each epoch's entries
+/// must follow that epoch's claim. `complete` says every record of every
+/// input should be merged already.
 pub fn check_merge(
     records: &[(u64, &[u8])],
-    inputs: &[(&str, Vec<u64>)],
+    inputs: &[InputRecords<'_>],
     complete: bool,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -355,6 +372,7 @@ pub fn check_merge(
     let mut merged = vec![0; inputs.len()];
     let mut next = vec![0; inputs.len()];
     let mut last_epoch: Option<u64> = None;
+    let mut claimed: Option<u64> = None;
     for &(offset, record) in records {
         let decoded = match merge::decode(record) {
             Ok(decoded) => decoded,
@@ -377,28 +395,54 @@ pub fn check_merge(
             });
         }
         last_epoch = Some(last_epoch.map_or(epoch, |e| e.max(epoch)));
-        if let Some(entry) = decoded.entry() {
-            let Some((name, offsets)) = inputs.get(usize::from(entry.input)) else {
+        let Some(entry) = decoded.entry() else {
+            claimed = Some(epoch);
+            if decoded.next() != next {
                 findings.push(Finding::MergeCursor { offset });
-                continue;
-            };
-            let at = &mut merged[usize::from(entry.input)];
-            let expected = offsets.get(*at).copied();
-            if expected == Some(entry.offset) {
+                if decoded.next().len() == next.len() {
+                    next = decoded.next().to_vec();
+                }
+            }
+            continue;
+        };
+        if claimed != Some(epoch) {
+            findings.push(Finding::MergeUnclaimed { offset, epoch });
+        }
+        let Some((name, on_input)) = inputs.get(usize::from(entry.input)) else {
+            findings.push(Finding::MergeUnknownInput {
+                offset,
+                input: entry.input,
+            });
+            continue;
+        };
+        let at = &mut merged[usize::from(entry.input)];
+        let expected = on_input.get(*at).copied();
+        match expected {
+            Some((found, stamp)) if found == entry.offset => {
                 *at += 1;
-            } else {
+                if stamp != entry.timestamp_micros {
+                    findings.push(Finding::MergeTimestamp {
+                        offset,
+                        input: (*name).to_owned(),
+                        named: entry.offset,
+                        recorded: entry.timestamp_micros,
+                        found: stamp,
+                    });
+                }
+            }
+            _ => {
                 findings.push(Finding::MergeOrder {
                     offset,
                     input: (*name).to_owned(),
                     named: entry.offset,
-                    expected,
+                    expected: expected.map(|(found, _)| found),
                 });
                 // Carry on after the record it named, so one wrong entry is
                 // one finding.
-                *at = (*at).max(offsets.partition_point(|&o| o <= entry.offset));
+                *at = (*at).max(on_input.partition_point(|&(o, _)| o <= entry.offset));
             }
-            next[usize::from(entry.input)] = entry.offset + 1;
         }
+        next[usize::from(entry.input)] = entry.offset + 1;
         if decoded.next() != next {
             findings.push(Finding::MergeCursor { offset });
             if decoded.next().len() == next.len() {
@@ -407,12 +451,12 @@ pub fn check_merge(
         }
     }
     if complete {
-        for ((name, offsets), &at) in inputs.iter().zip(&merged) {
-            if at < offsets.len() {
+        for ((name, on_input), &at) in inputs.iter().zip(&merged) {
+            if at < on_input.len() {
                 findings.push(Finding::MergeBehind {
                     input: (*name).to_owned(),
-                    missing: offsets.len() - at,
-                    first: offsets[at],
+                    missing: on_input.len() - at,
+                    first: on_input[at].0,
                 });
             }
         }
@@ -513,6 +557,25 @@ impl fmt::Display for Finding {
             Finding::MergeCursor { offset } => write!(
                 f,
                 "merge record at offset {offset} does not carry on from the records before it"
+            ),
+            Finding::MergeUnknownInput { offset, input } => write!(
+                f,
+                "merge entry at offset {offset} names input {input}, which the spec does not have"
+            ),
+            Finding::MergeTimestamp {
+                offset,
+                input,
+                named,
+                recorded,
+                found,
+            } => write!(
+                f,
+                "merge entry at offset {offset} gives {input}@{named} append time {recorded}, \
+                 but the record has {found}"
+            ),
+            Finding::MergeUnclaimed { offset, epoch } => write!(
+                f,
+                "merge entry at offset {offset} is at epoch {epoch}, with no claim of that epoch before it"
             ),
             Finding::MergeBehind {
                 input,

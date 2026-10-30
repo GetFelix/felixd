@@ -38,7 +38,7 @@ also reports outputs missing from the end of a stream, and `--upstream`, which a
 workload whose output a checked one reads, up the pipeline. Stages are checked upstream first.
 
 Flags of `replay`: `--id`, `--to` (an input offset, a merge log offset for a workload with
-several inputs, or an RFC 3339 time such as
+several inputs, or an RFC 3339 time, compared there with when entries were merged such as
 `2026-10-29T14:02:00Z`), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
 the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a divergence.
 

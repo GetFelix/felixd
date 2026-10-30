@@ -106,3 +106,13 @@ fn reconcile_skips_its_own_records_and_stops_for_a_later_holder() {
     assert_eq!(reconcile(4, &batch, &[&earlier]), Reconciled::Diverged);
     assert_eq!(reconcile(4, &batch, &[b"junk"]), Reconciled::Diverged);
 }
+
+#[test]
+fn a_write_of_entries_fits_in_one_frame() {
+    for inputs in [2, 3, MAX_INPUTS] {
+        let per_write = entries_per_write(inputs);
+        let one = encode_entry(1, entry(0, 0), &mut vec![0; inputs]).len();
+        assert!(per_write * one <= crate::MAX_WRITE_BYTES, "{inputs}");
+        assert!((per_write + 1) * one > crate::MAX_WRITE_BYTES, "{inputs}");
+    }
+}

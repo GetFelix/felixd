@@ -974,7 +974,9 @@ inputs, and step the records it names in its order. `felixd check` also checks
 the log itself: every record of every input merged once and in its input's
 order, `next` offsets that follow from the entries, and epochs that never go
 backwards; with `--complete`, that no record is left unmerged. `felixd replay
---to` takes a merge log offset for such a workload.
+--to` takes a merge log offset for such a workload, and a time there covers
+the entries merged before it, not the records appended to their inputs before
+it: entries are not in their records' time order.
 
 This rests on the first layer of the safety argument ([Exactly-once
 output](#exactly-once-output)) only: the merge order is not a function of the

@@ -190,7 +190,8 @@ async fn check_merge(
     for input in inputs {
         let tail = felix.read_tail(input).await?;
         let records = felix.read_range(input, 0, tail).await?;
-        offsets.push((input.as_str(), records.iter().map(|r| r.offset).collect()));
+        let found = records.iter().map(|r| (r.offset, r.timestamp_micros));
+        offsets.push((input.as_str(), found.collect()));
     }
     let log: Vec<(u64, &[u8])> = log.iter().map(|r| (r.offset, r.payload.as_ref())).collect();
     Ok(check::check_merge(&log, &offsets, complete))

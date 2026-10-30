@@ -686,8 +686,10 @@ fn at(log: &[Vec<u8>]) -> Vec<(u64, &[u8])> {
     (0..).zip(log.iter().map(Vec::as_slice)).collect()
 }
 
-fn inputs() -> Vec<(&'static str, Vec<u64>)> {
-    vec![("orders", vec![0, 1, 2]), ("payments", vec![1, 3])]
+/// Two inputs whose records' append times are all 0, as `entry` gives.
+fn inputs() -> Vec<InputRecords<'static>> {
+    let at = |offsets: &[u64]| offsets.iter().map(|&o| (o, 0)).collect();
+    vec![("orders", at(&[0, 1, 2])), ("payments", at(&[1, 3]))]
 }
 
 #[test]
@@ -763,9 +765,74 @@ fn a_merge_log_epoch_regression_and_junk_are_findings() {
             previous: 2
         }
     );
-    assert!(matches!(
+    // Epoch 1's entry also follows epoch 2's claim, not its own.
+    assert_eq!(
         found[1],
+        Finding::MergeUnclaimed {
+            offset: 2,
+            epoch: 1
+        }
+    );
+    assert!(matches!(
+        found[2],
         Finding::UndecodableMerge { offset: 3, .. }
     ));
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
+}
+
+#[test]
+fn an_entry_with_another_append_time_than_its_record_is_a_finding() {
+    let log = merge_log(1, &[(0, 0), (0, 1)]);
+    let mut stamped = inputs();
+    stamped[0].1[1].1 = 77;
+    assert_eq!(
+        check_merge(&at(&log), &stamped, false),
+        [Finding::MergeTimestamp {
+            offset: 2,
+            input: "orders".into(),
+            named: 1,
+            recorded: 0,
+            found: 77
+        }]
+    );
+}
+
+#[test]
+fn entries_must_follow_their_epochs_claim() {
+    let mut log = merge_log(1, &[(0, 0)]);
+    // Epoch 2 merges without having claimed the log.
+    log.push(merge::encode_entry(2, entry(0, 1), &mut [1, 0]));
+    assert_eq!(
+        check_merge(&at(&log), &inputs(), false),
+        [Finding::MergeUnclaimed {
+            offset: 2,
+            epoch: 2
+        }]
+    );
+    // An entry before any claim.
+    let first = [
+        merge::encode_entry(1, entry(0, 0), &mut [0, 0]),
+        merge::encode_claim(1, &[1, 0], "a"),
+    ];
+    assert_eq!(
+        check_merge(&at(&first), &inputs(), false)[0],
+        Finding::MergeUnclaimed {
+            offset: 0,
+            epoch: 1
+        }
+    );
+}
+
+#[test]
+fn an_entry_naming_an_input_the_spec_lacks_is_its_own_finding() {
+    let mut log = merge_log(1, &[]);
+    log.push(merge::encode_entry(1, entry(2, 0), &mut [0, 0, 0]));
+    let found = check_merge(&at(&log), &inputs(), false);
+    assert_eq!(
+        found[0],
+        Finding::MergeUnknownInput {
+            offset: 1,
+            input: 2
+        }
+    );
 }

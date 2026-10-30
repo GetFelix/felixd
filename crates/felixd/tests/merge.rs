@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use common::{ID, OUTPUT, TestFelix, eventually, replication_factor, test_felix};
 use felixd_agent::admin::{StreamKind, ensure_stream};
-use felixd_core::merge;
 use felixd_core::output::{self, Addressed, OutputHeader};
 use felixd_core::spec::Limits;
+use felixd_core::{merge, names};
 use felixd_runtime::{Input, Runtime, Stepped};
 
 const ORDERS: &str = "orders";
@@ -255,4 +255,229 @@ async fn a_frozen_holder_cannot_merge_after_the_next_holder_claims() {
         }),
         "{log:?}"
     );
+}
+
+/// Each record of the merge log as `(epoch, is a claim)`.
+async fn shape(t: &TestFelix) -> Vec<(u64, bool)> {
+    merge_log(t)
+        .await
+        .iter()
+        .map(|&(_, epoch, entry)| (epoch, entry.is_none()))
+        .collect()
+}
+
+/// Felix refuses a write too large for a frame, every time it is sent. A
+/// gap in one input, read back after a dropped delivery, is merged in
+/// writes that fit; one write of the whole gap would be refused forever.
+/// The fault caps a write at one entry, so the gap and its next record
+/// cross that limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gap_longer_than_one_write_is_merged_in_several() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit(&t).await;
+    t.publish_all(ORDERS, [meta()]).await;
+    let first = t.read_all(ORDERS).await[0].0;
+    let faults = format!("merge-write-limit=1,drop-input={first}");
+    let _agent = t.start_agent_with_faults(&faults);
+    // Long enough for the holder to be subscribed when the next ones land.
+    eventually("the merge claim", Duration::from_secs(60), || async {
+        (!merge_log(&t).await.is_empty()).then_some(())
+    })
+    .await;
+    t.publish_all(ORDERS, [meta(), meta(), meta()]).await;
+    t.publish_all(PAYMENTS, [meta(), meta()]).await;
+    assert_merged(&t, &module, 6).await;
+}
+
+/// A stale holder is frozen before its first merge append, and the next
+/// holder is frozen after reading the merge log's tail, before its claim.
+/// The stale holder wakes and its entry lands at that tail. The next holder's
+/// claim is refused there; it must claim again after the entry and step it,
+/// at its own epoch, rather than give up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_entry_before_the_next_claim_is_adopted() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit(&t).await;
+    t.publish_all(ORDERS, [meta()]).await;
+    let stale = t.start_agent_with_faults("freeze-before-merge=1");
+    eventually("the stale freeze", Duration::from_secs(60), || async {
+        stale.stopped().then_some(())
+    })
+    .await;
+    let (old, _) = t.lease(ID).await.expect("the stale node's lease");
+
+    // A long TTL, so the next holder keeps its lease while frozen.
+    let next = t.start_node_with_ttl(
+        "next",
+        "freeze-before-merge-claim=1",
+        Duration::from_secs(30),
+    );
+    eventually("the next freeze", Duration::from_secs(60), || async {
+        next.stopped().then_some(())
+    })
+    .await;
+    let (held, _) = t.lease(ID).await.expect("the next node's lease");
+    assert_eq!(held.owner, "next");
+    assert!(held.epoch > old.epoch);
+
+    stale.resume();
+    eventually("the stale entry", Duration::from_secs(30), || async {
+        (shape(&t).await == [(old.epoch, true), (old.epoch, false)]).then_some(())
+    })
+    .await;
+    next.resume();
+    assert_merged(&t, &module, 1).await;
+    assert_eq!(
+        shape(&t).await,
+        [(old.epoch, true), (old.epoch, false), (held.epoch, true)],
+        "the next holder did not claim after the stale entry at its own epoch"
+    );
+    let epochs: Vec<u64> = t
+        .outputs(OUTPUT)
+        .await
+        .iter()
+        .map(|(_, r)| output::decode(r).unwrap().epoch())
+        .collect();
+    assert_eq!(epochs, [held.epoch]);
+}
+
+/// The first merge claim's answer and the first append's are lost, and the
+/// second append is dropped. Each lands once: a holder that finds its own
+/// claim last does not claim again, and its own entries past the tail are
+/// taken as written.
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_writes_land_once_through_lost_answers_and_dropped_requests() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit(&t).await;
+    let faults = "lose-merge-claim-answer=1,lose-merge-answer=1,drop-merge=2";
+    let _agent = t.start_agent_with_faults(faults);
+    eventually("the merge claim", Duration::from_secs(60), || async {
+        (!merge_log(&t).await.is_empty()).then_some(())
+    })
+    .await;
+    for _ in 0..3 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    assert_merged(&t, &module, 6).await;
+    let claims = shape(&t).await.iter().filter(|(_, claim)| *claim).count();
+    assert_eq!(claims, 1, "{:?}", shape(&t).await);
+}
+
+/// A snapshot that runs out of fuel restarts the run under the same lease.
+/// The holder's claim is already the last of its epoch on the merge log, so
+/// it does not claim again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_under_the_same_lease_does_not_claim_the_merge_log_again() {
+    let Some(t) = test_felix().await else { return };
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    for input in INPUTS {
+        ensure_stream(&t.settings, input, kind).await.unwrap();
+    }
+    let module = felixd_testkit::workload("faulty");
+    let args = [
+        "--snapshot-every",
+        "1",
+        "--fuel",
+        "2000000",
+        "--snapshot-fuel",
+        "2000000",
+    ];
+    assert!(t.run_on(ID, &module, &INPUTS, &args).success());
+    let _agent = t.start_agent();
+    t.publish_all(ORDERS, [meta()]).await;
+    eventually("the first step", Duration::from_secs(60), || async {
+        (!t.outputs(OUTPUT).await.is_empty()).then_some(())
+    })
+    .await;
+    // A snapshot of 20,000 chunks does not fit in the fuel.
+    t.publish_all(PAYMENTS, [b"chunks:20000".to_vec()]).await;
+    t.publish_all(ORDERS, [meta()]).await;
+    t.publish_all(PAYMENTS, [meta()]).await;
+    assert_merged(&t, &module, 3).await;
+    let found = shape(&t).await;
+    assert_eq!(
+        found.iter().filter(|(_, claim)| *claim).count(),
+        1,
+        "{found:?}"
+    );
+    assert!(t.lease(ID).await.is_some(), "the workload is still held");
+}
+
+/// The holder dies after its second snapshot. The next restores it, finds the
+/// time-based snapshot point from the merge log and carries on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_workload_resumes_from_a_snapshot() {
+    let Some(t) = test_felix().await else { return };
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    for input in INPUTS {
+        ensure_stream(&t.settings, input, kind).await.unwrap();
+    }
+    let module = felixd_testkit::workload("faulty");
+    let args = ["--snapshot-every", "4", "--snapshot-every-ms", "1"];
+    assert!(t.run_on(ID, &module, &INPUTS, &args).success());
+    for _ in 0..6 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    let mut first = t.start_agent_with_faults("crash-after-snapshot=2");
+    first.exited(Duration::from_secs(60)).await;
+    assert!(
+        !t.read_all(common::SNAPSHOTS).await.is_empty(),
+        "no snapshot was written"
+    );
+    let _next = t.start_agent();
+    for _ in 0..3 {
+        t.publish_all(PAYMENTS, [meta()]).await;
+        t.publish_all(ORDERS, [meta()]).await;
+    }
+    assert_merged(&t, &module, 18).await;
+}
+
+/// A merge log written for another number of inputs than the spec has
+/// cannot be carried on from, on any node.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_log_for_another_number_of_inputs_fails_the_workload() {
+    let Some(t) = test_felix().await else { return };
+    submit(&t).await;
+    t.publish_all(MERGE, [merge::encode_claim(0, &[0, 0, 0], "elsewhere")])
+        .await;
+    t.publish_all(ORDERS, [meta()]).await;
+    let _agent = t.start_agent();
+    let failure = t.failure().await;
+    assert!(
+        failure.contains("the merge log was written for 3 inputs, the spec has 2"),
+        "{failure}"
+    );
+}
+
+/// `felixd check --upstream` on a join checks both stages it reads first.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_upstream_on_a_join_checks_each_upstream_first() {
+    let Some(t) = test_felix().await else { return };
+    let counter = t.submit_as("a", "counter", &[]).await;
+    t.submit_as("b", "counter", &[]).await;
+    let ups = ["wl.a.out", "wl.b.out"];
+    assert!(t.run_on("join", &counter, &ups, &[]).success());
+    let _agent = t.start_agent();
+    t.publish_all(common::INPUT, (0..3).map(|i: u8| vec![i]))
+        .await;
+    eventually("the join's outputs", Duration::from_secs(90), || async {
+        let join = t.outputs(&names::output_stream("join")).await;
+        (join.len() >= 6).then_some(())
+    })
+    .await;
+    let (ok, report) = t.check(&["--id", "join", "--complete", "--upstream"]);
+    assert!(ok, "{report}");
+    let order: Vec<&str> = report
+        .lines()
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    assert_eq!(order.len(), 3, "{report}");
+    assert_eq!(order[2], "wl.join.out", "{report}");
+    assert!(order[..2].contains(&"wl.a.out") && order[..2].contains(&"wl.b.out"));
 }
