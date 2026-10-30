@@ -1546,6 +1546,18 @@ at the gate, and the assignment only delays others until the bound.
 `felixd replay --id admission --diff --all --module <hash>` lists the recorded
 requests a new policy decides otherwise.
 
+`specs/FelixdAdmission.tla` models the gate and the projector against a writer
+that can append any record to `sys.specs` and point `workloads` anywhere
+([formal.md](formal.md#admission)). It checks the rule as it should be, which
+the code above does not yet follow in four places: the gate is on once
+`felixd init`'s marker exists, not only for records after admission's own; it
+reads every record up to the tail it read, not only those before the one it
+checks; it judges a record naming a decision past the tail again on each read
+rather than keeping it unverified; and the projector appends a skip record for
+an accepted decision it does not record, and takes its progress from the latest
+decision any verified record names instead of walking the decisions from the
+first.
+
 Not built: the requester. Felix records a record's publisher only when the
 broker is configured to and a reader asks, and the workload contract has no
 field for it, so admission decides from the payload alone and policy cannot
