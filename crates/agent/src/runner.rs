@@ -525,7 +525,7 @@ async fn run(
         since_snapshot: 0,
         previous_stamp,
         hold,
-        last_trim,
+        last_trim: last_trim.filter(|_| false),
     };
     if let Some(merge) = &mut merge {
         return merged(felix, id, spec, &mut steps, merge, resume.next_input).await;
