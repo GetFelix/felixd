@@ -499,23 +499,6 @@ async fn own(
         if slot.is_none() {
             continue;
         }
-        // Read again here: the last regular read can be a second old, or
-        // much older in a process that was stopped.
-        match drain::marked(&node.felix, &node.node_id).await {
-            Ok(false) => {}
-            Ok(true) => {
-                note_drain(&node, true);
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(workload = %id, %error, "could not read this node's drain mark");
-                drop(slot);
-                if !pause(&mut stop).await {
-                    return;
-                }
-                continue;
-            }
-        }
         let output_tail = std::sync::Mutex::new(None);
         let floor = written_epoch(&node.felix, &id, &spec.output, &output_tail);
         match lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await {
@@ -540,10 +523,7 @@ async fn own(
                     }
                     // Released at once rather than left to expire, so the
                     // next node need not wait out the TTL.
-                    Ended::Drained => {
-                        lease::release(&node.felix, &held).await;
-                        tracing::info!(workload = %id, "released for the drain");
-                    }
+                    Ended::Drained => {}
                     Ended::Lost => {}
                 }
             }
