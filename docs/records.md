@@ -144,6 +144,40 @@ are unchanged. Chunks that land without their manifest, after a crash or a parti
 read. A new owner reads back from the tail for the last manifest or version 2 record, passing over
 chunks, reads the chunks it names and checks each hash; a mismatch fails the workload.
 
+## Merge log records
+
+On `wl.<id>.merge`, for a workload with several inputs. It records the order the lease holder chose
+to step their records in. Each record is `version (1) | kind (1) | epoch (8) | body`, version 1.
+
+| Kind | Body |
+|---|---|
+| 0, entry | input (2), offset (8), timestamp (8), next |
+| 1, claim | next, then the holder's node id in UTF-8 to the end of the record |
+
+An entry names one record: the input's position in the spec's `inputs`, the record's offset on that
+input and its append time in microseconds. `next` is a count (2) followed by that many offsets (8),
+one per input: the offset after the last record of that input merged so far. The last record alone
+says where each input carries on, however long one has been idle. A reader refuses another version
+or kind; an agent that finds one records the workload as needing an operator (reason 7).
+
+The entry's offset on the merge log is the step's offset. Outputs, rejections and snapshots name
+it where a one-input workload's name the input offset, so the resume fold, reconcile, `felixd
+check` and `felixd replay` work on merge log offsets unchanged. The step is given the record's own
+input stream, offset and append time, read from the entry, so a replay passes exactly what the live
+step got.
+
+The log is fenced like the output stream. A holder appends a claim after its claim on `.out` has
+landed and before it merges anything, at the tail it reads, once it has checked that the last record
+there is from an epoch no later than its own. A later epoch means it stops. Its claim carries `next`
+from the record before it. Every append after that is a `publish_if` at the tail it expects, so a
+stale holder's append is refused once the claim is on. A refused append reads the records past the
+tail: its own, whose answer was lost, are taken as written, and one from a later epoch ends the run.
+
+Entries an earlier holder appended before the claim stay. Every record of every input appears once,
+in its input's order, and `felixd check` reports one merged twice, out of order, missing from its
+input or passed over, a `next` that does not follow from the entries before it, and an epoch that
+goes backwards. With `--complete` it also reports records no entry names yet.
+
 ## Spec records
 
 On `sys.specs`, one shard. Each record is JSON: `format` (1), `id`, the workload id, and `spec`, a
@@ -159,7 +193,7 @@ not know. The value sits under its own key so that a build from before formats, 
 fields at the top, refuses it instead of reading what it can. A value with no `format` is from such
 a build and still reads.
 
-- A workload spec has `module` (hex sha256), `input`, `output`, `snapshot_every` (default 1000),
+- A workload spec has `module` (hex sha256), `input` or `inputs`, `output`, `snapshot_every` (default 1000),
   `snapshot_every_ms` (absent unless set), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000),
   `max_memory_bytes` (default 64 MiB) and `snapshot_fuel` (default 500,000,000, for a whole
   snapshot or restore; a snapshot that runs out is skipped, a restore that runs out
@@ -167,7 +201,9 @@ needs an operator). A spec without `limits` gets the defaults. A failed spec
   also has `failure`: `class` (`transient`, `needs-operator` or `poison`) and `detail`. A
   `failure` that is a string is from an older build and reads as poison. The cache value also has `record`, the `sys.specs` offset of the spec record
   it comes from. An agent runs a spec only when that record says the same, state aside, and leaves
-  one without `record` to an operator.
+  one without `record` to an operator. A workload with one input has `input`, the stream's name.
+  One with several has `inputs`, a list of 2 to 64 distinct names and no `input`, so a build that
+  reads only `input` refuses it.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a number.
 - A node has `version`, `max_workloads` and `held`.
 
@@ -176,7 +212,9 @@ needs an operator). A spec without `limits` gets the defaults. A failed spec
 `resume::fold` takes the latest snapshot header, the header of the last output or rejection record on the output
 stream and that stream's next offset, which is past the new owner's claim. It returns whether to restore the snapshot, the input offset to
 subscribe from, and which outputs the stream already holds: those at or before the last record's
-`(input offset, index)`, starting at the snapshot's output tail. The owner runs `step` for those
+`(input offset, index)`, starting at the snapshot's output tail. For a workload with several inputs the
+offsets are merge log offsets ([Merge log records](#merge-log-records)): it steps the entries from
+there, including any an earlier holder merged and never stepped, before it merges more. The owner runs `step` for those
 inputs and drops the outputs, after `resume::check_skipped` has compared each with the record in its
 place. `Resume::replaying` says when the owner is still before the last written input, which is when
 it must not snapshot.

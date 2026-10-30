@@ -188,11 +188,23 @@ impl TestFelix {
     /// Runs `felixd run <args>` for `module` as workload `id` reading
     /// `input`, which must exist.
     pub(crate) fn run(&self, id: &str, module: &[u8], input: &str, args: &[&str]) -> ExitStatus {
+        self.run_on(id, module, &[input], args)
+    }
+
+    /// As [`Self::run`], reading each of `inputs`.
+    pub(crate) fn run_on(
+        &self,
+        id: &str,
+        module: &[u8],
+        inputs: &[&str],
+        args: &[&str],
+    ) -> ExitStatus {
         let dir = std::env::temp_dir().join(format!("felixd-{}", self.settings.namespace));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{}.wasm", felixd_core::module::hash(module)));
         std::fs::write(&path, module).unwrap();
-        self.felixd(&["run", "--id", id, "--input", input])
+        self.felixd(&["run", "--id", id])
+            .args(inputs.iter().flat_map(|&input| ["--input", input]))
             .args(["--replication-factor", &replication_factor().to_string()])
             .args(args)
             .arg(&path)

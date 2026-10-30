@@ -105,9 +105,11 @@ enum Command {
         /// The workload's name, used in its stream names.
         #[arg(long)]
         id: String,
-        /// The stream the workload reads. It must be a durable stream.
-        #[arg(long)]
-        input: String,
+        /// The stream the workload reads. It must be a durable stream. Repeat
+        /// for several: their records are merged in the order the lease
+        /// holder records on the workload's merge log.
+        #[arg(long = "input", required = true)]
+        inputs: Vec<String>,
         /// Write a snapshot after this many inputs.
         #[arg(long, default_value_t = felixd_core::spec::DEFAULT_SNAPSHOT_EVERY)]
         snapshot_every: u64,
@@ -179,7 +181,9 @@ async fn main() -> Result<()> {
                 if report.findings.is_empty() {
                     println!(
                         "{}: {} records, ok, from {}",
-                        report.output, report.records, report.input
+                        report.output,
+                        report.records,
+                        report.inputs.join(", ")
                     );
                 }
                 for finding in &report.findings {
@@ -235,7 +239,7 @@ async fn main() -> Result<()> {
         Command::Run {
             connection,
             id,
-            input,
+            inputs,
             snapshot_every,
             snapshot_every_ms,
             fuel,
@@ -246,7 +250,8 @@ async fn main() -> Result<()> {
         } => {
             let bytes =
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
-            let mut submission = Submission::new(&id, bytes, &input);
+            let mut submission = Submission::new(&id, bytes, &inputs[0]);
+            submission.inputs = inputs;
             submission.snapshot_every = snapshot_every;
             submission.snapshot_every_ms = snapshot_every_ms;
             submission.limits = Limits {

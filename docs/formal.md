@@ -258,7 +258,7 @@ composition.
   record's.
 - Spec edits and spec records in `Felixd.tla`. `FelixdSpecs.tla` models them
   ([Spec history](#spec-history)).
-- Several inputs, `felixd check` beyond which spec each input ran under, and drain.
+- Several inputs and the merge log (#138), `felixd check` beyond which spec each input ran under, and drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.

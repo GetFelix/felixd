@@ -9,6 +9,7 @@
 //! - [`class`]: error classes and what an operator has to fix.
 //! - [`placement`]: which free workloads a node claims.
 //! - [`module`]: how a module is identified.
+//! - [`merge`]: the merge log of a workload with several inputs.
 //! - [`resume`]: where a new owner picks a workload up.
 //! - [`replay`]: where a replay starts and stops.
 //! - [`check`]: what is wrong with an output stream, against a replay.
@@ -16,6 +17,7 @@
 pub mod check;
 pub mod class;
 pub mod lease;
+pub mod merge;
 pub mod module;
 pub mod names;
 pub mod node;

@@ -156,8 +156,9 @@ world workload {
 ### `step`
 
 The host calls `step` once per input record, in input order, with the
-metadata above. Every field of `input` is a function of the input stream and
-the spec alone, so a replay, a resume after takeover, `felixd check` and
+metadata above. A workload with several inputs gets their records in the order
+its merge log records ([Several inputs](#several-inputs)). Every field of
+`input` is a function of the input streams, the merge log and the spec alone, so a replay, a resume after takeover, `felixd check` and
 `felixd replay` pass identical values. The host never fills in a field from
 the node it runs on.
 
@@ -261,6 +262,18 @@ outputs addressed to one name, `out`, with their keys; a spec cannot name
 another yet. Claims, failures, needs-operator records, rejections and other
 names are passed over ([design.md, Pipelines](design.md#pipelines)).
 
+## Several inputs
+
+A spec may name several input streams. The lease holder merges their records
+as they arrive and appends the order it chose to the workload's merge log,
+`wl.<id>.merge`, before it steps any of them. Each step gets the record's own
+`source.stream`, `offset` and `timestamp-micros`, so a step can tell its
+inputs apart. Within one input the records come in offset order; across inputs
+the order is whatever the holder recorded, and the guest must not assume
+another. Replay, a resume after takeover and `felixd check` read the merge log
+and step the same records in the same order. An output's input offset is the
+step's offset on the merge log ([records.md](records.md#merge-log-records)).
+
 ## 0.1 workloads
 
 The host refuses a component that does not export the 0.2 interfaces. It
@@ -297,8 +310,6 @@ build has no effect executors.
 
 - Module upgrades at a recorded input offset (#64's last item). Spec history
   is now records on `sys.specs` (#72); the upgrade itself is not built.
-- Several inputs (#58). `source` already names which input a record came
-  from.
 - Typed spec and failure records (#73). The error classes here are the ones
   #73 will record.
 

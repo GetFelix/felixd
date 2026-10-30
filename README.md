@@ -93,7 +93,7 @@ felixd agent
 ```
 
 `felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
-`wl.<id>.snap` streams, appends the spec as a record to the `sys.specs` stream
+`wl.<id>.snap` streams (and `wl.<id>.merge` when `--input` is given more than once), appends the spec as a record to the `sys.specs` stream
 and points the `workloads` cache at it. `sys.specs` keeps every version of every
 spec. It creates felixd's caches and
 streams with three `Quorum` replicas unless `--replication-factor` says
@@ -368,6 +368,7 @@ snapshot would take too long.
 | Which nodes are alive | A cache with a TTL |
 | A workload's input | A durable stream, resumed with `subscribe_from` |
 | Output that a stale owner cannot write | `publish_if` against the output stream's tail |
+| The order several inputs are stepped in | A durable stream per workload, written with `publish_if` like the output |
 | Surviving a broker's loss | `Quorum` streams and caches |
 | Snapshots | A durable stream per workload |
 | Replay to a time | `offset_for_time` and range reads |
@@ -390,6 +391,9 @@ node stops renewing, the lease expires and another felixd claims the workload,
 loads the latest snapshot and resumes from the input offset recorded in it.
 Each output record carries the input offset that produced it, so the new
 owner knows which outputs already exist and does not write them again.
+A workload can read several streams. The holder records the order it steps
+their records in on a merge log, fenced the same way, and a new owner, replay
+and `felixd check` follow that log, so the order is the same everywhere.
 [docs/design.md](docs/design.md) has the details.
 
 ## Status
@@ -400,7 +404,7 @@ owner knows which outputs already exist and does not write them again.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, drain, status, metrics | Pipelines done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines and several inputs done |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates

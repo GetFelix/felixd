@@ -10,6 +10,7 @@
 //! - [`lease`]: claims, renews and releases a workload's lease.
 //! - [`runner`]: runs one workload: resume, then step, append and snapshot.
 //! - [`output`]: appends a step's outputs exactly once.
+//! - [`merge`]: appends to the merge log of a workload with several inputs.
 //! - [`input`]: what a step is given and what it produced, the same for every
 //!   caller.
 //! - [`snapshots`]: reads snapshots and their chunks back.
@@ -28,6 +29,7 @@ pub mod submit;
 mod faults;
 mod input;
 mod lease;
+mod merge;
 mod output;
 mod runner;
 mod snapshots;

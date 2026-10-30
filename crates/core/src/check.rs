@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::merge;
 use crate::names;
 use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::{self, SnapshotHeader};
@@ -168,6 +169,35 @@ pub enum Finding {
     },
     /// A record on the snapshot stream that is not a snapshot.
     UndecodableSnapshot { offset: u64, error: String },
+    /// A record on the merge log that is not a merge record. `offset` is on
+    /// the merge log, as for every merge finding.
+    UndecodableMerge { offset: u64, error: String },
+    /// A merge record whose writer's epoch is below an earlier one's.
+    MergeEpochRegression {
+        offset: u64,
+        epoch: u64,
+        previous: u64,
+    },
+    /// A merge entry that does not name the next record of its input:
+    /// `expected`, or none when the input holds no more. It merges a
+    /// record twice, out of order or one that is not there, or passes over
+    /// records of that input.
+    MergeOrder {
+        offset: u64,
+        input: String,
+        named: u64,
+        expected: Option<u64>,
+    },
+    /// A merge record whose next offsets are not where the records before it
+    /// leave each input, or that names an input the spec does not have.
+    MergeCursor { offset: u64 },
+    /// Records of an input that are not on the merge log. Only a finding
+    /// when the log should be complete.
+    MergeBehind {
+        input: String,
+        missing: usize,
+        first: u64,
+    },
 }
 
 /// Checks the records on an output stream, as `(offset, record)` in offset
@@ -310,6 +340,86 @@ pub fn check_snapshots(
     findings
 }
 
+/// Checks a merge log, as `(offset, record)` in offset order, against
+/// `inputs`: each input's name and the offsets of its records, read after the
+/// log. Every record of every input must be merged once, in its input's order,
+/// and each record's next offsets must follow from the entries before it.
+/// `complete` says every record of every input should be merged already.
+pub fn check_merge(
+    records: &[(u64, &[u8])],
+    inputs: &[(&str, Vec<u64>)],
+    complete: bool,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    // For each input, how many of its records are merged, and its next offset.
+    let mut merged = vec![0; inputs.len()];
+    let mut next = vec![0; inputs.len()];
+    let mut last_epoch: Option<u64> = None;
+    for &(offset, record) in records {
+        let decoded = match merge::decode(record) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                findings.push(Finding::UndecodableMerge {
+                    offset,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let epoch = decoded.epoch();
+        if let Some(previous) = last_epoch
+            && epoch < previous
+        {
+            findings.push(Finding::MergeEpochRegression {
+                offset,
+                epoch,
+                previous,
+            });
+        }
+        last_epoch = Some(last_epoch.map_or(epoch, |e| e.max(epoch)));
+        if let Some(entry) = decoded.entry() {
+            let Some((name, offsets)) = inputs.get(usize::from(entry.input)) else {
+                findings.push(Finding::MergeCursor { offset });
+                continue;
+            };
+            let at = &mut merged[usize::from(entry.input)];
+            let expected = offsets.get(*at).copied();
+            if expected == Some(entry.offset) {
+                *at += 1;
+            } else {
+                findings.push(Finding::MergeOrder {
+                    offset,
+                    input: (*name).to_owned(),
+                    named: entry.offset,
+                    expected,
+                });
+                // Carry on after the record it named, so one wrong entry is
+                // one finding.
+                *at = (*at).max(offsets.partition_point(|&o| o <= entry.offset));
+            }
+            next[usize::from(entry.input)] = entry.offset + 1;
+        }
+        if decoded.next() != next {
+            findings.push(Finding::MergeCursor { offset });
+            if decoded.next().len() == next.len() {
+                next = decoded.next().to_vec();
+            }
+        }
+    }
+    if complete {
+        for ((name, offsets), &at) in inputs.iter().zip(&merged) {
+            if at < offsets.len() {
+                findings.push(Finding::MergeBehind {
+                    input: (*name).to_owned(),
+                    missing: offsets.len() - at,
+                    first: offsets[at],
+                });
+            }
+        }
+    }
+    findings
+}
+
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let out = |h: &OutputHeader| format!("input {} output {}", h.input_offset, h.index);
@@ -374,6 +484,44 @@ impl fmt::Display for Finding {
             Finding::UndecodableSnapshot { offset, error } => {
                 write!(f, "undecodable snapshot at offset {offset}: {error}")
             }
+            Finding::UndecodableMerge { offset, error } => {
+                write!(f, "undecodable merge record at offset {offset}: {error}")
+            }
+            Finding::MergeEpochRegression {
+                offset,
+                epoch,
+                previous,
+            } => write!(
+                f,
+                "merge log epoch regression at offset {offset}: epoch {epoch} after epoch {previous}"
+            ),
+            Finding::MergeOrder {
+                offset,
+                input,
+                named,
+                expected,
+            } => {
+                write!(
+                    f,
+                    "merge entry at offset {offset} names {input}@{named}, but "
+                )?;
+                match expected {
+                    Some(expected) => write!(f, "the next record of {input} is at {expected}"),
+                    None => write!(f, "{input} holds no more records"),
+                }
+            }
+            Finding::MergeCursor { offset } => write!(
+                f,
+                "merge record at offset {offset} does not carry on from the records before it"
+            ),
+            Finding::MergeBehind {
+                input,
+                missing,
+                first,
+            } => write!(
+                f,
+                "merge log behind: {missing} records of {input} not merged, from offset {first}"
+            ),
         }
     }
 }
@@ -484,26 +632,28 @@ pub fn specs_claimed<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<u64
     claimed
 }
 
-/// The order to check `workloads`, given as `(id, input stream)`, in: a
-/// workload after the one whose output stream it reads, when both are there,
+/// The order to check `workloads`, given as `(id, input streams)`, in: a
+/// workload after each one whose output stream it reads, when both are there,
 /// and otherwise in the order given. Checked upstream first, each stage's
 /// input is read after the stage before it was checked, so `--complete` on
 /// every stage says every input the first stage saw went through the last.
 /// A cycle, which no pipeline has, is broken where it is entered.
-pub fn upstream_first(workloads: &[(String, String)]) -> Vec<String> {
+pub fn upstream_first(workloads: &[(String, Vec<String>)]) -> Vec<String> {
     fn visit(
         at: usize,
-        workloads: &[(String, String)],
+        workloads: &[(String, Vec<String>)],
         seen: &mut Vec<bool>,
         order: &mut Vec<String>,
     ) {
         if std::mem::replace(&mut seen[at], true) {
             return;
         }
-        let upstream = names::output_of(&workloads[at].1)
-            .and_then(|up| workloads.iter().position(|(id, _)| id == up));
-        if let Some(upstream) = upstream {
-            visit(upstream, workloads, seen, order);
+        for input in &workloads[at].1 {
+            let upstream = names::output_of(input)
+                .and_then(|up| workloads.iter().position(|(id, _)| id == up));
+            if let Some(upstream) = upstream {
+                visit(upstream, workloads, seen, order);
+            }
         }
         order.push(workloads[at].0.clone());
     }

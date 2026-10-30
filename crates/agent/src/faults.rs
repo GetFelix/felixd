@@ -30,6 +30,11 @@
 //! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
 //!   its Nth output append, after the lease was checked. It carries on when
 //!   the test sends `SIGCONT`, as a node out of a long GC pause would.
+//! - `freeze-before-merge=N`: stop the process with `SIGSTOP` just before its
+//!   Nth merge log append, after the lease was checked. It carries on at
+//!   `SIGCONT`.
+//! - `crash-after-merge=N`: abort once the Nth merge log append has landed,
+//!   before any of its entries is stepped.
 //! - `freeze-before-claim=N`: stop the process with `SIGSTOP` just before its
 //!   Nth claim append, after the lease was checked. It carries on at `SIGCONT`.
 //! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
@@ -65,6 +70,7 @@ static SKIPPED: AtomicU64 = AtomicU64::new(0);
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
 static FAILURE_RECORDS: AtomicU64 = AtomicU64::new(0);
+static MERGES: AtomicU64 = AtomicU64::new(0);
 
 /// A conditional write the answer faults count.
 #[derive(Clone, Copy, Debug)]
@@ -193,6 +199,19 @@ pub(crate) fn before_append() {
     let n = APPENDS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-append") == Some(n) {
         freeze();
+    }
+}
+
+pub(crate) fn before_merge() {
+    let n = MERGES.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-merge") == Some(n) {
+        freeze();
+    }
+}
+
+pub(crate) fn after_merge() {
+    if fault("crash-after-merge") == Some(MERGES.load(Ordering::Relaxed)) {
+        crash("crash-after-merge");
     }
 }
 

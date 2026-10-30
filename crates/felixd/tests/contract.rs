@@ -366,7 +366,7 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
         .unwrap();
     t.put_spec(&WorkloadSpec {
         module: hash,
-        input: INPUT.into(),
+        inputs: vec![INPUT.into()],
         output: OUTPUT.into(),
         snapshot_every: 1000,
         snapshot_every_ms: None,
@@ -416,7 +416,7 @@ async fn a_missing_module_is_recorded_until_the_spec_changes() {
     }
     let spec = WorkloadSpec {
         module: hash.clone(),
-        input: INPUT.into(),
+        inputs: vec![INPUT.into()],
         output: OUTPUT.into(),
         snapshot_every: 1000,
         snapshot_every_ms: None,

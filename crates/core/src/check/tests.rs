@@ -541,7 +541,7 @@ fn a_refused_new_module_never_decides_what_a_check_runs() {
     use crate::spec::{Limits, WorkloadSpec, WorkloadState};
     let spec = |module: &str, fuel: u64| WorkloadSpec {
         module: module.into(),
-        input: "in".into(),
+        inputs: vec!["in".into()],
         output: "wl.wl.out".into(),
         snapshot_every: 1000,
         snapshot_every_ms: None,
@@ -578,7 +578,7 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
     use crate::spec::{Limits, WorkloadSpec, WorkloadState};
     let spec = |input: &str, fuel: u64| WorkloadSpec {
         module: "aa".into(),
-        input: input.into(),
+        inputs: vec![input.into()],
         output: "wl.wl.out".into(),
         snapshot_every: 1000,
         snapshot_every_ms: None,
@@ -602,7 +602,7 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
         ..r2
     };
     let (lineage, limits) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
-    assert_eq!(lineage.input, "in");
+    assert_eq!(lineage.inputs, ["in"]);
     assert_eq!(limits, [(0, r1.limits)]);
 }
 
@@ -624,8 +624,8 @@ fn a_needs_operator_record_raises_the_floor() {
     );
 }
 
-fn stage(id: &str, input: &str) -> (String, String) {
-    (id.to_owned(), input.to_owned())
+fn stage(id: &str, input: &str) -> (String, Vec<String>) {
+    (id.to_owned(), vec![input.to_owned()])
 }
 
 #[test]
@@ -649,4 +649,123 @@ fn an_upstream_not_being_checked_changes_nothing() {
 fn a_cycle_still_checks_each_workload_once() {
     let workloads = [stage("a", "wl.b.out"), stage("b", "wl.a.out")];
     assert_eq!(upstream_first(&workloads), ["b", "a"]);
+}
+
+#[test]
+fn a_join_is_checked_after_each_of_its_upstreams() {
+    let workloads = [
+        (
+            "join".to_owned(),
+            vec!["wl.b.out".to_owned(), "wl.a.out".to_owned()],
+        ),
+        stage("b", "in"),
+        stage("a", "in"),
+    ];
+    assert_eq!(upstream_first(&workloads), ["b", "a", "join"]);
+}
+
+fn entry(input: u16, offset: u64) -> merge::Entry {
+    merge::Entry {
+        input,
+        offset,
+        timestamp_micros: 0,
+    }
+}
+
+/// Encodes merge records in order, each carrying on from the one before.
+fn merge_log(epoch: u64, entries: &[(u16, u64)]) -> Vec<Vec<u8>> {
+    let mut next = vec![0, 0];
+    let mut log = vec![merge::encode_claim(epoch, &next, "a")];
+    for &(input, offset) in entries {
+        log.push(merge::encode_entry(epoch, entry(input, offset), &mut next));
+    }
+    log
+}
+
+fn at(log: &[Vec<u8>]) -> Vec<(u64, &[u8])> {
+    (0..).zip(log.iter().map(Vec::as_slice)).collect()
+}
+
+fn inputs() -> Vec<(&'static str, Vec<u64>)> {
+    vec![("orders", vec![0, 1, 2]), ("payments", vec![1, 3])]
+}
+
+#[test]
+fn a_merge_log_of_every_record_once_in_input_order_passes() {
+    let log = merge_log(1, &[(0, 0), (1, 1), (0, 1), (1, 3), (0, 2)]);
+    assert_eq!(check_merge(&at(&log), &inputs(), true), []);
+}
+
+#[test]
+fn a_merge_log_still_catching_up_is_only_behind_when_complete() {
+    let log = merge_log(1, &[(0, 0), (1, 1)]);
+    assert_eq!(check_merge(&at(&log), &inputs(), false), []);
+    assert_eq!(
+        check_merge(&at(&log), &inputs(), true),
+        [
+            Finding::MergeBehind {
+                input: "orders".into(),
+                missing: 2,
+                first: 1
+            },
+            Finding::MergeBehind {
+                input: "payments".into(),
+                missing: 1,
+                first: 3
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_record_merged_twice_skipped_or_missing_is_a_finding() {
+    let order = |offset, input: &str, named, expected| Finding::MergeOrder {
+        offset,
+        input: input.into(),
+        named,
+        expected,
+    };
+    let twice = merge_log(1, &[(0, 0), (0, 0), (0, 1), (0, 2)]);
+    assert_eq!(
+        check_merge(&at(&twice), &inputs(), false),
+        [order(2, "orders", 0, Some(1))]
+    );
+    let skipped = merge_log(1, &[(0, 0), (0, 2)]);
+    assert_eq!(
+        check_merge(&at(&skipped), &inputs(), false),
+        [order(2, "orders", 2, Some(1))]
+    );
+    let missing = merge_log(1, &[(1, 2)]);
+    assert_eq!(
+        check_merge(&at(&missing), &inputs(), false),
+        [order(1, "payments", 2, Some(1))]
+    );
+    // A record carrying another cursor than the entries before it leave.
+    let mut wrong = merge_log(1, &[(0, 0)]);
+    wrong.push(merge::encode_claim(1, &[0, 0], "b"));
+    assert_eq!(
+        check_merge(&at(&wrong), &inputs(), false),
+        [Finding::MergeCursor { offset: 2 }]
+    );
+}
+
+#[test]
+fn a_merge_log_epoch_regression_and_junk_are_findings() {
+    let mut log = merge_log(2, &[(0, 0)]);
+    log.push(merge::encode_entry(1, entry(0, 1), &mut [1, 0]));
+    log.push(b"junk".to_vec());
+    let found = check_merge(&at(&log), &inputs(), false);
+    assert_eq!(
+        found[0],
+        Finding::MergeEpochRegression {
+            offset: 2,
+            epoch: 1,
+            previous: 2
+        }
+    );
+    assert!(matches!(
+        found[1],
+        Finding::UndecodableMerge { offset: 3, .. }
+    ));
+    assert_eq!(found.len(), 2, "{found:?}");
 }

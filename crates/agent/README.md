@@ -12,8 +12,8 @@ binary depends on it.
 | Module | Does |
 |---|---|
 | `agent` | `run` watches the `workloads` and `leases` caches, writes this node to `nodes`, and runs each workload it manages to claim while the lease holds. `AgentConfig` sets the node id, lease timing and placement. |
-| `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, appends the spec record to `sys.specs` and points `workloads` at it. |
-| `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ. |
+| `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, and `wl.<id>.merge` for several inputs, appends the spec record to `sys.specs` and points `workloads` at it. |
+| `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ, and checks a merge log against its inputs. |
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. |
 
@@ -33,6 +33,10 @@ Behaviour that matters:
 - **Fence.** A new owner appends a claim record, naming its spec record, to the output stream before it resumes. Every
   later write is `publish_if` at the tail, so a node frozen past its lease is refused when it
   wakes, whatever its clock says.
+- **Several inputs.** The holder appends a claim to the merge log after its claim on the output
+  stream, steps any entries already there past its last output, then merges the inputs as their
+  records arrive: each batch is appended to the merge log with `publish_if` before it is stepped.
+  Check, replay and resume read the merge log, never the raw inputs.
 - **Resume.** The owner restores the newest snapshot, steps the inputs the output stream already
   covers and compares each result with the record in its place (`felixd_core::resume`), then
   carries on. Each output lands once through lost answers, partial batches and crashes.
