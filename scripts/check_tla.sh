@@ -67,10 +67,13 @@ felixd_specs_expectations=(
 )
 
 felixd_merge_expectations=(
-  "FelixdMergeNoClaim violates MergeEpochMonotone"
+  "FelixdMergeNoClaim violates EntriesClaimed"
+  "FelixdMergeNoClaimFence violates MergeEpochMonotone"
   "FelixdMergeNoClaimCheck violates MergeEpochMonotone"
   "FelixdMergeNoCatchUp violates OutputsFollowMerge"
   "FelixdMergeBeforeOut violates OneWriter"
+  "FelixdMergeNoSameBytes violates StepsFollowMerge"
+  "FelixdMergeNoClaimExact pass"
   "FelixdMergeNoSkip pass"
   "FelixdMergeRecreate pass"
   "FelixdMergeLost pass"

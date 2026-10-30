@@ -26,13 +26,16 @@
 (* is a function of it. A step's number is its entry's offset on the      *)
 (* merge log, and an output names it.                                     *)
 (*                                                                         *)
-(* Knobs, each turned off in a twin that TLC finds a violation in         *)
-(* (crates/agent/src/merge.rs, runner.rs):                                *)
+(* Knobs. Each but SameEpochSkip is turned off in a twin that TLC finds  *)
+(* a violation in; with SameEpochSkip off every invariant still holds     *)
+(* (crates/agent/src/merge.rs, runner.rs, crates/core/src/merge.rs):      *)
 (*   MergeClaim     a holder appends a claim before its first entry.      *)
 (*   ClaimCheck     it stops if the last record is from a later epoch.    *)
 (*   OutFirst       it claims the merge log after its `.out` claim lands. *)
 (*   CatchUp        it steps the entries before its claim before merging. *)
 (*   SameEpochSkip  it does not claim again over a record of its epoch.   *)
+(*   SameBytes      reconcile takes a record past the tail as its own only *)
+(*                  if it is the entry it sent, not any of its epoch.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -50,11 +53,13 @@ CONSTANTS
     ClaimCheck,
     OutFirst,
     CatchUp,
-    SameEpochSkip
+    SameEpochSkip,
+    SameBytes
 
 ASSUME /\ NoNode \notin Nodes
        /\ PerWrite >= 1
-       /\ \A b \in {MergeClaim, ClaimCheck, OutFirst, CatchUp, SameEpochSkip} : b \in BOOLEAN
+       /\ \A b \in {MergeClaim, ClaimCheck, OutFirst, CatchUp, SameEpochSkip,
+                    SameBytes} : b \in BOOLEAN
 
 \* Input shapes for the configurations.
 OneEach == <<1, 1>>
@@ -90,9 +95,10 @@ vars == <<merge, out, net, ctr, nd, bud, mstarted, ostarted>>
 \* pc: idle, oclaim, oclaimw, mread, mclaim, mclaimw, probe, resume, run,
 \* ow (an output in flight), mw (a merge append in flight).
 \* ot and mt: the `.out` and merge log tails the holder expects. nx: each
-\* input's next offset after the merge log's last record. todo: merge
-\* offsets to step. bat: the entries of the merge append in flight not yet
-\* found on the log; land: the offsets of those that are.
+\* input's next offset after the merge log's last record. todo: the steps
+\* to take, each [p, i, o]: the merge offset and the record stepped there. bat: the entries of the merge append in flight not yet
+\* found on the log; land: the steps for those that are, each the entry the
+\* holder sent at the offset it believes it landed at.
 NodeInit == [pc |-> "idle", e |-> 0, h |-> 0, oc |-> FALSE, ot |-> 0, mt |-> 0,
              nx |-> Zero, todo |-> <<>>, bat |-> <<>>, land |-> <<>>,
              aw |-> NoMsg, rep |-> "none"]
@@ -134,7 +140,11 @@ Batches(c, len) ==
     {b \in [1..len -> 1..NI] :
         \A i \in 1..NI : c[i] + Cardinality({j \in 1..len : b[j] = i}) <= Ins[i]}
 
-OutRec(n, p) == Rec("out", nd[n].e, nd[n].h, p, merge[p].i, merge[p].o, Zero)
+\* The output of step t, from the record the holder steps, not the log.
+OutRec(n, t) == Rec("out", nd[n].e, nd[n].h, t.p, t.i, t.o, Zero)
+
+\* The steps for the entries at offsets ps, read back from the log.
+FromLog(ps) == [j \in 1..Len(ps) |-> [p |-> ps[j], i |-> merge[ps[j]].i, o |-> merge[ps[j]].o]]
 OClaimRec(n) == Rec("claim", nd[n].e, nd[n].h, 0, 0, 0, Zero)
 
 \* The node gives the run up: superseded, crashed or out of retries.
@@ -247,7 +257,7 @@ Resume(n) ==
        IN IF last # 0 /\ out[last].e > nd[n].e
           THEN Stop(n)
           ELSE nd' = [nd EXCEPT ![n].pc = "run",
-                         ![n].todo = IF CatchUp THEN PosOf(merge, "entry", next, nd[n].mt)
+                         ![n].todo = IF CatchUp THEN FromLog(PosOf(merge, "entry", next, nd[n].mt))
                                      ELSE <<>>]
     /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
 
@@ -304,10 +314,11 @@ MAns(n) ==
            bat == nd[n].bat
            found == SubSeq(merge, mt + 1, Len(merge))
            bad == {j \in 1..Len(found) :
-                     found[j].e > nd[n].e \/ j > Len(bat) \/ found[j] # bat[j]}
+                     \/ found[j].e > nd[n].e \/ j > Len(bat)
+                     \/ IF SameBytes THEN found[j] # bat[j] ELSE found[j].e # nd[n].e}
            k == IF nd[n].rep = "ok" THEN Len(bat) ELSE Len(found)
            tail == IF nd[n].rep = "ok" THEN mt + Len(bat) ELSE Len(merge)
-           land == nd[n].land \o [j \in 1..k |-> mt + j]
+           land == nd[n].land \o [j \in 1..k |-> [p |-> mt + j, i |-> bat[j].i, o |-> bat[j].o]]
            rest == SubSeq(bat, k + 1, Len(bat))
            m == [n |-> n, s |-> "merge", at |-> tail, recs |-> rest]
        IN IF nd[n].rep # "ok" /\ bad # {}
