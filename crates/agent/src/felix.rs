@@ -273,7 +273,8 @@ impl Felix {
                 Some(end),
                 PAGE_RECORDS,
             )
-            .await?;
+            .await
+            .map_err(|error| trimmed_from(error, stream))?;
         Ok((page.records, page.next_offset))
     }
 
@@ -313,6 +314,7 @@ impl Felix {
                 Some(StartPosition::Offset(from)),
             )
             .await
+            .map_err(|error| trimmed_from(error, stream))
     }
 
     /// Whether the broker serving `watch` answers a read of `cache` within
@@ -395,3 +397,44 @@ fn not_ready(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// A read or subscription asked for records Felix no longer holds: retention
+/// or a trim passed them.
+#[derive(Debug)]
+pub struct Trimmed {
+    pub stream: String,
+    pub requested: u64,
+    pub oldest: u64,
+}
+
+impl std::fmt::Display for Trimmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} no longer holds offset {}: history before {} is trimmed",
+            self.stream, self.requested, self.oldest
+        )
+    }
+}
+
+impl std::error::Error for Trimmed {}
+
+impl Trimmed {
+    /// The trim `error` reports, if it is one.
+    pub fn of(error: &anyhow::Error) -> Option<&Trimmed> {
+        error.downcast_ref::<Trimmed>()
+    }
+}
+
+/// `error` as [`Trimmed`] when Felix said the offset is too old.
+fn trimmed_from(error: anyhow::Error, stream: &str) -> anyhow::Error {
+    match error.downcast_ref::<SubscribeCursorError>() {
+        Some(refused) if matches!(refused.reason, CursorErrorReason::TooOld) => Trimmed {
+            stream: stream.to_owned(),
+            requested: refused.requested,
+            oldest: refused.available,
+        }
+        .into(),
+        _ => error,
+    }
+}

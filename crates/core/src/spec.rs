@@ -31,6 +31,11 @@ pub struct WorkloadSpec {
     /// still gets snapshots. Either trigger restarts the count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_every_ms: Option<u64>,
+    /// How many snapshots to keep. With it set, history before the oldest of
+    /// the last this many is recorded as trimmable ([`crate::trim`]). Unset
+    /// keeps everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_snapshots: Option<u32>,
     pub state: WorkloadState,
     /// What the workload may use. It is in the spec, not node configuration,
     /// so every node runs the workload under the same limits and fails it at

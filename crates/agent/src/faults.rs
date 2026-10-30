@@ -3,6 +3,10 @@
 //!
 //! - `crash-before-snapshot=N`: abort the process just before its Nth snapshot.
 //! - `crash-after-snapshot=N`: abort it just after its Nth snapshot is written.
+//! - `crash-after-trim-sent=N`: abort once the Nth trim record has been
+//!   sent, before its answer is acted on. The record may have landed.
+//! - `freeze-before-trim=N`: stop the process with `SIGSTOP` just before its
+//!   Nth trim record is sent. It carries on at `SIGCONT`.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-append-sent=N`: abort once the Nth output append has been
@@ -81,6 +85,7 @@ static FAILURES: AtomicU64 = AtomicU64::new(0);
 static FAILURE_RECORDS: AtomicU64 = AtomicU64::new(0);
 static MERGES: AtomicU64 = AtomicU64::new(0);
 static MERGE_CLAIMS: AtomicU64 = AtomicU64::new(0);
+static TRIMS: AtomicU64 = AtomicU64::new(0);
 
 /// A conditional write the answer faults count.
 #[derive(Clone, Copy, Debug)]
@@ -158,6 +163,19 @@ pub(crate) fn skip_snapshot() -> bool {
             (n < skip).then_some(n + 1)
         })
         .is_ok()
+}
+
+pub(crate) fn before_trim() {
+    let n = TRIMS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-trim") == Some(n) {
+        freeze();
+    }
+}
+
+pub(crate) fn after_trim_sent() {
+    if fault("crash-after-trim-sent") == Some(TRIMS.load(Ordering::Relaxed)) {
+        crash("crash-after-trim-sent");
+    }
 }
 
 pub(crate) fn after_append_sent() {

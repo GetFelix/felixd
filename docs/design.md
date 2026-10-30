@@ -812,9 +812,49 @@ but a compromised node could write garbage. Per-lease tokens close that
 
 ## Retention
 
-Inputs older than a workload's oldest kept snapshot can't be replayed, and
-`subscribe_from` fails with `CursorTooOld` instead of silently skipping. v0
-keeps everything. Trimming to "the last K snapshots" comes with M4.
+`keep_snapshots` (`felixd run --keep-snapshots K`) keeps a workload's last K
+snapshots. After each snapshot the holder writes, it appends a trim record to
+`wl.<id>.out` ([records.md](records.md#output-stream-records)) that says what history
+no reader of this workload needs again:
+
+- `.snap` below the lowest offset any kept snapshot reads, its manifest or a
+  chunk it shares with an older snapshot;
+- the merge log before the oldest kept step, whose entry is kept for its
+  `next`;
+- each input before where that snapshot carries on: the step plus one with one
+  input, the entry's `next` with several.
+
+The oldest kept snapshot is the one with the lowest step among the last K on
+the stream, not the first of them: a stale holder's snapshot can land after a
+newer holder's and be behind it. A holder trims only once the newest snapshot
+on `.snap` is its own. Until then an earlier holder can still land one, of a
+lower step, that the next resume would restore. Once it is, every snapshot
+written later is from this epoch or a later one and at or past a kept step, so
+the floors never go back, and `trim::plan` refuses one that would.
+
+The record goes on `.out` with `publish_if` at the tail like an output, so a
+stale holder's is refused by the next claim. A crash before it lands changes
+nothing, and one after leaves a record the next holder passes over, like a
+claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
+
+Nothing is deleted yet. Felix trims only by age or size, which knows nothing
+of what a resume needs, and has no call to trim a stream before an offset
+([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). Once it does,
+a holder deletes up to the floors of its last trim record, after the record
+has landed, so a crash at any point leaves at most less trimmed than recorded.
+
+The output stream is not trimmed. It is every downstream's input, it holds the
+first claim that spec lineage reads, and `felixd check` lines records up with
+claims from the start of the stream. Trimming it needs the downstreams'
+floors, the lineage carried forward and a check that starts from a snapshot
+([#150](https://github.com/GetFelix/felixd/issues/150)).
+
+A workload whose input Felix has trimmed past what it still needs, through
+retention or a later trim, is recorded as needing an operator (reason 9)
+rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
+`felixd replay` and `felixd check` stop with the stream and the oldest offset
+Felix still holds. While records are there they read all of them, trim
+records or not.
 
 ## Build order
 
@@ -824,7 +864,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines and workloads with several inputs are built, [Pipelines](#pipelines) and [Several inputs](#several-inputs); `ps` and `drain` are not, [#17](https://github.com/GetFelix/felixd/issues/17)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines and workloads with several inputs are built, [Pipelines](#pipelines) and [Several inputs](#several-inputs); `ps` and `drain` are not, [#17](https://github.com/GetFelix/felixd/issues/17); snapshot trimming is recorded and deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix

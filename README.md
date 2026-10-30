@@ -150,7 +150,11 @@ grants on the streams it reads, as `felixd check` does.
 `felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
 workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input
-still gets snapshots and every node takes them at the same inputs.
+still gets snapshots and every node takes them at the same inputs. With
+`--keep-snapshots 3` the holder records, after each snapshot, what history
+before the oldest of the last three no resume, replay or check needs (a trim
+record on the output stream). Nothing is deleted until Felix can trim a stream
+at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
 (`wit/workload.wit`). Each step gets the input's stream, offset, append time,
 key and payload, and returns outputs, each with a name and an optional key, or

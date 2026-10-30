@@ -14,13 +14,14 @@ use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
+use felixd_core::trim::{self, Trim};
 use felixd_core::{MAX_WRITE_BYTES, module, names};
 use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
 use tokio::sync::{OnceCell, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use crate::faults;
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed, StepInput, merge_unreadable};
 use crate::lease::Fence;
 use crate::merge::MergeLog;
@@ -346,6 +347,14 @@ pub(crate) async fn run_workload(
             failure: found.failure.clone(),
         });
     }
+    // Retention or a trim passed a record this run needed. No node can read
+    // it again, so retrying would loop.
+    if let Some(trimmed) = Trimmed::of(&error) {
+        return Ok(Outcome::NeedsOperator {
+            problem: NeedsOperator::new(OperatorReason::HistoryTrimmed, trimmed.to_string()),
+            recorded: false,
+        });
+    }
     if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
         return Ok(Outcome::NeedsOperator {
             problem: problem.clone(),
@@ -505,6 +514,7 @@ async fn run(
         since_snapshot: 0,
         previous_stamp,
         hold,
+        last_trim: None,
     };
     if let Some(merge) = &mut merge {
         return merged(felix, id, spec, &mut steps, merge, resume.next_input).await;
@@ -721,6 +731,22 @@ fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
     .into())
 }
 
+/// The merge log's `next` at the entry at `step`: where each input carries
+/// on after it.
+async fn merge_next_at(felix: &Felix, spec: &WorkloadSpec, step: u64) -> Result<Vec<u64>> {
+    let id = names::output_of(&spec.output).context("the output is not a workload's")?;
+    let stream = names::merge_stream(id);
+    let found = felix.read_range(&stream, step, step + 1).await?;
+    let record = found.first().filter(|r| r.offset == step).ok_or_else(|| {
+        poison(format!(
+            "a snapshot names {stream}:{step}, which holds no record"
+        ))
+    })?;
+    let decoded = merge::decode(&record.payload)
+        .map_err(|e| poison(format!("merge log at {stream}:{step}: {e}")))?;
+    Ok(decoded.next().to_vec())
+}
+
 /// Runs inputs through the workload in order, writing what they produce.
 struct Steps<'a> {
     felix: &'a Felix,
@@ -741,6 +767,8 @@ struct Steps<'a> {
     previous_stamp: Option<u64>,
     /// No snapshot is taken at an input below this.
     hold: &'a mut u64,
+    /// The last trim this owner wrote.
+    last_trim: Option<Trim>,
 }
 
 impl Steps<'_> {
@@ -838,6 +866,55 @@ impl Steps<'_> {
         let manifest = self.write_snapshot(taken, &chunks).await?;
         self.previous = Some(manifest);
         faults::after_snapshot();
+        self.trim().await
+    }
+
+    /// With `keep_snapshots` set, records on `.out` what history before the
+    /// oldest kept snapshot no reader of this workload needs again. It goes
+    /// on `.out` with `publish_if` at the tail, so a stale holder's is
+    /// refused like its outputs. It deletes nothing (Felix#1662).
+    async fn trim(&mut self) -> Result<()> {
+        let Some(keep) = self.spec.keep_snapshots else {
+            return Ok(());
+        };
+        let keep = keep as usize;
+        let newest = snapshots::newest(self.felix, self.snap_stream, self.snap_tail, keep)
+            .await
+            .map_err(read_error)?;
+        let merge_next = match self.spec.merged() {
+            true => {
+                let oldest = newest.iter().take(keep).map(|k| k.step).min();
+                match oldest {
+                    Some(step) => Some(merge_next_at(self.felix, self.spec, step).await?),
+                    None => None,
+                }
+            }
+            false => None,
+        };
+        let planned = trim::plan(
+            self.fence.epoch(),
+            keep,
+            &newest,
+            |_| merge_next,
+            self.last_trim.as_ref(),
+        );
+        let planned = match planned {
+            Ok(planned) => planned,
+            Err(trim::Skip::Regressed) => {
+                tracing::error!(
+                    workload = self.snap_stream,
+                    "a trim floor would go back; not trimming"
+                );
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
+        };
+        if self.last_trim.as_ref() == Some(&planned) {
+            return Ok(());
+        }
+        let record = output::encode_trim(self.fence.epoch(), &planned);
+        self.log.append_trim(record).await?;
+        self.last_trim = Some(planned);
         Ok(())
     }
 

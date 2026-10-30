@@ -435,6 +435,65 @@ impl<'a> OutputLog<'a> {
         Ok(())
     }
 
+    /// Appends a trim record at the tail. A refused write reads the records
+    /// past the tail: one from a later epoch means this owner is superseded,
+    /// and the same record from this owner means an earlier attempt landed.
+    /// Anything else is an earlier owner's, and the record goes after it.
+    pub(crate) async fn append_trim(&mut self, record: Vec<u8>) -> Result<()> {
+        let mut failures = 0;
+        loop {
+            if !self.fence.holds() {
+                return Err(LostLease.into());
+            }
+            faults::before_trim();
+            let sent = self
+                .felix
+                .publish_if(self.stream, vec![record.clone()], self.tail)
+                .await;
+            faults::after_trim_sent();
+            let seen_tail = match sent {
+                Ok(ConditionalWrite::Written { offset }) if offset == self.tail => {
+                    self.tail += 1;
+                    return Ok(());
+                }
+                Ok(ConditionalWrite::Written { offset }) => {
+                    return Err(poison(format!(
+                        "{} wrote at {offset}, expected {}",
+                        self.stream, self.tail
+                    )));
+                }
+                Ok(ConditionalWrite::Refused { tail }) => tail,
+                Err(error) => {
+                    failures += 1;
+                    if failures >= MAX_ATTEMPTS {
+                        return Err(error.context(format!("trim record on {}", self.stream)));
+                    }
+                    tracing::warn!(stream = self.stream, %error, "trim record failed, checking the tail");
+                    self.felix.tail(self.stream).await?
+                }
+            };
+            if seen_tail <= self.tail {
+                continue;
+            }
+            let found = self
+                .felix
+                .read_range(self.stream, self.tail, seen_tail)
+                .await?;
+            let mut landed = false;
+            for existing in &found {
+                let decoded = self.decode(&existing.payload, existing.offset)?;
+                if decoded.epoch() > self.fence.epoch() {
+                    return Err(Superseded(decoded.epoch()).into());
+                }
+                landed |= existing.payload.as_ref() == record.as_slice();
+            }
+            self.tail = seen_tail;
+            if landed {
+                return Ok(());
+            }
+        }
+    }
+
     async fn skip_written(&mut self, batch: &mut Vec<Vec<u8>>, seen_tail: u64) -> Result<()> {
         if seen_tail < self.tail {
             return Err(poison(format!(

@@ -76,6 +76,9 @@ pub enum OperatorReason {
     /// The input stream ends before the inputs the workload has already
     /// stepped, so it was deleted and created again, or lost records.
     InputBehind,
+    /// Felix no longer holds a record the workload still needs, on an input
+    /// or one of its own streams: retention or a trim passed it.
+    HistoryTrimmed,
 }
 
 impl OperatorReason {
@@ -89,6 +92,7 @@ impl OperatorReason {
             OperatorReason::RestoreFuel => 6,
             OperatorReason::InputUnreadable => 7,
             OperatorReason::InputBehind => 8,
+            OperatorReason::HistoryTrimmed => 9,
         }
     }
 
@@ -102,6 +106,7 @@ impl OperatorReason {
             6 => OperatorReason::RestoreFuel,
             7 => OperatorReason::InputUnreadable,
             8 => OperatorReason::InputBehind,
+            9 => OperatorReason::HistoryTrimmed,
             other => return Err(DecodeError::UnknownReason(other)),
         })
     }
@@ -118,6 +123,7 @@ impl fmt::Display for OperatorReason {
             OperatorReason::RestoreFuel => "restore out of fuel",
             OperatorReason::InputUnreadable => "input record unreadable by this build",
             OperatorReason::InputBehind => "input stream behind the workload",
+            OperatorReason::HistoryTrimmed => "a record the workload needs was trimmed",
         })
     }
 }

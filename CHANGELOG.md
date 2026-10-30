@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- `felixd run --keep-snapshots K` keeps a workload's last K snapshots. After
+  each snapshot of its own, the holder appends a trim record to the output
+  stream naming what no resume, replay or check of the workload reads again:
+  the snapshot stream below the oldest kept snapshot's records and chunks, the
+  merge log before that snapshot's step, and each input before where that
+  snapshot carries on. It is fenced by the lease epoch like an output.
+  Nothing is deleted yet: Felix has no call to trim a stream at an offset
+  ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). The output
+  stream itself is not trimmed. A trim record is a new output record kind (7),
+  so upgrade every node before setting `--keep-snapshots` on a workload that
+  another workload reads.
+- A record a running workload needs that Felix no longer holds, after
+  retention passed it, now leaves the workload to an operator (reason 9,
+  history trimmed) instead of retrying. `felixd replay` and `felixd check`
+  say which stream and offset were trimmed.
+
 ## 0.1.0-preview.1
 
 The first release. Tested against Felix 0.6.2, the version the compose files

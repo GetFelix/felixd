@@ -119,6 +119,10 @@ enum Command {
         /// many milliseconds long, by the inputs' append times.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         snapshot_every_ms: Option<u64>,
+        /// Keep this many snapshots and record history before the oldest of
+        /// them as trimmable. Unset keeps everything.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        keep_snapshots: Option<u32>,
         /// Fuel given to each call into the workload. It is stored in the
         /// spec, so every node runs the workload under the same limit.
         #[arg(long, default_value_t = Limits::default().fuel_per_call)]
@@ -244,6 +248,7 @@ async fn main() -> Result<()> {
             inputs,
             snapshot_every,
             snapshot_every_ms,
+            keep_snapshots,
             fuel,
             max_memory,
             snapshot_fuel,
@@ -256,6 +261,7 @@ async fn main() -> Result<()> {
             submission.inputs = inputs;
             submission.snapshot_every = snapshot_every;
             submission.snapshot_every_ms = snapshot_every_ms;
+            submission.keep_snapshots = keep_snapshots;
             submission.limits = Limits {
                 fuel_per_call: fuel,
                 max_memory_bytes: max_memory,

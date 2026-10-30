@@ -13,6 +13,7 @@
 //! - [`resume`]: where a new owner picks a workload up.
 //! - [`replay`]: where a replay starts and stops.
 //! - [`check`]: what is wrong with an output stream, against a replay.
+//! - [`trim`]: where history may be trimmed, by the last snapshots kept.
 
 pub mod check;
 pub mod class;
@@ -27,6 +28,7 @@ pub mod replay;
 pub mod resume;
 pub mod snapshot;
 pub mod spec;
+pub mod trim;
 
 mod codec;
 

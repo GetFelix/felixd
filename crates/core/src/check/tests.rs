@@ -545,6 +545,7 @@ fn a_refused_new_module_never_decides_what_a_check_runs() {
         output: "wl.wl.out".into(),
         snapshot_every: 1000,
         snapshot_every_ms: None,
+        keep_snapshots: None,
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: fuel,
@@ -582,6 +583,7 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
         output: "wl.wl.out".into(),
         snapshot_every: 1000,
         snapshot_every_ms: None,
+        keep_snapshots: None,
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: fuel,

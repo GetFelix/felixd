@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use felixd_core::snapshot::{self, Manifest, Record, Taken};
+use felixd_core::trim::Kept;
 
 use crate::felix::Felix;
 
@@ -80,6 +81,49 @@ pub(crate) async fn latest(felix: &Felix, stream: &str, tail: u64) -> Result<Lat
         window = window.saturating_mul(8);
     }
     Ok(latest)
+}
+
+/// The newest `keep` snapshots on the stream, newest first, as
+/// [`felixd_core::trim::plan`] takes them. Fewer when the stream holds fewer.
+pub(crate) async fn newest(
+    felix: &Felix,
+    stream: &str,
+    tail: u64,
+    keep: usize,
+) -> Result<Vec<Kept>, ReadError> {
+    let mut found = Vec::new();
+    let mut end = tail;
+    let mut window = 16;
+    while end > 0 && found.len() < keep {
+        let from = end.saturating_sub(window);
+        let records = felix
+            .read_range(stream, from, end)
+            .await
+            .map_err(ReadError::Felix)?;
+        for record in records.iter().rev() {
+            let snapshot = Snapshot::decode(&record.payload).map_err(|e| {
+                ReadError::Bad(format!("snapshot at {stream}:{}: {e}", record.offset))
+            })?;
+            if let Some(snapshot) = snapshot {
+                let taken = snapshot.taken();
+                found.push(Kept {
+                    offset: record.offset,
+                    epoch: taken.epoch,
+                    step: taken.header.input_offset,
+                    chunks: snapshot
+                        .manifest()
+                        .map(|m| m.chunks.iter().map(|c| c.offset).collect())
+                        .unwrap_or_default(),
+                });
+                if found.len() == keep {
+                    break;
+                }
+            }
+        }
+        end = from;
+        window = window.saturating_mul(8);
+    }
+    Ok(found)
 }
 
 /// The state's chunks, in order, each checked against the hash its manifest
