@@ -32,7 +32,10 @@ async fn a_node_without_publish_on_its_input_runs_the_workload() {
     t.publish_all(INPUT, (0..3u64).map(|i| i.to_be_bytes().to_vec()))
         .await;
 
-    let mut agent = t.start_node_with_token("restricted-node", &token);
+    // The subscription also goes below the workload's position once, which
+    // reads the input's tail again.
+    let faults = format!("restart-input-after={}", before + 1);
+    let mut agent = t.start_node_with_token("restricted-node", &token, &faults);
     let want = before + 3;
     eventually("the outputs", Duration::from_secs(60), || async {
         (t.outputs(OUTPUT).await.len() >= want).then_some(())

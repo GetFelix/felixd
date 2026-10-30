@@ -426,13 +426,11 @@ async fn run(
         output_tail,
     })
     .map_err(poison)?;
-    if faults::subscribe_from().is_none() {
-        not_behind(
-            &spec.input,
-            felix.tail(&spec.input).await?,
-            resume.stepped_to(),
-        )?;
-    }
+    not_behind(
+        &spec.input,
+        felix.read_tail(&spec.input).await?,
+        resume.stepped_to(),
+    )?;
     if let Some(snapshot) = snapshot.as_ref().filter(|_| resume.restore) {
         let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
             .await
@@ -488,8 +486,7 @@ async fn run(
         previous_stamp,
         hold,
     };
-    let from = faults::subscribe_from().unwrap_or(resume.next_input);
-    let mut events = felix.subscribe_from(&spec.input, from).await?;
+    let mut events = felix.subscribe_from(&spec.input, resume.next_input).await?;
     let mut next_input = resume.next_input;
     loop {
         let event = events
@@ -525,6 +522,9 @@ async fn run(
         let stamp = event.timestamp_micros.unwrap_or(0);
         steps.step(offset, stamp, event.payload).await?;
         next_input = offset + 1;
+        if faults::restart_input_after(offset) {
+            events = felix.subscribe_from(&spec.input, 0).await?;
+        }
     }
 }
 
