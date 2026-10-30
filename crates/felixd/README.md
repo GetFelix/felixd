@@ -37,9 +37,9 @@ Flags of `check`: `--id` (repeat for several; every workload by default), `--com
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every
 workload whose output a checked one reads, up the pipeline. Stages are checked upstream first.
 
-Flags of `replay`: `--id`, `--to` (an input offset, a merge log offset for a workload with
-several inputs, or an RFC 3339 time, compared there with when entries were merged such as
-`2026-10-29T14:02:00Z`), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
+Flags of `replay`: `--id`, `--to` (an input offset or an RFC 3339 time such as
+`2026-10-29T14:02:00Z`; for a workload with several inputs, a merge log offset or a time compared
+with when entries were merged), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
 the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a divergence.
 
 Connection flags, each also read from an environment variable: `--brokers` (`FELIX_BROKERS`),

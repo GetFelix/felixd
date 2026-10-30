@@ -42,7 +42,7 @@
 //!   `lose-merge-claim-answer=N`: as for output appends and claims, for the
 //!   Nth merge log append or claim.
 //! - `merge-write-limit=K`: refuse, with an error, any merge log write of
-//!   more than K records, as Felix refuses a write too large for a frame, and
+//!   more than K records (0 counts as 1), as Felix refuses a write too large for a frame, and
 //!   write at most K entries at a time.
 //! - `freeze-before-claim=N`: stop the process with `SIGSTOP` just before its
 //!   Nth claim append, after the lease was checked. It carries on at `SIGCONT`.
@@ -232,7 +232,8 @@ pub(crate) fn before_merge_claim() {
 
 /// The most records one merge log write may hold, under `merge-write-limit`.
 pub(crate) fn merge_write_limit() -> Option<usize> {
-    fault("merge-write-limit").and_then(|k| usize::try_from(k).ok())
+    // Every write holds at least one record, so 0 means 1.
+    fault("merge-write-limit").map(|k| usize::try_from(k).unwrap_or(usize::MAX).max(1))
 }
 
 pub(crate) fn after_merge() {

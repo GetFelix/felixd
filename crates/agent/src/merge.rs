@@ -115,10 +115,11 @@ impl<'a> MergeLog<'a> {
             .max(1)
     }
 
-    /// Appends `entries`, at most [`Self::per_write`] of them, in one write and
-    /// returns the offset each landed at, which is the offset of its step. A refused write, or one whose answer was lost, is
-    /// settled by [`merge::reconcile`]: this holder's own records are taken as
-    /// written, and a later holder's end the run.
+    /// Appends `entries`, at most [`Self::per_write`] of them, in one write
+    /// and returns the offset each landed at, which is the offset of its step.
+    /// A refused write, or one whose answer was lost, is settled by
+    /// [`merge::reconcile`]: this holder's own records are taken as written,
+    /// and a later holder's end the run.
     pub(crate) async fn append(&mut self, entries: &[Entry]) -> Result<Vec<u64>> {
         let mut next = self.next.clone();
         let mut batch: Vec<Vec<u8>> = entries

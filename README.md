@@ -93,8 +93,8 @@ felixd agent
 ```
 
 `felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
-`wl.<id>.snap` streams (and `wl.<id>.merge` when `--input` is given more than once), appends the spec as a record to the `sys.specs` stream
-and points the `workloads` cache at it. `sys.specs` keeps every version of every
+`wl.<id>.snap` streams (and `wl.<id>.merge` when `--input` is given more
+than once), appends the spec as a record to the `sys.specs` stream and points the `workloads` cache at it. `sys.specs` keeps every version of every
 spec. It creates felixd's caches and
 streams with three `Quorum` replicas unless `--replication-factor` says
 otherwise; the single-broker test stack needs 1. The agent watches the
@@ -136,8 +136,8 @@ seeing anything but the same outputs in the same order.
 input 41, and `--to 2026-10-29T14:02:00Z` its state after every input appended
 before that time. For a workload with several inputs both count on its merge
 log: an offset is a merge log offset, and a time covers the records merged
-before it, which is not when they were appended to their own inputs. It restores the nearest snapshot at or before that point on a
-fresh instance, runs the inputs after it and prints what the workload's
+before it, which is not when they were appended to their own inputs. It
+restores the nearest snapshot at or before that point on a fresh instance, runs the inputs after it and prints what the workload's
 `inspect` returns. `--diff` replays a range (`--from`, `--to`, by default every
 input with a recorded output) and compares each output with the one on the
 stream, reporting the first divergence with the node, epoch, input offset and

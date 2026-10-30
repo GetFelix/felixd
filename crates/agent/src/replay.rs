@@ -23,7 +23,8 @@ pub enum Target {
     /// The state after the input at this offset.
     Offset(u64),
     /// The state after every input appended before this time, in
-    /// microseconds since the Unix epoch.
+    /// microseconds since the Unix epoch. For a workload with several
+    /// inputs, after every merge entry appended to the merge log before it.
     Time(u64),
 }
 

@@ -81,7 +81,9 @@ enum Command {
         id: String,
         /// An input offset, for the state after that input, or an RFC 3339
         /// time such as 2026-10-29T14:02:00Z, for the state after every input
-        /// appended before it. A diff runs to the last input by default.
+        /// appended before it. For a workload with several inputs, an offset on
+        /// its merge log, or a time compared with when entries were merged. A
+        /// diff runs to the last input by default.
         #[arg(long, value_parser = parse_target, required_unless_present = "diff")]
         to: Option<Target>,
         /// Compare each output the replay produces with the one on the output
