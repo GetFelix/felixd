@@ -200,6 +200,7 @@ fn a_fact_is_written_when_it_changes_or_the_interval_passes() {
         every_ms: 1000,
         max_workloads: 4,
         held: 0,
+        holding: Default::default(),
         draining: false,
         blocked: false,
     };
@@ -216,18 +217,26 @@ fn a_fact_is_written_when_it_changes_or_the_interval_passes() {
 }
 
 #[test]
-fn only_a_running_scheduler_with_a_live_lease_is_healthy() {
+fn only_a_running_scheduler_whose_holder_renews_is_healthy() {
+    let timing = LeaseTiming {
+        ttl: Duration::from_millis(3000),
+    };
     let a = Assignments::new();
-    assert!(!a.healthy(100));
-    a.set_holder(Some(200));
-    assert!(!a.healthy(100), "the spec does not say it runs");
+    assert!(!a.healthy(&timing, 10_000));
+    a.set_holder(Some(13_000));
+    assert!(!a.healthy(&timing, 10_000), "the spec does not say it runs");
     a.set_scheduler(true);
-    assert!(a.healthy(100));
-    assert!(!a.healthy(300), "the lease has expired");
+    assert!(a.healthy(&timing, 10_000));
+    // Not expired, but a renewal is overdue: the holder may be dead.
+    assert!(!a.healthy(&timing, 11_600));
+    assert!(!a.healthy(&timing, 14_000));
     a.set_holder(None);
-    assert!(!a.healthy(100));
+    assert!(!a.healthy(&timing, 10_000));
     a.set_holder(Some(0));
-    assert!(a.healthy(u64::MAX));
+    assert!(
+        !a.healthy(&timing, 10_000),
+        "a lease that never expires is not renewed"
+    );
 }
 
 #[tokio::test]

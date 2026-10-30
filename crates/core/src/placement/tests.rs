@@ -8,6 +8,7 @@ const POLICY: FirstClaimWins = FirstClaimWins {
 const SCHEDULED: Scheduled = Scheduled {
     fallback: POLICY,
     bound: Duration::from_secs(10),
+    grace: Duration::from_secs(2),
 };
 
 fn assigned(to: AssignedTo, waited_secs: u64) -> Assigned {
@@ -63,14 +64,16 @@ fn others_wait_for_the_assignee_up_to_the_bound() {
 }
 
 #[test]
-fn an_assignment_not_yet_made_is_waited_for_up_to_the_bound() {
+fn an_assignment_not_yet_made_is_waited_for_only_the_grace() {
     let pending = AssignedTo::Nobody { decided: false };
+    let mut waited = assigned(pending, 0);
+    waited.waited = Duration::from_millis(500);
     assert_eq!(
-        SCHEDULED.turn("w", &assigned(pending, 4), 0.5),
-        Turn::Defer(Duration::from_secs(6))
+        SCHEDULED.turn("w", &waited, 0.5),
+        Turn::Defer(Duration::from_millis(1500))
     );
     assert_eq!(
-        SCHEDULED.turn("w", &assigned(pending, 11), 0.5),
+        SCHEDULED.turn("w", &assigned(pending, 2), 0.5),
         Turn::Claim(Duration::from_millis(400))
     );
 }

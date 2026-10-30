@@ -211,9 +211,10 @@ scheduler --input sys.specs --input sys.facts scheduler.wasm` starts one: a
 workload that reads spec records and the facts each node appends to
 `sys.facts`, and writes an assignment each time where a workload should run
 changes. Nodes claim what is assigned to them at once. They leave a workload
-to its assignee only while the scheduler has a live holder and the assignee
-can take it, for at most `--assignment-bound-ms` (15 s); otherwise it is
-first claim wins at once.
+to its assignee only while the scheduler's holder renews and the assignee
+can take it, for at most `--assignment-bound-ms` (15 s), and wait for an
+assignment at most `--assignment-grace-ms` (2 s); otherwise it is first
+claim wins at once.
 Every claim still goes through the lease and the fence, so a bad assignment
 delays work and nothing else. `ps` then shows each workload's assignment, and
 a drained node's workloads go where the scheduler moves them. See

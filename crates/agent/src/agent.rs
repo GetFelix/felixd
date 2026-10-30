@@ -6,7 +6,7 @@
 //! While a scheduler runs, it follows the scheduler's assignments and appends
 //! this node's facts for it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use crate::assignments::{self, Assignments};
 use crate::drain;
 use crate::faults;
-use crate::felix::{Felix, Lookup};
+use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
@@ -73,9 +73,12 @@ pub struct AgentConfig {
     pub lease: LeaseTiming,
     /// How it claims when no assignment says otherwise.
     pub placement: FirstClaimWins,
-    /// The longest a free workload is left to the node it is assigned to,
-    /// or waits for the scheduler to read its spec, while a scheduler runs.
+    /// The longest a free workload is left to the node it is assigned to
+    /// while a scheduler runs.
     pub assignment_bound: Duration,
+    /// The longest a free workload waits for a healthy scheduler to read its
+    /// spec and assign it.
+    pub assignment_grace: Duration,
     /// How often this node appends its facts for the scheduler when they
     /// have not changed.
     pub facts_every: Duration,
@@ -106,6 +109,29 @@ struct Node {
     /// It cannot read its drain mark, so it claims nothing.
     blocked: AtomicBool,
     facts_every: Duration,
+    /// The workloads this node holds, for its facts.
+    holding: std::sync::Mutex<BTreeSet<String>>,
+    /// The version of each assignee's `nodes` entry this node last read, and
+    /// when that version was first read.
+    entries: std::sync::Mutex<HashMap<String, (u64, tokio::time::Instant)>>,
+}
+
+/// A workload this node holds, named in its facts while this lives.
+struct Holds<'a>(&'a Node, String);
+
+impl<'a> Holds<'a> {
+    fn start(node: &'a Node, id: &str) -> Holds<'a> {
+        let mut holding = node.holding.lock().unwrap_or_else(|e| e.into_inner());
+        holding.insert(id.to_owned());
+        Holds(node, id.to_owned())
+    }
+}
+
+impl Drop for Holds<'_> {
+    fn drop(&mut self) {
+        let mut holding = self.0.holding.lock().unwrap_or_else(|e| e.into_inner());
+        holding.remove(&self.1);
+    }
 }
 
 /// What the leases watch last said about one workload's lease.
@@ -152,6 +178,7 @@ pub async fn run(
         placement: Box::new(Scheduled {
             fallback: config.placement,
             bound: config.assignment_bound,
+            grace: config.assignment_grace,
         }),
         held: AtomicUsize::new(0),
         room: Notify::new(),
@@ -163,6 +190,8 @@ pub async fn run(
         assignments: Assignments::new(),
         blocked: AtomicBool::new(false),
         facts_every: config.facts_every,
+        holding: std::sync::Mutex::new(BTreeSet::new()),
+        entries: std::sync::Mutex::new(HashMap::new()),
     });
     tracing::info!(node = %node.node_id, "agent started");
     let presence = tokio::spawn({
@@ -408,6 +437,14 @@ async fn write_facts(node: Arc<Node>) {
         every_ms: u64::try_from(node.facts_every.as_millis()).unwrap_or(u64::MAX),
         max_workloads: node.max_workloads,
         held: node.held.load(Ordering::SeqCst),
+        holding: node
+            .holding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .take(node.max_workloads)
+            .cloned()
+            .collect(),
         draining: *node.draining.borrow(),
         blocked: node.blocked.load(Ordering::SeqCst),
     };
@@ -644,6 +681,7 @@ async fn own(
             Ok(Some(mut held)) => {
                 metrics::claim(Claim::Won);
                 let holding = metrics::Holding::start(&metrics::workload(&id));
+                let _named = Holds::start(&node, &id);
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let run = Run {
@@ -886,7 +924,7 @@ impl Node {
         record: Option<u64>,
         since: tokio::time::Instant,
     ) -> Assigned {
-        if !self.assignments.healthy(now_millis()) {
+        if !self.assignments.healthy(&self.timing, now_millis()) {
             return Assigned::NONE;
         }
         let (placed, specs) = self.assignments.get(id);
@@ -907,16 +945,29 @@ impl Node {
     }
 
     /// Whether `node`'s entry in `nodes` says it would claim one more
-    /// workload. No entry, one this build cannot read, or a read that fails
-    /// all count as no, so nothing waits on a node that may not come.
+    /// workload, and was rewritten lately. A read does not give the entry's
+    /// expiry, so freshness comes from its version: a node rewrites its
+    /// entry every renewal interval, and one whose version has not changed
+    /// for [`LeaseTiming::renewed_within`] since this node first read it
+    /// counts as gone, well before its entry expires. No entry, one this
+    /// build cannot read, or a read that fails all count as no, so nothing
+    /// waits on a node that may not come.
     async fn takes_work(&self, node: &str) -> bool {
-        let read = self.felix.cache_lookup(names::NODES, node);
-        match tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await {
-            Ok(Ok(Lookup::Value(Some(value)))) => {
-                NodeInfo::decode(&value).is_ok_and(|info| info.takes_work())
+        let read = self.felix.cache_get_versioned(names::NODES, node);
+        let Ok(Ok(Some(found))) = tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await else {
+            return false;
+        };
+        let now = tokio::time::Instant::now();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let since = match entries.get(node) {
+            Some(&(version, since)) if version == found.version => since,
+            _ => {
+                entries.insert(node.to_owned(), (found.version, now));
+                now
             }
-            _ => false,
-        }
+        };
+        now.duration_since(since) <= self.timing.renewed_within()
+            && NodeInfo::decode(&found.value).is_ok_and(|info| info.takes_work())
     }
 
     /// Uniform in `[0, 1)`, from an xorshift. It only spreads claims.

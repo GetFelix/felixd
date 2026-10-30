@@ -152,6 +152,7 @@ fn scheduler_inputs() -> Vec<(&'static str, u64, u64, Vec<u8>)> {
         every_ms: 1000,
         max_workloads: 8,
         held: 0,
+        holding: Default::default(),
         draining,
         blocked: false,
     };

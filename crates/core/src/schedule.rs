@@ -46,6 +46,9 @@ pub struct NodeFact {
     /// How many it holds, however it claimed them.
     #[serde(default)]
     pub held: usize,
+    /// The ids of the workloads it holds, at most `max_workloads` of them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub holding: BTreeSet<String>,
     /// It is draining and takes no work.
     #[serde(default)]
     pub draining: bool,
@@ -148,16 +151,16 @@ struct Heard {
     at_micros: u64,
     every_ms: u64,
     max_workloads: usize,
-    held: usize,
+    holding: BTreeSet<String>,
     draining: bool,
     blocked: bool,
 }
 
-/// A node that takes work, and how much.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A node that takes work, how much, and what it holds already.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Taker {
     max_workloads: usize,
-    held: usize,
+    holding: BTreeSet<String>,
 }
 
 impl Scheduler {
@@ -196,7 +199,7 @@ impl Scheduler {
                     at_micros: timestamp_micros,
                     every_ms: fact.every_ms,
                     max_workloads: fact.max_workloads,
-                    held: fact.held,
+                    holding: fact.holding,
                     draining: fact.draining,
                     blocked: fact.blocked,
                 };
@@ -266,7 +269,7 @@ impl Scheduler {
             .map(|(node, h)| {
                 let taker = Taker {
                     max_workloads: h.max_workloads,
-                    held: h.held,
+                    holding: h.holding.clone(),
                 };
                 (node.clone(), taker)
             })
@@ -275,11 +278,13 @@ impl Scheduler {
 
     /// Drops the assignments of workloads that no longer run, and assigns each
     /// workload with none, or with a node that takes no work, to the least
-    /// loaded taker with room, the lowest id first. A node's load is the
-    /// larger of what is assigned to it and what it says it holds, which
-    /// counts workloads it took by first claim wins. Nothing is moved off a
+    /// loaded taker with room, the lowest id first. A node's load is every
+    /// workload assigned to it or held by it, so workloads it took by first
+    /// claim wins count. A node over its room loses assignments it does not
+    /// hold, the highest ids first, until it fits. Nothing else is moved off a
     /// node that still takes work. A workload with nowhere to go keeps its
-    /// assignment, which agents pass over while that node takes no work.
+    /// assignment if its node is gone, which agents pass over, and is
+    /// unassigned if it was moved off a full node.
     fn reconcile(&mut self, takers: &BTreeMap<String, Taker>) -> Vec<(String, Option<String>)> {
         let mut changed = Vec::new();
         let wanted = &self.wanted;
@@ -290,11 +295,24 @@ impl Scheduler {
             }
             keep
         });
-        let mut count: BTreeMap<&str, usize> = takers.keys().map(|n| (n.as_str(), 0)).collect();
-        for node in self.assigned.values() {
-            if let Some(c) = count.get_mut(node.as_str()) {
-                *c += 1;
-            }
+        let mut load: BTreeMap<&str, usize> = takers
+            .iter()
+            .map(|(node, t)| (node.as_str(), t.holding.len()))
+            .collect();
+        let mut over: Vec<String> = Vec::new();
+        for (node, taker) in takers {
+            let extra: Vec<&String> = self
+                .assigned
+                .iter()
+                .filter(|(w, n)| *n == node && !taker.holding.contains(*w))
+                .map(|(w, _)| w)
+                .collect();
+            let room = taker.max_workloads.saturating_sub(taker.holding.len());
+            over.extend(extra.iter().skip(room).map(|w| (*w).clone()));
+            *load.get_mut(node.as_str()).expect("every taker") += extra.len().min(room);
+        }
+        for workload in &over {
+            self.assigned.remove(workload);
         }
         for workload in &self.wanted {
             if self
@@ -304,16 +322,20 @@ impl Scheduler {
             {
                 continue;
             }
-            let pick = count
+            let pick = load
                 .iter()
-                .map(|(&node, &c)| (node, c.max(takers[node].held)))
-                .filter(|&(node, load)| load < takers[node].max_workloads)
-                .min_by_key(|&(node, load)| (load, node))
-                .map(|(node, _)| node);
+                .filter(|&(&node, &l)| l < takers[node].max_workloads)
+                .min_by_key(|&(&node, &l)| (l, node))
+                .map(|(&node, _)| node);
             let Some(node) = pick else {
+                if over.contains(workload) {
+                    changed.push((workload.clone(), None));
+                }
                 continue;
             };
-            *count.get_mut(node).expect("picked from count") += 1;
+            if !takers[node].holding.contains(workload) {
+                *load.get_mut(node).expect("picked from load") += 1;
+            }
             self.assigned.insert(workload.clone(), node.to_owned());
             changed.push((workload.clone(), Some(node.to_owned())));
         }

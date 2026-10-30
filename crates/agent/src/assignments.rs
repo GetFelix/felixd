@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use felix_client::StreamRecord;
+use felixd_core::lease::LeaseTiming;
 use felixd_core::schedule::{Change, NodeFact, Record};
 use felixd_core::{names, output};
 use tokio::sync::watch;
@@ -226,11 +227,13 @@ impl Assignments {
         self.bump();
     }
 
-    /// Whether the scheduler runs and its lease has a live holder at
-    /// `now_millis`. Only then does a node wait on its assignments.
-    pub(crate) fn healthy(&self, now_millis: u64) -> bool {
+    /// Whether the scheduler runs and its holder renewed its lease lately,
+    /// as of `now_millis`. Only then does a node wait on its assignments. A
+    /// lease that has merely not expired is not enough: its holder may have
+    /// died up to a TTL ago.
+    pub(crate) fn healthy(&self, timing: &LeaseTiming, now_millis: u64) -> bool {
         let holder = *self.holder.lock().unwrap_or_else(|e| e.into_inner());
-        *self.scheduler.borrow() && holder.is_some_and(|at| at == 0 || at > now_millis)
+        *self.scheduler.borrow() && holder.is_some_and(|at| timing.renewed_lately(at, now_millis))
     }
 
     pub(crate) fn scheduler_changes(&self) -> watch::Receiver<bool> {
@@ -307,7 +310,8 @@ pub(crate) async fn write_facts(
         let mut last: Option<(NodeFact, Instant)> = None;
         while *scheduler.borrow_and_update() {
             let now = fact();
-            if due(last.as_ref(), &now, every) {
+            // A node the scheduler cannot see, for the tests.
+            if due(last.as_ref(), &now, every) && !crate::faults::no_facts() {
                 let record = now.encode();
                 match tokio::time::timeout(WITHIN, felix.publish(names::FACTS, record)).await {
                     Ok(Ok(())) => {

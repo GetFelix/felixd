@@ -210,8 +210,9 @@ the stream is the spec history. Records are never rewritten; `failed` stays in t
 
 Node facts are on `sys.facts`, one shard, and are the scheduler's second input. Each is
 `{"format": 1, "value": ...}` with `node`, the node's id, `every_ms`, how often it appends one when
-nothing changes, `max_workloads`, `held`, how many workloads it holds, and the booleans
-`draining` and `blocked` (it cannot read its drain mark). The last three default to 0 and false.
+nothing changes, `max_workloads`, `held`, how many workloads it holds, `holding`, their ids (at most
+`max_workloads`, left out when empty), and the booleans `draining` and `blocked` (it cannot read
+its drain mark). Those after `max_workloads` default to 0, empty and false.
 An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
 a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
 is more than three of the node's `every_ms` past its last fact, and forgets it after thirty.

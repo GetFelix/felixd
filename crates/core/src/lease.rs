@@ -96,6 +96,24 @@ impl LeaseTiming {
         self.ttl * 2 / 3
     }
 
+    /// How recently a holder must have renewed its lease, or a node its
+    /// `nodes` entry, for another node to count on it still being there:
+    /// one renewal interval, and half of one again for clock skew and
+    /// delivery.
+    pub fn renewed_within(&self) -> Duration {
+        self.renew_after() * 3 / 2
+    }
+
+    /// Whether a lease last seen expiring at `expires_at_millis` (broker
+    /// time) was renewed within [`Self::renewed_within`] of `now_millis`,
+    /// judged by the time it has left. A lease that never expires (0) is not:
+    /// nothing renews it.
+    pub fn renewed_lately(&self, expires_at_millis: u64, now_millis: u64) -> bool {
+        let left = expires_at_millis.saturating_sub(now_millis);
+        let since = self.ttl.saturating_sub(self.renewed_within());
+        expires_at_millis != 0 && u128::from(left) > since.as_millis()
+    }
+
     pub fn ttl_millis(&self) -> u64 {
         u64::try_from(self.ttl.as_millis()).unwrap_or(u64::MAX)
     }

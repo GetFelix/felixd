@@ -2,12 +2,12 @@
 //!
 //! With no scheduler it is first claim wins: every node with room tries to
 //! claim every free workload after a random delay, and the lease decides.
-//! While a scheduler runs and has a live holder ([`crate::schedule`]), a node
+//! While a scheduler runs and its holder renews ([`crate::schedule`]), a node
 //! claims what is assigned to it at once. It leaves a workload to another
-//! node only while that node can take it, or to the scheduler only while it
-//! has not yet read the workload's spec record, and for at most a bound from
-//! when it first saw the workload free. Otherwise it is first claim wins at
-//! once. Either way the claim goes through the lease, so placement decides
+//! node only while that node can take it, for at most a bound, and to the
+//! scheduler only while it has not yet read the workload's spec record, for
+//! at most a short grace, both from when it first saw the workload free.
+//! Otherwise it is first claim wins at once. Either way the claim goes through the lease, so placement decides
 //! where work runs, never whether output is correct.
 
 use std::time::Duration;
@@ -26,8 +26,8 @@ pub trait Placement: Send + Sync {
 /// What a node knows about a free workload's assignment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Assigned {
-    /// Whether the `workloads` cache says the scheduler runs and its lease
-    /// has a live holder.
+    /// Whether the `workloads` cache says the scheduler runs and its holder
+    /// renewed its lease lately.
     pub scheduler: bool,
     pub to: AssignedTo,
     /// How long this node has seen the workload free, whatever its
@@ -52,8 +52,9 @@ pub enum AssignedTo {
         decided: bool,
     },
     ThisNode,
-    /// Another node. `coming` is whether its `nodes` entry says it can take
-    /// the workload: it is up, has room, is not draining and can claim.
+    /// Another node. `coming` is whether its `nodes` entry, rewritten lately,
+    /// says it can take the workload: it has room, is not draining and can
+    /// claim.
     Elsewhere {
         coming: bool,
     },
@@ -107,20 +108,26 @@ impl Placement for FirstClaimWins {
     }
 }
 
-/// The longest a free workload waits for an assignee that can take it, or
-/// for the scheduler to read its spec record, unless told otherwise.
+/// The longest a free workload waits for an assignee that can take it,
+/// unless told otherwise.
 pub const DEFAULT_ASSIGNMENT_BOUND: Duration = Duration::from_secs(15);
+/// The longest a free workload waits for a healthy scheduler to read its
+/// spec record and assign it, unless told otherwise. A healthy scheduler
+/// takes well under a second.
+pub const DEFAULT_ASSIGNMENT_GRACE: Duration = Duration::from_secs(2);
 
-/// Follows the scheduler's assignments while it runs with a live holder,
+/// Follows the scheduler's assignments while it runs and its holder renews,
 /// with first claim wins as the fallback. A node claims a workload assigned
-/// to it at once. One assigned to a node that can take it, or whose spec
-/// record the scheduler has not read yet, it leaves alone until `bound` has
-/// passed since it first saw the workload free. Anything else is first claim
-/// wins at once. The scheduler itself is always placed by first claim wins.
+/// to it at once. One assigned to a node that can take it, it leaves alone
+/// until `bound` has passed since it first saw the workload free; one whose
+/// spec record the scheduler has not read yet, until `grace` has. Anything
+/// else is first claim wins at once. The scheduler itself is always placed
+/// by first claim wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scheduled {
     pub fallback: FirstClaimWins,
     pub bound: Duration,
+    pub grace: Duration,
 }
 
 impl Placement for Scheduled {
@@ -134,10 +141,11 @@ impl Placement for Scheduled {
         }
         match assigned.to {
             AssignedTo::ThisNode => Turn::Claim(Duration::ZERO),
-            AssignedTo::Nobody { decided: false } | AssignedTo::Elsewhere { coming: true }
-                if assigned.waited < self.bound =>
-            {
+            AssignedTo::Elsewhere { coming: true } if assigned.waited < self.bound => {
                 Turn::Defer(self.bound - assigned.waited)
+            }
+            AssignedTo::Nobody { decided: false } if assigned.waited < self.grace => {
+                Turn::Defer(self.grace - assigned.waited)
             }
             _ => self.fallback.turn(workload, assigned, random),
         }

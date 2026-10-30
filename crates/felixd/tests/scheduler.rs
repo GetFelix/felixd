@@ -16,6 +16,7 @@ use bytes::Bytes;
 use common::{Agent, INPUT, LEASE_TTL, TestFelix, eventually, replication_factor, test_felix};
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::assignments::{self, Placed};
+use felixd_agent::felix::Felix;
 use felixd_core::names;
 use felixd_core::node::NodeInfo;
 use felixd_core::output;
@@ -28,11 +29,26 @@ const SOON: Duration = Duration::from_secs(90);
 /// How often test nodes append facts, so a dead one goes silent quickly.
 const FACTS_EVERY: Duration = Duration::from_secs(1);
 
+/// Starts a node that leaves workloads to their assignee for up to `bound`
+/// and waits as long for the scheduler to assign a new one, so a test sees
+/// the fallback only where it means to.
 fn start(t: &TestFelix, node: &str, bound: Duration) -> Agent {
+    start_with(t, node, bound, "", &[])
+}
+
+fn start_with(t: &TestFelix, node: &str, bound: Duration, faults: &str, more: &[&str]) -> Agent {
     let bound = bound.as_millis().to_string();
     let every = FACTS_EVERY.as_millis().to_string();
-    let args = ["--assignment-bound-ms", &bound, "--facts-every-ms", &every];
-    t.start_node_with_args(node, "", LEASE_TTL, &args)
+    let mut args = vec![
+        "--assignment-bound-ms",
+        &bound,
+        "--assignment-grace-ms",
+        &bound,
+        "--facts-every-ms",
+        &every,
+    ];
+    args.extend(more);
+    t.start_node_with_args(node, faults, LEASE_TTL, &args)
 }
 
 /// Submits the scheduler, snapshotting often so a takeover restores from a
@@ -129,6 +145,7 @@ async fn fake_fact(t: &TestFelix, node: &str) {
         every_ms: 3_600_000,
         max_workloads: 64,
         held: 0,
+        holding: Default::default(),
         draining: false,
         blocked: false,
     };
@@ -136,8 +153,17 @@ async fn fake_fact(t: &TestFelix, node: &str) {
     facts_from(t, &[node]).await;
 }
 
-/// A `nodes` entry for a node that is not running, with no TTL.
-async fn fake_entry(t: &TestFelix, node: &str, held: usize) {
+/// A `nodes` entry for a node that is not running, rewritten every renewal
+/// interval as a live node's is, until dropped.
+struct FakeEntry(tokio::task::JoinHandle<()>);
+
+impl Drop for FakeEntry {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn fake_entry(t: &TestFelix, node: &str, held: usize) -> FakeEntry {
     let info = NodeInfo {
         version: "0.0.0".into(),
         max_workloads: 64,
@@ -145,10 +171,16 @@ async fn fake_entry(t: &TestFelix, node: &str, held: usize) {
         draining: None,
         blocked: false,
     };
-    t.felix
-        .cache_put(names::NODES, node, Bytes::from(info.encode()))
-        .await
-        .unwrap();
+    let felix = Felix::connect(&t.settings).await.unwrap();
+    let node = node.to_owned();
+    let every = LEASE_TTL / 3;
+    FakeEntry(tokio::spawn(async move {
+        loop {
+            let value = Bytes::from(info.encode());
+            felix.cache_put(names::NODES, &node, value).await.unwrap();
+            tokio::time::sleep(every).await;
+        }
+    }))
 }
 
 /// Submits `id`, waits for it to be assigned to `to` and returns when the
@@ -252,7 +284,7 @@ async fn a_workload_assigned_to_a_full_node_is_claimed_at_once() {
     let _agents: Vec<Agent> = nodes.iter().map(|n| start(&t, n, bound)).collect();
     scheduler_on(&t, &nodes).await;
     // Its fact is out of date: its `nodes` entry says it is full.
-    fake_entry(&t, "a-full", 64).await;
+    let _entry = fake_entry(&t, "a-full", 64).await;
     fake_fact(&t, "a-full").await;
     assigned_to(&t, "full", "a-full").await;
     let took = claimed_by(&t, "full", &nodes, bound).await;
@@ -291,6 +323,39 @@ async fn with_the_scheduler_down_a_new_workload_does_not_wait() {
 }
 
 #[tokio::test]
+async fn a_workload_the_scheduler_has_no_room_for_is_claimed_where_room_appears() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    // Long waits, so a node that waited on the scheduler would show.
+    let bound = Duration::from_secs(60);
+    let nodes = ["s7-a", "s7-b"];
+    let _agents: Vec<Agent> = nodes
+        .iter()
+        .map(|n| start_with(&t, n, bound, "", &["--max-workloads", "1"]))
+        .collect();
+    scheduler_on(&t, &nodes).await;
+    // One node holds the scheduler, the other this: both are full.
+    assert!(run_counter(&t, "first").await.success());
+    eventually("first to be claimed", SOON, || holder(&t, "first")).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(run_counter(&t, "late").await.success());
+    let record = t.spec_of("late").await.record.expect("a spec record");
+    eventually("the scheduler to pass late's spec", SOON, || async {
+        (assignments::read(&t.felix).await.unwrap().specs > record).then_some(())
+    })
+    .await;
+    assert!(!assigned(&t).await.contains_key("late"));
+    // Room turns up on a node the scheduler does not hear of.
+    let _roomy = start_with(&t, "s7-c", bound, "no-facts=1", &["--max-workloads", "4"]);
+    let took = claimed_by(&t, "late", &["s7-c"], bound).await;
+    assert!(
+        took < Duration::from_secs(20),
+        "claimed {took:?} after room turned up"
+    );
+}
+
+#[tokio::test]
 async fn an_assignee_that_never_claims_is_passed_over_after_the_bound() {
     let Some(t) = test_felix().await else {
         return;
@@ -300,17 +365,17 @@ async fn an_assignee_that_never_claims_is_passed_over_after_the_bound() {
     let _agents: Vec<Agent> = nodes.iter().map(|n| start(&t, n, bound)).collect();
     scheduler_on(&t, &nodes).await;
     // This one looks able in `nodes` too, but never claims anything.
-    fake_entry(&t, "a-stuck", 0).await;
+    let _entry = fake_entry(&t, "a-stuck", 0).await;
     fake_fact(&t, "a-stuck").await;
-    let seen = assigned_to(&t, "stuck", "a-stuck").await;
-    claimed_by(&t, "stuck", &nodes, bound + Duration::from_secs(30)).await;
-    // The bound runs from when a node first saw the workload free, which can
-    // be before the assignment was seen here, by about the time the
-    // scheduler takes to step its spec record.
-    let after = seen.elapsed();
+    // The bound runs from when a node first saw the workload free, which is
+    // after it was submitted.
+    let submitted = Instant::now();
+    assigned_to(&t, "stuck", "a-stuck").await;
+    claimed_by(&t, "stuck", &nodes, bound + Duration::from_secs(60)).await;
+    let after = submitted.elapsed();
     assert!(
-        after >= bound / 2,
-        "claimed {after:?} after the assignment, well inside the {bound:?} bound"
+        after >= bound - Duration::from_millis(500),
+        "claimed {after:?} after it was submitted, inside the {bound:?} bound"
     );
 }
 

@@ -50,13 +50,15 @@ Behaviour that matters:
   has once found it. The output stays fenced as in any takeover.
 - **Placement.** With no scheduler, first claim wins: every node with room claims a free workload
   after a random delay of up to `--claim-delay-ms`. While the `scheduler` workload runs and its
-  lease has a live holder, a node claims what is assigned to it at once. It leaves a workload to
+  holder renews its lease, a node claims what is assigned to it at once. It leaves a workload to
   another node only while that node's `nodes` entry says it takes work (up, with room, not
-  draining, able to read its drain mark), and an unassigned one only while the scheduler has not
-  read its spec record, for at most `--assignment-bound-ms` from when it first saw it free.
+  draining, able to read its drain mark) and was rewritten lately, for at most
+  `--assignment-bound-ms`, and an unassigned one only while the scheduler has not read its spec
+  record, for at most `--assignment-grace-ms`, both from when it first saw it free. The
+  scheduler counts as running only while its holder renewed its lease lately.
   Anything else is first claim wins at once. Every claim still goes through the lease and the
   fence, so an assignment can delay work but never makes two owners. Each node appends a fact (its
-  id, interval, `--max-workloads`, what it holds, and whether it is draining or blocked) to
+  id, interval, `--max-workloads`, the workloads it holds, and whether it is draining or blocked) to
   `sys.facts` every `--facts-every-ms` and within half a second of a change, and says in `nodes`
   when it cannot read its drain mark (`blocked`).
 - **Failure.** A trap, running out of fuel or `poison` writes a failure record, then `failed` into

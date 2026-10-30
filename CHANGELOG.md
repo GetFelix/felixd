@@ -11,11 +11,12 @@
   append times, so a replay assigns the same way, and it fails over like any
   workload. While it runs, each node appends a fact to the new `sys.facts`
   stream every `--facts-every-ms` (three lease TTLs) and within half a second
-  of a change. A node follows assignments only while the scheduler's lease has
-  a live holder: it claims what is assigned to it at once, and leaves a
-  workload to an assignee that can take it, or to a scheduler that has not
-  read its spec yet, for at most `--assignment-bound-ms` (15 s). Anything
-  else is first claim wins at once. Claims still go through the lease and the
+  of a change. A node follows assignments only while the scheduler's holder
+  renews its lease: it claims what is assigned to it at once, leaves a
+  workload to an assignee whose recent `nodes` entry says it can take it for
+  at most `--assignment-bound-ms` (15 s), and waits for a scheduler that has
+  not read a new spec yet for at most `--assignment-grace-ms` (2 s).
+  Anything else is first claim wins at once. Claims still go through the lease and the
   fence. A drained node's workloads move to where the scheduler assigns them,
   and `felixd ps` shows an `ASSIGNED` column. Without the scheduler nothing
   changes. `nodes` entries gain `blocked`, set while a node cannot read its

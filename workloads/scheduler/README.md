@@ -18,8 +18,9 @@ writes.
 - **Policy:** a node takes work while its last fact is within three of its own intervals of the
   latest `sys.facts` time and says it is neither draining nor blocked. A running workload with no
   assignment, or one assigned to a node that no longer takes work, goes to the node with the lowest
-  load (the larger of its assignments and what it holds) under its `max_workloads`, the lowest id
-  first. Nothing is moved off a node that still takes work. Nodes silent for thirty intervals are
+  load (what is assigned to it or held by it, counted once) under its `max_workloads`, the lowest
+  id first. A node over its room loses the assignments it does not hold. Nothing else is moved
+  off a node that still takes work. Nodes silent for thirty intervals are
   forgotten. The scheduler never assigns itself.
 - **State:** the nodes, the running workloads and the assignments, as JSON in 1 MiB snapshot
   chunks. `inspect` returns the same JSON. Missing fields restore with defaults; a snapshot that

@@ -25,8 +25,17 @@ fn fact(node: &str) -> NodeFact {
         every_ms: 2000,
         max_workloads: 2,
         held: 0,
+        holding: BTreeSet::new(),
         draining: false,
         blocked: false,
+    }
+}
+
+fn holding(node: &str, ids: &[&str]) -> NodeFact {
+    NodeFact {
+        held: ids.len(),
+        holding: ids.iter().map(|id| id.to_string()).collect(),
+        ..fact(node)
     }
 }
 
@@ -131,26 +140,35 @@ fn a_new_workload_goes_to_the_least_loaded_node() {
 #[test]
 fn what_a_node_holds_by_first_claim_counts_against_its_room() {
     let mut f = Feed::hearing(&["a", "b"]);
-    f.fact(
-        1,
-        NodeFact {
-            held: 2,
-            ..fact("a")
-        },
-    );
+    f.fact(1, holding("a", &["x", "y"]));
     let out = f.run(2, "w1");
     assert_eq!(out, vec![f.assign("w1", Some("b"))]);
-    f.fact(
-        3,
-        NodeFact {
-            held: 2,
-            ..fact("b")
-        },
-    );
+    // b holds w1, its own assignment, and z: full, with w1 counted once.
+    f.fact(3, holding("b", &["w1", "z"]));
     let out = f.run(4, "w2");
     assert_eq!(out, vec![f.progress()]);
-    // b's own fact counts w1 among what it holds: still full.
     assert!(!f.s.assignments().contains_key("w2"));
+    // a lets one go and w2 gets the room.
+    let out = f.fact(5, holding("a", &["x"]));
+    assert_eq!(out, vec![f.assign("w2", Some("a"))]);
+}
+
+#[test]
+fn a_node_over_its_room_loses_what_it_does_not_hold() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    f.run(1, "w1");
+    f.run(2, "w2");
+    f.run(3, "w3");
+    assert_eq!(f.s.assignments()["w1"], "a");
+    assert_eq!(f.s.assignments()["w3"], "a");
+    // a took another by first claim wins: w3 no longer fits, and b has room
+    // for it.
+    let out = f.fact(4, holding("a", &["x", "w1"]));
+    assert_eq!(out, vec![f.assign("w3", Some("b"))]);
+    // b fills up too: w3 has nowhere to go and is unassigned.
+    let out = f.fact(5, holding("b", &["w2", "y"]));
+    assert_eq!(out, vec![f.assign("w3", None)]);
+    assert!(!f.s.assignments().contains_key("w3"));
 }
 
 #[test]
@@ -286,9 +304,8 @@ fn a_snapshot_missing_fields_restores_with_defaults() {
 #[test]
 fn records_round_trip() {
     let fact = NodeFact {
-        held: 1,
         draining: true,
-        ..fact("n")
+        ..holding("n", &["w"])
     };
     assert_eq!(NodeFact::decode(&fact.encode()), Ok(fact));
     let gone = Record {
