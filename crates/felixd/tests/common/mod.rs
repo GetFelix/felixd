@@ -139,11 +139,17 @@ impl TestFelix {
     }
 
     /// Starts an agent that connects with the token in `token_file`.
-    pub(crate) fn start_node_with_token(&self, node_id: &str, token_file: &str) -> Agent {
+    pub(crate) fn start_node_with_token(
+        &self,
+        node_id: &str,
+        token_file: &str,
+        faults: &str,
+    ) -> Agent {
         let ttl = LEASE_TTL.as_millis().to_string();
         let child = self
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
             .env("FELIX_AUTH_TOKEN_FILE", token_file)
+            .env("FELIXD_FAULTS", faults)
             .spawn()
             .expect("start felixd agent");
         Agent {
