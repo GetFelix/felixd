@@ -499,6 +499,7 @@ async fn run(
         if offset < next_input {
             // A subscription from `next_input` only goes below it if the
             // stream started over.
+            not_behind(&spec.input, felix.tail(&spec.input).await?, next_input)?;
             continue;
         }
         if faults::drop_input(offset) {

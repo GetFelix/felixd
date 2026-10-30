@@ -46,7 +46,7 @@ jobs:
         run: |
           docker compose -f tests/felix/compose.yaml up -d --wait
           tests/felix/credentials.sh /tmp/felix
-      - run: cargo test --workspace --test '*' --locked -- --test-threads=1
+      - run: cargo test --workspace --test '*' --locked --no-fail-fast -- --test-threads=1
       - name: Felix logs
         if: failure()
         run: docker compose -f tests/felix/compose.yaml logs --no-color
