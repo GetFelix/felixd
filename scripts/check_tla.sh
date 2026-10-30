@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check a module in specs/ under each configuration registered for it
 # below, and hold each to its outcome. `TLA_MODULE` picks the module:
-# Felixd (the default) or FelixdSpecs.
+# Felixd (the default), FelixdSpecs or FelixdMerge.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -10,12 +10,13 @@
 #
 # `scripts/check_tla.sh Felixd FelixdNoMarker` checks only those; a name not
 # registered below must pass. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
-# checks the spec history model. `TLC_WORKERS=4` caps TLC's worker threads.
+# checks the spec history model, and `TLA_MODULE=FelixdMerge` the merge log
+# model. `TLC_WORKERS=4` caps TLC's worker threads.
 #
 # `TLC_SIMULATE=N` walks N random behaviours of up to `TLC_DEPTH` (default
 # 100) steps instead of checking every state. The nightly job runs
-# FelixdFull and FelixdSpecsFull this way, as they are too large to check
-# exhaustively.
+# FelixdFull, FelixdSpecsFull and FelixdMergeFull this way, as they are too
+# large to check exhaustively.
 #
 # Needs Java 11+ on PATH. The TLA+ tools are fetched once, pinned by release
 # and checksum, into target/tla/.
@@ -65,10 +66,25 @@ felixd_specs_expectations=(
   "FelixdSpecsCheckNoLineage violates CheckMatchesRun"
 )
 
+felixd_merge_expectations=(
+  "FelixdMergeNoClaim violates EntriesClaimed"
+  "FelixdMergeNoClaimFence violates MergeEpochMonotone"
+  "FelixdMergeNoClaimCheck violates MergeEpochMonotone"
+  "FelixdMergeNoCatchUp violates OutputsFollowMerge"
+  "FelixdMergeBeforeOut violates OneWriter"
+  "FelixdMergeNoSameBytes violates StepsFollowMerge"
+  "FelixdMergeNoClaimExact pass"
+  "FelixdMergeNoSkip pass"
+  "FelixdMergeRecreate pass"
+  "FelixdMergeLost pass"
+  "FelixdMerge pass"
+)
+
 MODULE="${TLA_MODULE:-Felixd}"
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
+  FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
   *) echo "unknown TLA_MODULE: $MODULE" >&2; exit 1 ;;
 esac
 

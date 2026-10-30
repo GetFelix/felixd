@@ -1,6 +1,6 @@
 name: TLA nightly
 
-# FelixdFull and FelixdSpecsFull are too large to check every state, so this
+# FelixdFull, FelixdSpecsFull and FelixdMergeFull are too large to check every state, so this
 # walks random behaviours of them instead. The pull request suite checks the
 # smaller configurations exhaustively.
 on:
@@ -28,3 +28,5 @@ jobs:
       - run: scripts/check_tla.sh FelixdFull
       - if: ${{ !cancelled() }}
         run: TLA_MODULE=FelixdSpecs scripts/check_tla.sh FelixdSpecsFull
+      - if: ${{ !cancelled() }}
+        run: TLA_MODULE=FelixdMerge scripts/check_tla.sh FelixdMergeFull

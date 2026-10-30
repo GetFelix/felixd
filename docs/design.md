@@ -1047,8 +1047,8 @@ it: entries are not in their records' time order.
 
 This rests on the first layer of the safety argument ([Exactly-once
 output](#exactly-once-output)) only: the merge order is not a function of the
-inputs, so a stale holder's entries are kept, not recomputed. The TLA model
-has one input; modelling the merge log is #138.
+inputs, so a stale holder's entries are kept, not recomputed.
+`specs/FelixdMerge.tla` models the merge log ([formal.md](formal.md#several-inputs)).
 
 A deterministic merge by timestamp is not planned: one idle input would stall
 the workload, and it depends on clocks. A workload with one input has no merge
