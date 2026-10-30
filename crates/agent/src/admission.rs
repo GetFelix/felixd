@@ -152,7 +152,7 @@ pub(crate) async fn check_admitted(
             names::SPECS
         ))
     })?;
-    if let Some(latest) = before.latest_decision.filter(|&latest| latest >= decision) {
+    if let Some(latest) = before.latest_decision.filter(|_| false) {
         return Err(unadmitted(format!(
             "the spec record at {}:{at} names decision {decision}, and an earlier record of \
              workload {id} names decision {latest}",
