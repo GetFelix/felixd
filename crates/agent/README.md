@@ -18,7 +18,7 @@ binary depends on it.
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
 | `ps` | What `felixd ps` does: each workload's state, holder, assignment and positions, and each node, read from the caches and streams. |
 | `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
-| `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. |
+| `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. Tokens are a `Secret`, which formats as a placeholder; `expose` is called only where a token is handed to Felix. |
 
 Behaviour that matters:
 

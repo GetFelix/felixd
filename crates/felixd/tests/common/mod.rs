@@ -13,7 +13,7 @@ use bytes::Bytes;
 use felix_client::ConditionalWrite;
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::felix::Felix;
-use felixd_agent::settings::Settings;
+use felixd_agent::settings::{Secret, Settings};
 use felixd_core::class::OperatorReason;
 use felixd_core::lease::Lease;
 use felixd_core::names;
@@ -49,12 +49,7 @@ pub(crate) async fn test_felix_in(namespace: Option<&str>) -> Option<TestFelix> 
         return None;
     };
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"));
-    let read = |name: &str| {
-        std::fs::read_to_string(var(name))
-            .unwrap()
-            .trim()
-            .to_owned()
-    };
+    let read = |name: &str| Secret::new(std::fs::read_to_string(var(name)).unwrap().trim());
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -432,6 +427,13 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
+    pub(crate) fn new(child: Child, node_id: &str) -> Agent {
+        Agent {
+            child,
+            node_id: node_id.to_owned(),
+        }
+    }
+
     /// Asks the agent to shut down cleanly, as Ctrl-C does.
     pub(crate) fn interrupt(&self) {
         self.signal("INT");

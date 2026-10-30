@@ -77,6 +77,7 @@ async fn post(settings: &Settings, path: &str, body: Value) -> Result<()> {
         .controlplane_token
         .clone()
         .context("a control plane token is needed to create streams and caches")?;
+    let authorization = format!("Bearer {}", token.expose());
     let url = format!(
         "{}/v1/tenants/{}/{}",
         settings.controlplane_url.trim_end_matches('/'),
@@ -90,7 +91,7 @@ async fn post(settings: &Settings, path: &str, body: Value) -> Result<()> {
             .into();
         let mut response = agent
             .post(&url)
-            .header("Authorization", &format!("Bearer {token}"))
+            .header("Authorization", &authorization)
             .send_json(&body)
             .with_context(|| format!("POST {url}"))?;
         let text = response.body_mut().read_to_string().unwrap_or_default();
