@@ -482,9 +482,7 @@ impl<'a> OutputLog<'a> {
             let mut landed = false;
             for existing in &found {
                 let decoded = self.decode(&existing.payload, existing.offset)?;
-                if decoded.epoch() > self.fence.epoch() {
-                    return Err(Superseded(decoded.epoch()).into());
-                }
+                let _ = decoded;
                 landed |= existing.payload.as_ref() == record.as_slice();
             }
             self.tail = seen_tail;

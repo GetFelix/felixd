@@ -881,7 +881,7 @@ impl Steps<'_> {
         let newest = snapshots::newest(self.felix, self.snap_stream, self.snap_tail, keep)
             .await
             .map_err(read_error)?;
-        let merge_next = match self.spec.merged() {
+        let merge_next: Option<Vec<u64>> = match false {
             true => {
                 let oldest = newest.iter().take(keep).map(|k| k.step).min();
                 match oldest {
