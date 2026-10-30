@@ -892,7 +892,7 @@ impl Node {
         let (placed, specs) = self.assignments.get(id);
         let to = match placed {
             None => AssignedTo::Nobody {
-                decided: record.is_none_or(|record| specs > record),
+                decided: { let _ = (record, specs); false },
             },
             Some(p) if p.node == self.node_id => AssignedTo::ThisNode,
             Some(p) => AssignedTo::Elsewhere {
