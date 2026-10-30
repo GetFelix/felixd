@@ -17,7 +17,7 @@ use common::{
 use felix_client::ConditionalWrite;
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::admission::{self, Submitted};
-use felixd_core::admission::{Decision, Outcome, Policy, Reason};
+use felixd_core::admission::{Decision, Outcome, Policy, Reason, Request};
 use felixd_core::spec::{Limits, SpecRecord, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
 
@@ -494,4 +494,124 @@ async fn a_forged_record_naming_a_huge_decision_blocks_nothing() {
         || async { (t.outputs(OUTPUT).await.len() >= 10).then_some(()) },
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pointing_workloads_back_at_an_old_acceptance_after_a_stop_never_runs() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let _a = t.start_agent();
+    let counter = felixd_testkit::workload("counter");
+    assert!(t.run(ID, &counter, INPUT, &[]).success());
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    eventually("the first outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
+    })
+    .await;
+    let (at, running) = records(&t)
+        .await
+        .into_iter()
+        .rfind(|(_, r)| r.id == ID)
+        .unwrap();
+
+    let mut stopped = running.spec.clone();
+    stopped.state = WorkloadState::Stopped;
+    let submitted = admission::request(
+        &t.felix,
+        ID,
+        counter.clone(),
+        stopped,
+        replication_factor(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(submitted, Submitted::Accepted { .. }),
+        "{submitted}"
+    );
+    eventually("the workload to stop", Duration::from_secs(30), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+
+    // Nothing appended: `workloads` points back at the running record, which
+    // names an accepting decision older than the stop's.
+    let mut spec = running.spec;
+    spec.record = Some(at);
+    t.put_cache_spec(&spec).await;
+    t.publish_all(INPUT, (5..10).map(count)).await;
+    tokio::time::sleep(3 * LEASE_TTL).await;
+    assert_eq!(
+        t.outputs(OUTPUT).await.len(),
+        5,
+        "pointing workloads back at an old acceptance ran the workload after its stop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_naming_a_decision_without_admission_slows_nothing() {
+    let Some(t) = test_felix().await else { return };
+    ensure_stream(&t.settings, INPUT, kind()).await.unwrap();
+    // No `felixd init`, so there is no wl.admission.out.
+    let counter = felixd_testkit::workload("counter");
+    let mut odd = SpecRecord::new(
+        "odd",
+        admission::running("odd", &module::hash(&counter), vec![]),
+    );
+    odd.admitted = Some(0);
+    append_record(&t, &odd).await;
+
+    let _a = t.start_agent();
+    assert!(t.run(ID, &counter, INPUT, &[]).success());
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    eventually("the outputs", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 5).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skipped_acceptance_stays_skipped_after_the_projector_restarts() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let a = t.start_agent();
+    admission_held_by(&t, &a.node_id).await;
+
+    // Accepted, then skipped by the projector: its module is not uploaded.
+    let window = felixd_testkit::workload("window");
+    let spec = admission::running("skipped", &module::hash(&window), vec![INPUT.to_owned()]);
+    let request = Request::new("skipped", spec, window.len() as u64, replication_factor());
+    t.felix
+        .publish(names::INTAKE, request.encode())
+        .await
+        .unwrap();
+    eventually("the decision", Duration::from_secs(60), || async {
+        let found = decisions_for(&t, "skipped").await;
+        found.first().map(|(_, d)| {
+            assert!(matches!(d.outcome, Outcome::Accepted { .. }), "{d:?}");
+        })
+    })
+    .await;
+    // A later acceptance is recorded, so the projector has passed the first.
+    let counter = felixd_testkit::workload("counter");
+    assert!(t.run("later", &counter, INPUT, &[]).success());
+
+    // The module turns up, and another node's projector takes over.
+    t.felix
+        .cache_put(
+            names::MODULES,
+            &module::hash(&window),
+            window.clone().into(),
+        )
+        .await
+        .unwrap();
+    let b = t.start_agent();
+    drop(a);
+    admission_held_by(&t, &b.node_id).await;
+    assert!(t.run("last", &counter, INPUT, &[]).success());
+    assert!(
+        records(&t).await.iter().all(|(_, r)| r.id != "skipped"),
+        "a restarted projector recorded an acceptance its predecessor skipped"
+    );
 }

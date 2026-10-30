@@ -217,6 +217,24 @@ impl Felix {
         }
     }
 
+    /// As [`Self::tail`], `None` for a stream the broker does not know. That
+    /// is not waited out: a caller asking this expects the stream may never
+    /// exist.
+    pub(crate) async fn tail_if_exists(&self, stream: &str) -> Result<Option<u64>> {
+        let probe = until(unavailable, || {
+            self.publish_if(stream, vec![vec![0]], u64::MAX)
+        })
+        .await;
+        match probe {
+            Ok(ConditionalWrite::Refused { tail }) => Ok(Some(tail)),
+            Ok(ConditionalWrite::Written { offset }) => {
+                bail!("probe write to {stream} landed at offset {offset}")
+            }
+            Err(error) if not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The stream's next offset, asked with a read so that the read grant is
     /// enough. A read past the end is refused with the leading broker's log
     /// tail, which counts every committed record, so it is never below what
@@ -461,7 +479,16 @@ where
 /// Retries `call` while the broker says it does not serve the stream or cache
 /// yet, which is how a resource the control plane has just created looks for a
 /// moment.
-async fn until_ready<T, F, Fut>(mut call: F) -> Result<T>
+async fn until_ready<T, F, Fut>(call: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    until(not_ready, call).await
+}
+
+/// As [`until_ready`], retrying only the errors `retry` picks.
+async fn until<T, F, Fut>(retry: fn(&anyhow::Error) -> bool, mut call: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
@@ -469,7 +496,7 @@ where
     let deadline = Instant::now() + READY_WITHIN;
     loop {
         match call().await {
-            Err(error) if Instant::now() < deadline && not_ready(&error) => {
+            Err(error) if Instant::now() < deadline && retry(&error) => {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
             result => return result,
@@ -481,6 +508,12 @@ fn not_found(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<BrokerError>()
         .is_some_and(|broker| broker.code == ErrorCode::NotFound)
+}
+
+fn unavailable(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<BrokerError>()
+        .is_some_and(|broker| broker.code == ErrorCode::ShardUnavailable)
 }
 
 fn not_ready(error: &anyhow::Error) -> bool {

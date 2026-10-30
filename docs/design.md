@@ -1522,16 +1522,22 @@ history, the scheduler included, reads only specs. Once admission's own
 record is on `sys.specs`, a node runs a later record only if the decision it
 names accepted that workload and exactly that spec, so a record written around
 admission, by a stale tool or a submitter with direct write rights, never
-runs or claims, and a record naming a decision no later than one an earlier
-record of the workload named is refused, so an old acceptance cannot be
-replayed over a later change or stop. A record whose decision Felix no longer
+runs or claims, and a record runs only if no record of the workload anywhere
+on `sys.specs` names a later decision that verifies, so an old acceptance
+cannot run again over a later change or stop, whether it is appended again
+or `workloads` is pointed back at it. Nodes read each workload's decisions
+newest first and stop at the first that verifies, so a check reads about one
+decision however long the history. A projector resumes after the newest
+decision recorded on `sys.specs`, so an acceptance it passed over, such as
+one whose module did not match, stays unrecorded; only one passed over with
+nothing recorded since is looked at again by the next holder. A record whose decision Felix no longer
 holds needs an operator; no admitted workload may read admission's streams,
 so no trim record marks a decision trimmable, and `felixd init` sets no
 `keep_snapshots` on admission. System workloads (`admission`, `scheduler`)
 are refused through intake: an operator writes their specs directly, and the
 gate lets those through by id alone, so whoever can write `sys.specs` can run
 any module with any inputs as the scheduler, as before admission. Only records
-whose decision accepted exactly their spec count as earlier decisions, so a
+whose decision accepted exactly their spec count as later decisions, so a
 forged record naming a huge or absent decision blocks nothing. The gate and
 the projector read `sys.specs` from its first record, so it must never be
 trimmed. The scheduler reads every spec record, admitted or

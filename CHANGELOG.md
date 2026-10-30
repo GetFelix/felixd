@@ -20,8 +20,11 @@
   never claims. New fault `crash-after-projection-sent=N` for tests.
 - System workloads (`admission`, `scheduler`) are refused through intake;
   `felixd run` writes their specs directly with the control plane token as
-  before. A spec record naming a decision no later than one an earlier record
-  of the workload named is refused, so an old acceptance cannot be replayed.
+  before. A spec record runs only if no record of the workload anywhere on
+  `sys.specs` names a later accepting decision, so an old acceptance cannot
+  run again, whether it is appended again or `workloads` is pointed back at
+  it. A projector resumes after the newest recorded decision, so an
+  acceptance one passed over is not recorded later by another.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.

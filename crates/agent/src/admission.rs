@@ -5,14 +5,16 @@
 //! The decisions themselves are admission's outputs on `wl.admission.out`,
 //! written once under its lease and fence like any output. The projector only
 //! copies the accepted ones to `sys.specs`. The gate runs a record only if
-//! it names an accepting decision for exactly its spec, later than any an
-//! earlier record of the workload named. Whoever writes `sys.specs` cannot get
+//! it names an accepting decision for exactly its spec, and no record of the
+//! workload names a later one that does. Whoever writes `sys.specs` cannot get
 //! past it; a principal that can write `wl.admission.out`, which in v0 is any
 //! node, can forge a decision until per-lease tokens (#74). System workloads
 //! (`admission`, `scheduler`) are let through by id alone: whoever can write
 //! `sys.specs` can run any module under those ids, as before admission.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,7 +24,7 @@ use felixd_core::admission::{self, Decision, Outcome, Reason, Request};
 use felixd_core::class::OperatorReason;
 use felixd_core::spec::{SpecRecord, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names, output};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 use crate::admin::{self, StreamKind};
 use crate::felix::{Felix, Trimmed};
@@ -33,10 +35,15 @@ use crate::specs;
 /// How often the projector and a waiting submitter look for new records.
 const POLL: Duration = Duration::from_millis(50);
 
+/// Unread records one workload may pile up in the gate before it reads them,
+/// which bounds the gate's memory however often a workload changes.
+const MAX_UNVERIFIED: usize = 64;
+
 /// What this node has read of `sys.specs` for the gate. Records are never
-/// rewritten, so what is folded stays true.
+/// rewritten, so what is folded stays true. The lock is never held across a
+/// read, so one slow read does not hold up every other workload's check.
 #[derive(Default)]
-pub(crate) struct Gate(Mutex<Scanned>);
+pub(crate) struct Gate(StdMutex<Scanned>);
 
 #[derive(Default)]
 struct Scanned {
@@ -45,53 +52,100 @@ struct Scanned {
     /// The first record that is admission's own, or does not decode and so
     /// might be.
     first: Option<u64>,
-    /// Per workload, `(record offset, decision)` for each record whose
-    /// decision accepted exactly its spec, in record order. A record naming a
-    /// decision that does not, such as a forged one, is not counted, so it
-    /// cannot block the workload's later records.
-    named: HashMap<String, Vec<(u64, u64)>>,
+    /// Per workload, the records naming a decision.
+    named: HashMap<String, Named>,
 }
 
-/// What the gate knows of the records below one.
-struct Before {
-    /// The first record that is, or might be, admission's own.
-    admission_from: Option<u64>,
-    /// The latest decision an earlier record of the same workload named
-    /// that accepted that record's spec.
-    latest_decision: Option<u64>,
+/// Records naming decisions, as far as they can still change which is the
+/// newest decision that verifies: one that accepted exactly its record's
+/// spec. A record whose decision does not, such as a forged one, never
+/// counts, so it cannot block anything.
+#[derive(Debug, Default)]
+struct Named {
+    /// The newest verified `(decision, record)`.
+    verified: Option<(u64, u64)>,
+    /// `(decision, record)` of each record naming a later decision than
+    /// `verified`, not read yet.
+    unverified: Vec<(u64, u64)>,
+}
+
+impl Named {
+    fn note(&mut self, record: u64, decision: u64) {
+        if self.verified.is_none_or(|(newest, _)| newest < decision) {
+            self.unverified.push((decision, record));
+        }
+    }
+
+    /// The record to read next: if it verifies, it is the newest.
+    fn candidate(&self) -> Option<(u64, u64)> {
+        self.unverified.iter().copied().max()
+    }
+
+    fn settle(&mut self, (decision, record): (u64, u64), verifies: bool) {
+        self.unverified.retain(|&found| found != (decision, record));
+        if verifies && self.verified.is_none_or(|(newest, _)| newest < decision) {
+            self.verified = Some((decision, record));
+            self.unverified.retain(|&(later, _)| later > decision);
+        }
+    }
+}
+
+/// The newest verified `(decision, record)` of the records `with` gives
+/// access to, reading candidates newest first with `verify(record, decision)`
+/// and stopping at the first that verifies. `with` is called only between
+/// reads, so it can take a lock.
+async fn newest<V, Fut>(
+    mut with: impl FnMut(&mut dyn FnMut(&mut Named)),
+    mut verify: V,
+) -> Result<Option<(u64, u64)>>
+where
+    V: FnMut(u64, u64) -> Fut,
+    Fut: Future<Output = Result<bool>>,
+{
+    loop {
+        let mut next = Err(None);
+        with(&mut |named| next = named.candidate().ok_or(named.verified));
+        let candidate = match next {
+            Ok(candidate) => candidate,
+            Err(newest) => return Ok(newest),
+        };
+        let verifies = verify(candidate.1, candidate.0).await?;
+        with(&mut |named| named.settle(candidate, verifies));
+    }
 }
 
 impl Gate {
-    /// Folds `sys.specs` up to `at` and says what is below it for workload
-    /// `id`. A record that does not decode counts as admission's, so a newer
-    /// build's admission record is not missed.
-    async fn before(&self, felix: &Felix, id: &str, at: u64) -> Result<Before> {
-        let mut scanned = self.0.lock().await;
-        // Read only once a record names a decision: without admission,
-        // `wl.admission.out` does not exist.
-        let mut decisions_tail = None;
-        while scanned.to < at {
-            let from = scanned.to;
-            let (page, after) = felix.read_page(names::SPECS, from, at).await?;
+    fn scanned(&self) -> std::sync::MutexGuard<'_, Scanned> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Folds `sys.specs` up to `end`. A record that does not decode counts as
+    /// admission's, so a newer build's admission record is not missed.
+    /// Nothing here reads `wl.admission.out`, which a namespace without
+    /// admission does not have.
+    async fn fold(&self, felix: &Felix, end: u64) -> Result<()> {
+        loop {
+            let from = self.scanned().to;
+            if from >= end {
+                return Ok(());
+            }
+            let (page, after) = felix.read_page(names::SPECS, from, end).await?;
+            let mut scanned = self.scanned();
+            // Another check folded these meanwhile.
+            if scanned.to != from {
+                continue;
+            }
             for record in page {
                 match SpecRecord::decode(&record.payload) {
                     Ok(found) => {
                         if found.id == names::ADMISSION && scanned.first.is_none() {
                             scanned.first = Some(record.offset);
                         }
-                        let tail = match (found.admitted, decisions_tail) {
-                            (None, _) => 0,
-                            (Some(_), Some(tail)) => tail,
-                            (Some(_), None) => {
-                                let stream = names::output_stream(names::ADMISSION);
-                                *decisions_tail.insert(felix.tail(&stream).await?)
-                            }
-                        };
-                        if let Some(decision) = found.admitted
-                            && verified(felix, tail, &found, decision).await?
-                        {
+                        if let Some(decision) = found.admitted {
                             let named = scanned.named.entry(found.id).or_default();
-                            named.push((record.offset, decision));
+                            named.note(record.offset, decision);
                         }
                     }
                     Err(_) => {
@@ -101,27 +155,72 @@ impl Gate {
             }
             scanned.to = after;
         }
-        let latest_decision = scanned.named.get(id).and_then(|named| {
-            named
-                .iter()
-                .filter(|(offset, _)| *offset < at)
-                .map(|(_, decision)| *decision)
-                .max()
-        });
-        Ok(Before {
-            admission_from: scanned.first.filter(|&first| first < at),
-            latest_decision,
-        })
+    }
+
+    /// The first record below `at` that is, or might be, admission's own.
+    fn admission_before(&self, at: u64) -> Option<u64> {
+        self.scanned().first.filter(|&first| first < at)
+    }
+
+    fn settle(&self, id: &str, candidate: (u64, u64), verifies: bool) {
+        let mut scanned = self.scanned();
+        let named = scanned.named.entry(id.to_owned()).or_default();
+        named.settle(candidate, verifies);
+    }
+
+    /// The newest verified `(decision, record)` of workload `id`'s records.
+    /// Reads only the records naming a later decision than the newest known
+    /// to verify, newest first, so usually none.
+    async fn newest(&self, felix: &Felix, id: &str) -> Result<Option<(u64, u64)>> {
+        newest(
+            |f| f(self.scanned().named.entry(id.to_owned()).or_default()),
+            |record, decision| verifies(felix, Some(id), record, decision),
+        )
+        .await
+    }
+
+    /// Reads the records of each workload with more than [`MAX_UNVERIFIED`]
+    /// unread, which leaves at most one of them.
+    async fn compact(&self, felix: &Felix) -> Result<()> {
+        let crowded: Vec<String> = self
+            .scanned()
+            .named
+            .iter()
+            .filter(|(_, named)| named.unverified.len() > MAX_UNVERIFIED)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in crowded {
+            self.newest(felix, &id).await?;
+        }
+        Ok(())
     }
 }
 
+/// A spec record naming an accepted decision when a later record of the same
+/// workload names a later one, as when `workloads` still points at the record
+/// before a just-recorded change. Retried: the workload runs once `workloads`
+/// catches up, and never runs this record.
+#[derive(Debug)]
+pub(crate) struct Superseded(String);
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Superseded {}
+
 /// Checks that spec record `record`, at `sys.specs` offset `at`, may run:
 /// either admission had not been bootstrapped before it, or it names a
-/// decision on `wl.admission.out` that accepted exactly its spec and is
-/// later than any decision an earlier record of the workload named, so an
-/// old acceptance cannot be replayed over a later change or stop. Anything
-/// else is [`NeedsOperator`] with [`OperatorReason::SpecUnadmitted`],
-/// including a decision Felix no longer holds.
+/// decision on `wl.admission.out` that accepted exactly its spec, and no
+/// record of the workload anywhere on `sys.specs` names a later decision that
+/// verifies, so an old acceptance cannot run over a later change or stop,
+/// whether it is appended again or `workloads` is pointed back at it. A
+/// later decision recorded earlier is [`NeedsOperator`] with
+/// [`OperatorReason::SpecUnadmitted`], as is any record that is not admitted,
+/// including one naming a decision Felix no longer holds; one recorded
+/// later is [`Superseded`].
 pub(crate) async fn check_admitted(
     felix: &Felix,
     gate: &Gate,
@@ -129,8 +228,9 @@ pub(crate) async fn check_admitted(
     at: u64,
     record: &SpecRecord,
 ) -> Result<()> {
-    let before = gate.before(felix, id, at).await?;
-    if !admission::needs_decision(id, at, before.admission_from) {
+    let specs_tail = felix.tail(names::SPECS).await?;
+    gate.fold(felix, specs_tail).await?;
+    if !admission::needs_decision(id, at, gate.admission_before(at)) {
         return Ok(());
     }
     let unadmitted = |detail: String| NeedsOperator::new(OperatorReason::SpecUnadmitted, detail);
@@ -173,15 +273,30 @@ pub(crate) async fn check_admitted(
             names::SPECS
         ))
     })?;
-    if let Some(latest) = before.latest_decision.filter(|&latest| latest > decision) {
+    // This record verifies, so only records naming a later decision are read.
+    gate.settle(id, (decision, at), true);
+    gate.compact(felix).await?;
+    let Some((latest, by)) = gate
+        .newest(felix, id)
+        .await?
+        .filter(|&(latest, _)| latest > decision)
+    else {
+        return Ok(());
+    };
+    if by < at {
         return Err(unadmitted(format!(
-            "the spec record at {}:{at} names decision {decision}, and an earlier record of \
-             workload {id} names the later decision {latest}",
+            "the spec record at {}:{at} names decision {decision}, and the earlier record {by} \
+             of workload {id} names the later decision {latest}",
             names::SPECS
         ))
         .into());
     }
-    Ok(())
+    Err(Superseded(format!(
+        "the spec record at {}:{at} names decision {decision}, and the later record {by} of \
+         workload {id} names the later decision {latest}",
+        names::SPECS
+    ))
+    .into())
 }
 
 /// Records each decision admission accepted on `sys.specs`, in order, after
@@ -216,66 +331,74 @@ pub(crate) async fn project(felix: &Felix, settings: &Settings, mut stop: watch:
     }
 }
 
-/// Whether `record`, naming `decision`, is what that decision on
-/// `wl.admission.out`, whose tail is `tail`, accepted. A decision past the
-/// tail, out of range or gone is not: the projector writes a record only
-/// after reading its decision.
-async fn verified(felix: &Felix, tail: u64, record: &SpecRecord, decision: u64) -> Result<bool> {
-    let Some(end) = admission::decision_end(decision, tail) else {
+/// The tail of `wl.admission.out`, 0 while it does not exist, as in a
+/// namespace without admission, where no decision verifies.
+async fn decisions_tail(felix: &Felix) -> Result<u64> {
+    let stream = names::output_stream(names::ADMISSION);
+    Ok(felix.tail_if_exists(&stream).await?.unwrap_or(0))
+}
+
+/// Whether the spec record at `record`, of workload `id` if one is given,
+/// names `decision` and that decision on `wl.admission.out` accepted exactly
+/// its spec. A decision past the tail, out of range or gone does not verify:
+/// the projector writes a record only after reading its decision, so the
+/// tail is read after the record.
+async fn verifies(felix: &Felix, id: Option<&str>, record: u64, decision: u64) -> Result<bool> {
+    let found = felix
+        .read_range(names::SPECS, record, record.saturating_add(1))
+        .await?
+        .into_iter()
+        .find(|r| r.offset == record)
+        .with_context(|| format!("the folded record at {}:{record} is gone", names::SPECS))?;
+    let Ok(found) = SpecRecord::decode(&found.payload) else {
+        return Ok(false);
+    };
+    if found.admitted != Some(decision) || id.is_some_and(|id| id != found.id) {
+        return Ok(false);
+    }
+    let Some(end) = admission::decision_end(decision, decisions_tail(felix).await?) else {
         return Ok(false);
     };
     let stream = names::output_stream(names::ADMISSION);
-    let found = match felix.read_range(&stream, decision, end).await {
-        Ok(found) => found,
+    let decisions = match felix.read_range(&stream, decision, end).await {
+        Ok(decisions) => decisions,
         Err(error) if Trimmed::of(&error).is_some() => return Ok(false),
         Err(error) => return Err(error),
     };
-    Ok(found.into_iter().any(|r| {
-        r.offset == decision && admission::admits(&r.payload, &record.id, &record.spec).is_ok()
+    Ok(decisions.into_iter().any(|r| {
+        r.offset == decision && admission::admits(&r.payload, &found.id, &found.spec).is_ok()
     }))
-}
-
-/// The latest decision recorded for each workload by a record that it
-/// verifies, which is all the projector trusts of `sys.specs`. A decision no
-/// later than its workload's is not recorded again: the gate would refuse it.
-#[derive(Debug, Default)]
-pub(crate) struct Recorded(HashMap<String, u64>);
-
-impl Recorded {
-    pub(crate) fn note(&mut self, id: &str, decision: u64) {
-        let latest = self.0.entry(id.to_owned()).or_insert(decision);
-        *latest = (*latest).max(decision);
-    }
-
-    /// Whether decision `decision` for workload `id` is still to record.
-    pub(crate) fn wants(&self, id: &str, decision: u64) -> bool {
-        self.0.get(id).is_none_or(|&latest| latest < decision)
-    }
 }
 
 /// What the projector knows of `sys.specs` and `wl.admission.out`.
 struct Projector {
     /// The tail of `sys.specs` as last read.
     specs_tail: u64,
-    /// The next decision to look at. A projector starts from the first, since
-    /// records on `sys.specs` say only which decisions are recorded, not that
-    /// every earlier one is.
+    /// The next decision to look at. Every earlier one is recorded or
+    /// skipped for good: a projector resumes after the newest decision
+    /// recorded on `sys.specs`, so an acceptance it passed over, such as one
+    /// whose module did not match, is never recorded later by another.
     next: u64,
-    recorded: Recorded,
 }
 
 impl Projector {
-    /// Folds `sys.specs` and points `workloads` at the last record that
-    /// verifies again, in case a projector stopped between the two.
+    /// Resumes after the newest recorded decision and points `workloads` at
+    /// its record again, in case a projector stopped between the two.
     async fn start(felix: &Felix) -> Result<Projector> {
         let specs_tail = felix.tail(names::SPECS).await?;
         let mut projector = Projector {
             specs_tail: 0,
             next: 0,
-            recorded: Recorded::default(),
         };
-        let last = projector.fold(felix, specs_tail).await?;
-        if let Some((at, record)) = last {
+        if let Some((decision, at)) = projector.newest_recorded(felix, specs_tail).await? {
+            projector.next = decision.saturating_add(1);
+            let found = felix
+                .read_range(names::SPECS, at, at.saturating_add(1))
+                .await?
+                .into_iter()
+                .find(|r| r.offset == at)
+                .with_context(|| format!("the spec record at {}:{at} is gone", names::SPECS))?;
+            let record = SpecRecord::decode(&found.payload)?;
             let mut spec = record.spec;
             spec.record = Some(at);
             specs::project(felix, &record.id, &spec).await?;
@@ -283,26 +406,27 @@ impl Projector {
         Ok(projector)
     }
 
-    /// Reads `sys.specs` from where it last read up to `end`, noting each
-    /// record whose decision verifies. Returns the last of them, with its
-    /// offset.
-    async fn fold(&mut self, felix: &Felix, end: u64) -> Result<Option<(u64, SpecRecord)>> {
-        let tail = felix.tail(&names::output_stream(names::ADMISSION)).await?;
-        let mut last = None;
+    /// Reads `sys.specs` from where it last read up to `end`. Returns the
+    /// newest `(decision, record)` those records name that verifies, reading
+    /// decisions newest first, so usually only one.
+    async fn newest_recorded(&mut self, felix: &Felix, end: u64) -> Result<Option<(u64, u64)>> {
+        let mut named = Named::default();
         while self.specs_tail < end {
             let (page, after) = felix.read_page(names::SPECS, self.specs_tail, end).await?;
             for found in page {
                 if let Ok(record) = SpecRecord::decode(&found.payload)
                     && let Some(decision) = record.admitted
-                    && verified(felix, tail, &record, decision).await?
                 {
-                    self.recorded.note(&record.id, decision);
-                    last = Some((found.offset, record));
+                    named.note(found.offset, decision);
                 }
             }
             self.specs_tail = after;
         }
-        Ok(last)
+        newest(
+            |f| f(&mut named),
+            |record, decision| verifies(felix, None, record, decision),
+        )
+        .await
     }
 
     async fn catch_up(&mut self, felix: &Felix, settings: &Settings) -> Result<()> {
@@ -321,10 +445,9 @@ impl Projector {
                 };
                 let decision = Decision::decode(addressed.payload)
                     .with_context(|| format!("the decision at {stream}:{}", found.offset))?;
-                if self.recorded.wants(&decision.id, found.offset) {
-                    self.record(felix, settings, found.offset, decision).await?;
-                }
-                self.next = found.offset + 1;
+                self.record(felix, settings, found.offset, decision).await?;
+                // Recording may have found another projector further on.
+                self.next = self.next.max(found.offset + 1);
             }
             self.next = self.next.max(after);
         }
@@ -332,7 +455,7 @@ impl Projector {
     }
 
     /// Records accepted decision `at` on `sys.specs`, unless another
-    /// projector already has.
+    /// projector already has, or has recorded a later one.
     async fn record(
         &mut self,
         felix: &Felix,
@@ -373,12 +496,13 @@ impl Projector {
             match sent? {
                 ConditionalWrite::Written { offset } => {
                     self.specs_tail = offset + 1;
-                    self.recorded.note(&id, at);
                     break offset;
                 }
                 ConditionalWrite::Refused { tail } => {
-                    self.fold(felix, tail).await?;
-                    if !self.recorded.wants(&id, at) {
+                    if let Some((newest, _)) = self.newest_recorded(felix, tail).await?
+                        && newest >= at
+                    {
+                        self.next = self.next.max(newest.saturating_add(1));
                         return Ok(());
                     }
                 }
