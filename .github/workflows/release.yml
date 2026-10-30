@@ -169,6 +169,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # The release body is this version's CHANGELOG section.
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## " { p = ($2 == v); next } p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::no CHANGELOG section for $version"; exit 1; }
+
       - name: Download release files
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -179,7 +192,9 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: notes.md
+          # A version with a pre-release suffix (0.1.0-preview.1) is not a full release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
