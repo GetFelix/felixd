@@ -171,6 +171,50 @@ async fn a_resume_reads_nothing_below_the_trim_floors() {
     let mut next = t.start_agent_with_faults("enforce-trim-floors=1");
     t.publish_all(INPUT, (22..30).map(count)).await;
     assert_uninterrupted(&t, &module, 30).await;
+    // A read below a floor that reached the run would have aborted it.
+    assert!(next.alive(), "a read below the floors reached the run");
     next.kill();
     assert!(!parked(&t).await, "the resume read below the floors");
+}
+
+/// Floors never go back across owners. `keep_snapshots` is raised from 1 to
+/// 5 while no node runs the workload; the next owner's last five snapshots
+/// reach further back than the last trim, so it keeps that trim rather than
+/// writing lower floors.
+#[tokio::test(flavor = "multi_thread")]
+async fn raising_keep_snapshots_never_lowers_a_floor() {
+    let Some(t) = test_felix().await else { return };
+    let args = |keep: &'static str| ["--snapshot-every", "5", "--keep-snapshots", keep];
+    let module = t.submit("counter", &args("1")).await;
+    t.publish_all(INPUT, (0..30).map(count)).await;
+    let mut first = t.start_agent();
+    eventually(
+        "a trim at the last snapshot",
+        Duration::from_secs(60),
+        || async {
+            trims(&t)
+                .await
+                .iter()
+                .any(|(_, trim)| trim.step >= 29)
+                .then_some(())
+        },
+    )
+    .await;
+    first.kill();
+    assert!(t.run(ID, &module, INPUT, &args("5")).success());
+
+    let mut next = t.start_agent();
+    t.publish_all(INPUT, (30..45).map(count)).await;
+    assert_uninterrupted(&t, &module, 45).await;
+    next.kill();
+    let found = trims(&t).await;
+    for pair in found.windows(2) {
+        let (before, after) = (&pair[0].1, &pair[1].1);
+        assert!(
+            after.step >= before.step
+                && after.snap_floor >= before.snap_floor
+                && after.input_floors >= before.input_floors,
+            "a floor went back: {found:?}"
+        );
+    }
 }

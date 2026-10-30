@@ -580,12 +580,15 @@ async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
     })
     .await;
     first.kill();
-    let _next = t.start_agent_with_faults("enforce-trim-floors=1");
+    let mut next = t.start_agent_with_faults("enforce-trim-floors=1");
     for _ in 0..5 {
         t.publish_all(PAYMENTS, [meta()]).await;
         t.publish_all(ORDERS, [meta()]).await;
     }
     assert_merged(&t, &module, 30).await;
+    // A read below a floor that reached the run would have aborted it.
+    assert!(next.alive(), "a read below the floors reached the run");
+    next.kill();
     let parked = t.read_all(OUTPUT).await.iter().any(|(_, r)| {
         matches!(
             output::decode(r).unwrap(),

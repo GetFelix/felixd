@@ -28,6 +28,11 @@
   earlier build that takes over a workload with one fails it as poison, and
   one whose workload reads that output stream leaves it to an operator. Upgrade
   every node before setting `--keep-snapshots`.
+- Reads that walk back from a stream's tail stop at the oldest offset Felix
+  holds instead of failing with `CursorTooOld`. With age or size retention on
+  an input, a resume that finds its last stepped record gone has no append
+  time for it, so the next `snapshot_every_ms` snapshot can fall on a
+  different input than before. Outputs are unaffected.
 - A record a running workload needs that Felix no longer holds, after
   retention passed it, now leaves the workload to an operator (reason 9,
   history trimmed) instead of retrying. `felixd replay` and `felixd check`

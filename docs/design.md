@@ -897,7 +897,15 @@ floors below which this workload's resume reads nothing:
 A resume reads back the last stepped record for its append time
 (`snapshot_every_ms`), so that record stays above the floor. Every read that
 walks back from a tail stops at the oldest offset Felix holds rather than
-asking below it.
+asking below it. That holds for Felix's own age and size retention too: a walk
+that used to fail on `CursorTooOld` now ends quietly. When retention has
+removed the last stepped record, the resume has no append time for it, so the
+next `snapshot_every_ms` snapshot can fall on a different input than an
+uninterrupted run's. Outputs are unaffected.
+
+A new owner reads the last trim record on `.out` when it resumes and never
+writes floors below it. After `keep_snapshots` is raised the last trim stands
+until the kept snapshots pass it.
 
 The oldest kept snapshot is the one with the lowest step among the last K on
 the stream, not the first of them: a stale holder's snapshot can land after a

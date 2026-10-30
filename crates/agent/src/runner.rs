@@ -332,7 +332,8 @@ pub(crate) async fn run_workload(
     // input and replay the whole gap each time.
     let mut hold = 0;
     let error = loop {
-        match run(felix, runtime, id, spec, fence, claim_from, &mut hold).await {
+        let running = run(felix, runtime, id, spec, fence, claim_from, &mut hold);
+        match faults::scoped(id, running).await {
             Ok(never) => match never {},
             Err(error) if error.is::<SnapshotSkipped>() => continue,
             Err(error) => break error,
@@ -350,6 +351,7 @@ pub(crate) async fn run_workload(
     // Retention or a trim passed a record this run needed. No node can read
     // it again, so retrying would loop.
     if let Some(trimmed) = Trimmed::of(&error) {
+        faults::trimmed_read(trimmed);
         return Ok(Outcome::NeedsOperator {
             problem: NeedsOperator::new(OperatorReason::HistoryTrimmed, trimmed.to_string()),
             recorded: false,
@@ -397,6 +399,15 @@ async fn run(
         claim_from,
     )
     .await?;
+    // A new owner carries on from the last trim on the stream, so its floors
+    // never go below an earlier owner's, whatever `keep_snapshots` says now.
+    let last_trim = match spec.keep_snapshots.is_some() || faults::enforce_trim_floors() {
+        true => last_trim(felix, &spec.output, log.tail()).await?,
+        false => None,
+    };
+    if let Some(trim) = &last_trim {
+        enforce_floors(spec, trim);
+    }
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
     specs::refuse_stale_or_foreign(felix, id, spec).await?;
@@ -406,9 +417,6 @@ async fn run(
         false => None,
     };
     let output_tail = log.tail();
-    if faults::enforce_trim_floors() {
-        enforce_floors(felix, id, spec, output_tail).await?;
-    }
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
         runtime
@@ -517,7 +525,7 @@ async fn run(
         since_snapshot: 0,
         previous_stamp,
         hold,
-        last_trim: None,
+        last_trim,
     };
     if let Some(merge) = &mut merge {
         return merged(felix, id, spec, &mut steps, merge, resume.next_input).await;
@@ -734,30 +742,46 @@ fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
     .into())
 }
 
-/// Under the `enforce-trim-floors` fault, refuses reads below the floors of
-/// the last trim record on `.out`, as if they were deleted.
-async fn enforce_floors(felix: &Felix, id: &str, spec: &WorkloadSpec, tail: u64) -> Result<()> {
-    let records = felix.read_range(&spec.output, 0, tail).await?;
-    let Some(trim) = records
-        .iter()
-        .filter_map(|r| output::decode(&r.payload).ok()?.trim())
-        .last()
-    else {
-        return Ok(());
+/// The last trim record on `.out` below `tail`, walking back no further
+/// than Felix holds.
+async fn last_trim(felix: &Felix, stream: &str, tail: u64) -> Result<Option<Trim>> {
+    let mut end = tail;
+    let mut window = 16;
+    while end > 0 {
+        let from = end.saturating_sub(window);
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
+            let found = output::decode(&record.payload)
+                .map_err(|e| poison(format!("output at {stream}:{}: {e}", record.offset)))?;
+            if let Some(trim) = found.trim() {
+                return Ok(Some(trim));
+            }
+        }
+        if ended {
+            break;
+        }
+        end = from;
+        window = window.saturating_mul(8);
+    }
+    Ok(None)
+}
+
+/// Under the `enforce-trim-floors` fault, refuses this workload's reads
+/// below `trim`'s floors from now on, as if they were deleted.
+fn enforce_floors(spec: &WorkloadSpec, trim: &Trim) {
+    if !faults::enforce_trim_floors() {
+        return;
+    }
+    let Some(id) = names::output_of(&spec.output) else {
+        return;
     };
-    faults::set_floor(&names::snapshot_stream(id), trim.snap_floor);
+    faults::set_floor(id, &names::snapshot_stream(id), trim.snap_floor);
     if spec.merged() {
-        faults::set_floor(&names::merge_stream(id), trim.merge_floor);
+        faults::set_floor(id, &names::merge_stream(id), trim.merge_floor);
     }
     for (input, &floor) in spec.inputs.iter().zip(&trim.input_floors) {
-        faults::set_floor(input, floor);
+        faults::set_floor(id, input, floor);
     }
-    tracing::info!(
-        workload = id,
-        ?trim,
-        "reads below the trim floors are refused"
-    );
-    Ok(())
 }
 
 /// The input floors at merge log step `step`: the entry's `next`, where
@@ -917,6 +941,10 @@ impl Steps<'_> {
         let newest = snapshots::newest(self.felix, self.snap_stream, self.snap_tail, keep)
             .await
             .map_err(read_error)?;
+        // Plan refuses these too; checking first spares the merge log read.
+        if newest.len() < keep.max(1) || newest[0].epoch != self.fence.epoch() {
+            return Ok(());
+        }
         let merge_next = match self.spec.merged() {
             true => {
                 let oldest = newest.iter().take(keep).map(|k| k.step).min();
@@ -937,9 +965,11 @@ impl Steps<'_> {
         let planned = match planned {
             Ok(planned) => planned,
             Err(trim::Skip::Regressed) => {
-                tracing::error!(
+                // As after `keep_snapshots` is raised: the earlier trim
+                // stands until the kept snapshots pass it.
+                tracing::info!(
                     workload = self.snap_stream,
-                    "a trim floor would go back; not trimming"
+                    "a trim floor would go back; keeping the last trim"
                 );
                 return Ok(());
             }
@@ -950,6 +980,7 @@ impl Steps<'_> {
         }
         let record = output::encode_trim(self.fence.epoch(), &planned);
         self.log.append_trim(record).await?;
+        enforce_floors(self.spec, &planned);
         self.last_trim = Some(planned);
         Ok(())
     }
