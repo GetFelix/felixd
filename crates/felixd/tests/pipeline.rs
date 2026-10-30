@@ -271,10 +271,10 @@ async fn a_downstream_cannot_switch_upstreams_once_it_has_output() {
         !t.run(common::ID, &module, "wl.other.out", &[]).success(),
         "the switch was accepted"
     );
-    assert_eq!(t.spec().await.input, "wl.up.out");
+    assert_eq!(t.spec().await.inputs, ["wl.up.out"]);
 
     let mut spec = t.spec().await;
-    spec.input = "wl.other.out".to_owned();
+    spec.inputs = vec!["wl.other.out".to_owned()];
     t.put_spec(&spec).await;
     let reason = t.needs_operator_recorded().await;
     assert_eq!(

@@ -799,7 +799,7 @@ needs only read on its inputs.
 
 | Principal | May |
 |---|---|
-| Node | Read `workloads`, `sys.specs`, `modules` and `epochs`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out` and `wl.*.snap` |
+| Node | Read `workloads`, `sys.specs`, `modules` and `epochs`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out`, `wl.*.snap` and `wl.*.merge` |
 | Operator (`felixd run`) | Read and write `workloads`; read `sys.specs` and append to it (a conditional write); write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
 | Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `sys.specs`. Nothing else |
 | Admission | Read `sys.intake` and `modules`; write `sys.specs`; hold the stream-creation credential |
@@ -824,7 +824,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines are built, [Pipelines](#pipelines); `ps` and `drain` are not, [#17](https://github.com/GetFelix/felixd/issues/17)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines and workloads with several inputs are built, [Pipelines](#pipelines) and [Several inputs](#several-inputs); `ps` and `drain` are not, [#17](https://github.com/GetFelix/felixd/issues/17)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -943,16 +943,49 @@ machinery (#82).
 
 ## Several inputs
 
-A workload reads one input stream. Replay is deterministic because the input's
-offsets fix the order. With two streams, arrival order depends on timing, so a
-replay could see a different interleaving.
+With one input, replay is deterministic because the input's offsets fix the
+order. With two, arrival order depends on timing, so a replay could see
+another interleaving. felixd records the order instead (#58). A spec may name
+up to 64 inputs (`felixd run --input a --input b`), and such a workload gets a
+merge log, `wl.<id>.merge`.
 
-Joins are two steps for now: a merge workload writes one combined stream, and
-the join reads it. Later (#58), felixd will record the merge order itself. The
-lease holder appends the interleaving it chose to a merge stream, fenced like
-outputs, and resume, replay and `felixd check` read that log. A deterministic
-merge by timestamp is not planned: one idle input would stall the workload, and
-it depends on clocks.
+The lease holder subscribes to every input, and as records arrive it appends
+an entry for each to the merge log, naming the input and the record's offset
+and append time, then steps them. The merge order is a record like any other:
+the entry's offset on the merge log is the step's offset, which outputs and
+snapshots name. Each entry also carries every input's next offset, so the
+last record alone says where each input carries on. The layout is in
+[records.md](records.md#merge-log-records).
+
+The merge log is fenced like the output stream. After its claim on `.out`
+lands, a holder appends a claim to the merge log at the tail it reads, having
+checked that the last record there is from an epoch no later than its own,
+and merges only after that. Every append is a `publish_if` at the tail it
+expects, so once the claim is on, a stale holder's append is refused and it
+finds the later epoch and stops. Entries a stale holder appended before the
+claim stay: they are the order it chose, and the new holder steps them as its
+own. Since entries land before their steps, a holder that dies between the two
+leaves merged records without outputs. The next holder resumes as usual from
+the snapshot and the last output, steps every entry the log holds from there,
+and only then subscribes to the inputs, each from its next offset.
+
+Replay, the resume fold and `felixd check` read the merge log, not the raw
+inputs, and step the records it names in its order. `felixd check` also checks
+the log itself: every record of every input merged once and in its input's
+order, `next` offsets that follow from the entries, and epochs that never go
+backwards; with `--complete`, that no record is left unmerged. `felixd replay
+--to` takes a merge log offset for such a workload, and a time there covers
+the entries merged before it, not the records appended to their inputs before
+it: entries are not in their records' time order.
+
+This rests on the first layer of the safety argument ([Exactly-once
+output](#exactly-once-output)) only: the merge order is not a function of the
+inputs, so a stale holder's entries are kept, not recomputed. The TLA model
+has one input; modelling the merge log is #138.
+
+A deterministic merge by timestamp is not planned: one idle input would stall
+the workload, and it depends on clocks. A workload with one input has no merge
+log and runs as before.
 
 ## Placement
 

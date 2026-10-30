@@ -20,12 +20,12 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 
 | Command | What it does |
 |---|---|
-| `felixd run [flags] <module>` | Stores the module, creates the workload's streams and starts it. `--id` and `--input` are required. |
+| `felixd run [flags] <module>` | Stores the module, creates the workload's streams and starts it. `--id` and `--input` are required; repeat `--input` for several, merged through a merge log. |
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
-| `felixd check` | Replays each workload over its input and reports problems in its output stream. Exits 1 if it finds any. |
+| `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
 | `felixd replay` | Rebuilds a workload as of `--to` and prints what its `inspect` returns, or with `--diff` compares a replay with the recorded outputs. Writes nothing. |
 
-Flags of `run`: `--id`, `--input`, `--snapshot-every` (1000), `--snapshot-every-ms`, `--fuel`,
+Flags of `run`: `--id`, `--input` (up to 64), `--snapshot-every` (1000), `--snapshot-every-ms`, `--fuel`,
 `--max-memory`, `--snapshot-fuel` and `--replication-factor` (3; use 1 against a single broker).
 The limits are stored in the spec, so every node runs the workload under the same ones.
 
@@ -37,8 +37,9 @@ Flags of `check`: `--id` (repeat for several; every workload by default), `--com
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every
 workload whose output a checked one reads, up the pipeline. Stages are checked upstream first.
 
-Flags of `replay`: `--id`, `--to` (an input offset, or an RFC 3339 time such as
-`2026-10-29T14:02:00Z`), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
+Flags of `replay`: `--id`, `--to` (an input offset or an RFC 3339 time such as
+`2026-10-29T14:02:00Z`; for a workload with several inputs, a merge log offset or a time compared
+with when entries were merged), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
 the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a divergence.
 
 Connection flags, each also read from an environment variable: `--brokers` (`FELIX_BROKERS`),

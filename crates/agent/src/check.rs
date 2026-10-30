@@ -8,7 +8,7 @@ use felix_client::CacheWatchItem;
 use felixd_core::check::{self, Expected, Finding};
 use felixd_core::output::{self, OutputHeader};
 
-use crate::input::{self, StepInput};
+use crate::input::{self, Feed};
 use felix_client::StreamRecord;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_core::{module, names};
@@ -23,8 +23,8 @@ use crate::specs;
 pub struct Report {
     pub workload: String,
     pub output: String,
-    /// The stream the outputs were checked against.
-    pub input: String,
+    /// The streams the outputs were checked against.
+    pub inputs: Vec<String>,
     /// Output records on the stream, claims not counted.
     pub records: usize,
     pub findings: Vec<Finding>,
@@ -52,17 +52,19 @@ pub async fn check(
     let mut at = 0;
     while at < ids.len() {
         let id = ids[at].clone();
-        let input = input_of(&felix, &id)
+        let read = inputs_of(&felix, &id)
             .await
             .with_context(|| format!("check workload {id}"))?;
-        if upstream
-            && let Some(up) = names::output_of(&input)
-            && !ids.iter().any(|i| i == up)
-            && felix.cache_get(names::WORKLOADS, up).await?.is_some()
-        {
-            ids.push(up.to_owned());
+        for input in &read {
+            if upstream
+                && let Some(up) = names::output_of(input)
+                && !ids.iter().any(|i| i == up)
+                && felix.cache_get(names::WORKLOADS, up).await?.is_some()
+            {
+                ids.push(up.to_owned());
+            }
         }
-        inputs.push((id, input));
+        inputs.push((id, read));
         at += 1;
     }
     let mut reports = Vec::new();
@@ -84,7 +86,9 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
 
     // Snapshots first, so every output a snapshot counts is on the stream when
     // it is read. Then the output: anything written after this is checked
-    // against inputs that are all on the input stream already.
+    // against inputs that are all on the input stream already. With several
+    // inputs the merge log comes next, and then the inputs, so every record
+    // it names is on its input when that is read.
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let snapshots = felix.read_range(&snap_stream, 0, snap_tail).await?;
@@ -98,41 +102,46 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     let mut workload = runtime
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let input_tail = felix.tail(&spec.input).await?;
+    let mut feed = Feed::new(felix, id, &spec);
+    let mut findings = Vec::new();
+    if spec.merged() {
+        findings.extend(check_merge(felix, feed.stream(), &spec.inputs, complete).await?);
+    }
+    let input_tail = felix.tail(feed.stream()).await?;
     let mut expected = Vec::new();
-    for record in felix.read_range(&spec.input, 0, input_tail).await? {
-        while let Some((_, applied)) = limits.next_if(|(from, _)| *from <= record.offset) {
-            workload.set_limits(applied);
-        }
-        // An input that cannot be read or a step that fails ends the workload
-        // there, on every node.
-        let Ok(read) = StepInput::read(
-            &spec,
-            record.offset,
-            record.timestamp_micros,
-            &record.payload,
-        ) else {
-            break;
-        };
-        let Some(step) = read else {
-            continue;
-        };
-        let Ok(stepped) = workload.step(step.as_input()) else {
-            break;
-        };
-        for (index, produced) in input::produced(stepped).into_iter().enumerate() {
-            let header = OutputHeader {
-                input_offset: record.offset,
-                index: u32::try_from(index)?,
+    let mut next = 0;
+    'steps: while next < input_tail {
+        let (page, after) = feed.page(next, input_tail).await?;
+        for step in page {
+            while let Some((_, applied)) = limits.next_if(|(from, _)| *from <= step.at) {
+                workload.set_limits(applied);
+            }
+            // An input that cannot be read or a step that fails ends the
+            // workload there, on every node.
+            let Ok(read) = step.input else {
+                break 'steps;
             };
-            expected.push(Expected { header, produced });
+            let Some(input) = read else {
+                continue;
+            };
+            let Ok(stepped) = workload.step(input.as_input()) else {
+                break 'steps;
+            };
+            for (index, produced) in input::produced(stepped).into_iter().enumerate() {
+                let header = OutputHeader {
+                    input_offset: step.at,
+                    index: u32::try_from(index)?,
+                };
+                expected.push(Expected { header, produced });
+            }
         }
+        next = after;
     }
     let on_stream: Vec<(u64, &[u8])> = records
         .iter()
         .map(|r| (r.offset, r.payload.as_ref()))
         .collect();
-    let mut findings = check::check(&expected, &on_stream, complete);
+    findings.extend(check::check(&expected, &on_stream, complete));
     let snapshots: Vec<(u64, &[u8])> = snapshots
         .iter()
         .map(|r| (r.offset, r.payload.as_ref()))
@@ -141,7 +150,7 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     Ok(Report {
         workload: id.to_owned(),
         output: spec.output.clone(),
-        input: spec.input.clone(),
+        inputs: spec.inputs.clone(),
         records: records
             .iter()
             .filter(|r| !output::is_marker(&r.payload))
@@ -167,9 +176,30 @@ pub(crate) async fn judged(
     Ok(check::judged_under(cached, &claimed, payloads))
 }
 
-/// The input workload `id`'s output stream was written under, from the same
+/// Checks the merge log `stream` of a workload reading `inputs`
+/// ([`check::check_merge`]). The log is read before the inputs.
+async fn check_merge(
+    felix: &Felix,
+    stream: &str,
+    inputs: &[String],
+    complete: bool,
+) -> Result<Vec<Finding>> {
+    let tail = felix.tail(stream).await?;
+    let log = felix.read_range(stream, 0, tail).await?;
+    let mut offsets = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let tail = felix.read_tail(input).await?;
+        let records = felix.read_range(input, 0, tail).await?;
+        let found = records.iter().map(|r| (r.offset, r.timestamp_micros));
+        offsets.push((input.as_str(), found.collect()));
+    }
+    let log: Vec<(u64, &[u8])> = log.iter().map(|r| (r.offset, r.payload.as_ref())).collect();
+    Ok(check::check_merge(&log, &offsets, complete))
+}
+
+/// The inputs workload `id`'s output stream was written under, from the same
 /// spec [`check_one`] judges it under.
-async fn input_of(felix: &Felix, id: &str) -> Result<String> {
+async fn inputs_of(felix: &Felix, id: &str) -> Result<Vec<String>> {
     let cached = felix
         .cache_get(names::WORKLOADS, id)
         .await?
@@ -178,7 +208,7 @@ async fn input_of(felix: &Felix, id: &str) -> Result<String> {
     let tail = felix.tail(&cached.output).await?;
     let records = felix.read_range(&cached.output, 0, tail).await?;
     let (spec, _) = judged(felix, id, &cached, &records).await?;
-    Ok(spec.input)
+    Ok(spec.inputs)
 }
 
 /// The module `hash` from the `modules` cache.

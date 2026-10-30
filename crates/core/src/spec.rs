@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::class::{ErrorClass, Failure};
+use crate::merge::MAX_INPUTS;
 use crate::{DecodeError, codec};
 
 /// How often a workload is snapshotted unless its spec says otherwise.
@@ -14,8 +15,12 @@ pub const DEFAULT_SNAPSHOT_EVERY: u64 = 1000;
 pub struct WorkloadSpec {
     /// Hex sha256 of the module, the key in the `modules` cache.
     pub module: String,
-    /// The stream whose records the workload is fed.
-    pub input: String,
+    /// The streams whose records the workload is fed: one, or several merged
+    /// in the order the merge log records ([`crate::merge`]). One is written
+    /// as `input` and several as `inputs`, so a one-input spec reads as it
+    /// always has and a build that knows only `input` refuses several.
+    #[serde(flatten, with = "inputs_field")]
+    pub inputs: Vec<String>,
     /// The stream its outputs are appended to.
     pub output: String,
     /// A snapshot is written after every this many inputs.
@@ -90,16 +95,21 @@ fn default_snapshot_every() -> u64 {
 }
 
 impl WorkloadSpec {
+    /// Whether the workload has several inputs, and so a merge log.
+    pub fn merged(&self) -> bool {
+        self.inputs.len() > 1
+    }
+
     /// Why `next` cannot replace this spec on streams that already hold its
-    /// output or snapshots, if it cannot. Another module or input would not
+    /// output or snapshots, if it cannot. Another module or inputs would not
     /// reproduce what is written, and the next owner would find the stream
     /// diverged. The other fields may change: a running workload restarts
     /// under the new spec.
     pub fn conflicts_with_history(&self, next: &WorkloadSpec) -> Option<String> {
         if self.module != next.module {
             Some(format!("it runs module {}", self.module))
-        } else if self.input != next.input {
-            Some(format!("it reads input {}", self.input))
+        } else if self.inputs != next.inputs {
+            Some(format!("it reads {}", self.inputs.join(", ")))
         } else {
             None
         }
@@ -124,6 +134,69 @@ impl WorkloadSpec {
 
     pub fn decode(bytes: &[u8]) -> Result<WorkloadSpec, DecodeError> {
         codec::decode_json(CACHE_FORMAT, bytes)
+    }
+}
+
+/// Checks a list of inputs: 1 to [`MAX_INPUTS`] streams, none twice.
+pub fn validate_inputs(inputs: &[String]) -> Result<(), InvalidInputs> {
+    if inputs.is_empty() || inputs.len() > MAX_INPUTS {
+        return Err(InvalidInputs::Count(inputs.len()));
+    }
+    for (at, input) in inputs.iter().enumerate() {
+        if inputs[..at].contains(input) {
+            return Err(InvalidInputs::Twice(input.clone()));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidInputs {
+    #[error("a workload reads 1 to {MAX_INPUTS} inputs, not {0}")]
+    Count(usize),
+    #[error("input {0} is listed twice")]
+    Twice(String),
+}
+
+/// `inputs` in JSON: `"input": "a"` for one, `"inputs": ["a", "b"]` for
+/// several.
+mod inputs_field {
+    use serde::de::Error as _;
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(inputs: &[String], s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(1))?;
+        match inputs {
+            [one] => map.serialize_entry("input", one)?,
+            several => map.serialize_entry("inputs", several)?,
+        }
+        map.end()
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+        #[derive(Deserialize)]
+        struct Found {
+            input: Option<String>,
+            inputs: Option<Vec<String>>,
+        }
+        let inputs = match Found::deserialize(d)? {
+            Found {
+                input: Some(one),
+                inputs: None,
+            } => vec![one],
+            Found {
+                input: None,
+                inputs: Some(several),
+            } if several.len() > 1 => several,
+            _ => {
+                return Err(D::Error::custom(
+                    "a spec names one `input` or several `inputs`",
+                ));
+            }
+        };
+        super::validate_inputs(&inputs).map_err(D::Error::custom)?;
+        Ok(inputs)
     }
 }
 

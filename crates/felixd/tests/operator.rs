@@ -132,7 +132,7 @@ async fn a_record_before_the_first_claim_does_not_hide_the_history() {
     };
     ensure_stream(&t.settings, moved, kind).await.unwrap();
     let mut changed = t.spec().await;
-    changed.input = moved.into();
+    changed.inputs = vec![moved.into()];
     t.put_spec(&changed).await;
     t.publish_all(moved, (0..5).map(count)).await;
     assert_eq!(

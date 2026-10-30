@@ -12,7 +12,7 @@ use felixd_runtime::{Runtime, Workload};
 
 use crate::check::{judged, module_bytes};
 use crate::felix::Felix;
-use crate::input::{self, StepInput};
+use crate::input::{self, Feed};
 use crate::settings::Settings;
 use crate::snapshots::{self, Snapshot};
 use crate::specs;
@@ -23,7 +23,8 @@ pub enum Target {
     /// The state after the input at this offset.
     Offset(u64),
     /// The state after every input appended before this time, in
-    /// microseconds since the Unix epoch.
+    /// microseconds since the Unix epoch. For a workload with several
+    /// inputs, after every merge entry appended to the merge log before it.
     Time(u64),
 }
 
@@ -66,13 +67,13 @@ pub async fn replay(
     module: Option<&str>,
 ) -> Result<Replayed> {
     let (felix, spec) = open(settings, id).await?;
-    let input_tail = felix.tail(&spec.input).await?;
-    let end = end_of(&felix, &spec, Some(to), input_tail).await?;
+    let mut feed = Feed::new(&felix, id, &spec);
+    let input_tail = felix.tail(feed.stream()).await?;
+    let end = end_of(&felix, feed.stream(), Some(to), input_tail).await?;
     let (mut workload, restored) = start(&felix, id, &spec, module, end).await?;
     let mut steps = 0;
     run_inputs(
-        &felix,
-        &spec,
+        &mut feed,
         &mut workload,
         &[],
         replay::first_input(restored),
@@ -109,8 +110,9 @@ pub async fn diff(
     // on the input stream when its tail is read.
     let output_tail = felix.tail(&spec.output).await?;
     let records = felix.read_range(&spec.output, 0, output_tail).await?;
-    let input_tail = felix.tail(&spec.input).await?;
-    let end = end_of(&felix, &spec, to, input_tail).await?;
+    let mut feed = Feed::new(&felix, id, &spec);
+    let input_tail = felix.tail(feed.stream()).await?;
+    let end = end_of(&felix, feed.stream(), to, input_tail).await?;
     let recorded = Recorded::read(records.iter().map(|r| r.payload.as_ref()), from..end)
         .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
@@ -118,8 +120,7 @@ pub async fn diff(
     let (_, limits) = judged(&felix, id, &spec, &records).await?;
     let mut matched = 0;
     let divergence = run_inputs(
-        &felix,
-        &spec,
+        &mut feed,
         &mut workload,
         &limits,
         replay::first_input(restored),
@@ -154,26 +155,19 @@ async fn open(settings: &Settings, id: &str) -> Result<(Felix, WorkloadSpec)> {
     Ok((felix, spec))
 }
 
-/// The input offset a replay to `to` stops below; every input when `None`.
-async fn end_of(
-    felix: &Felix,
-    spec: &WorkloadSpec,
-    to: Option<Target>,
-    input_tail: u64,
-) -> Result<u64> {
+/// The step a replay to `to` stops below, on `stream`, the input or the
+/// merge log; every step when `None`.
+async fn end_of(felix: &Felix, stream: &str, to: Option<Target>, input_tail: u64) -> Result<u64> {
     match to {
         None => Ok(input_tail),
         Some(Target::Offset(offset)) => {
             if offset >= input_tail {
-                bail!(
-                    "input {offset} is not on {}: its next offset is {input_tail}",
-                    spec.input
-                );
+                bail!("input {offset} is not on {stream}: its next offset is {input_tail}");
             }
             Ok(offset + 1)
         }
         Some(Target::Time(micros)) => Ok(replay::end_for_time(
-            felix.offset_for_time(&spec.input, micros).await?,
+            felix.offset_for_time(stream, micros).await?,
             input_tail,
         )),
     }
@@ -222,13 +216,12 @@ async fn start(
     Ok((workload, Some(header)))
 }
 
-/// Runs the inputs at offsets `from..end` through `workload`, handing each
-/// step's offset and outputs to `each`, and stops at the first step `each`
-/// returns something for. `limits` are `(first input, limits)` changes, as
-/// [`judged`] gives them.
+/// Runs the steps at offsets `from..end` of `feed` through `workload`,
+/// handing each step's offset and outputs to `each`, and stops at the first
+/// step `each` returns something for. `limits` are `(first input, limits)`
+/// changes, as [`judged`] gives them.
 async fn run_inputs<T>(
-    felix: &Felix,
-    spec: &WorkloadSpec,
+    feed: &mut Feed<'_>,
     workload: &mut Workload,
     limits: &[(u64, Limits)],
     from: u64,
@@ -238,25 +231,19 @@ async fn run_inputs<T>(
     let mut limits = limits.iter().peekable();
     let mut next = from;
     while next < end {
-        let (page, after) = felix.read_page(&spec.input, next, end).await?;
-        for record in page {
-            while let Some((_, applied)) = limits.next_if(|(at, _)| *at <= record.offset) {
+        let (page, after) = feed.page(next, end).await?;
+        for step in page {
+            while let Some((_, applied)) = limits.next_if(|(at, _)| *at <= step.at) {
                 workload.set_limits(*applied);
             }
-            let read = StepInput::read(
-                spec,
-                record.offset,
-                record.timestamp_micros,
-                &record.payload,
-            )?;
-            let Some(step) = read else {
+            let Some(input) = step.input? else {
                 continue;
             };
             let stepped = workload
-                .step(step.as_input())
-                .with_context(|| format!("input {} fails the workload", record.offset))?;
+                .step(input.as_input())
+                .with_context(|| format!("input {} fails the workload", step.at))?;
             let outputs = input::produced(stepped);
-            if let Some(found) = each(record.offset, &outputs) {
+            if let Some(found) = each(step.at, &outputs) {
                 return Ok(Some(found));
             }
         }

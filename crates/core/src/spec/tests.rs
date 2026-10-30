@@ -4,7 +4,7 @@ use crate::class::{ErrorClass, Failure};
 fn spec() -> WorkloadSpec {
     WorkloadSpec {
         module: "ab".repeat(32),
-        input: "sensors".into(),
+        inputs: vec!["sensors".into()],
         output: "wl.temp.out".into(),
         snapshot_every: 50,
         snapshot_every_ms: None,
@@ -129,7 +129,7 @@ fn only_a_new_module_or_input_conflicts_with_written_history() {
     next.module = "cd".repeat(32);
     assert!(old.conflicts_with_history(&next).is_some());
     let mut next = spec();
-    next.input = "other".into();
+    next.inputs = vec!["other".into()];
     assert!(old.conflicts_with_history(&next).is_some());
 }
 
@@ -191,4 +191,72 @@ fn the_cache_only_moves_to_a_later_record() {
     assert!(moves_forward(Some(3), 4));
     assert!(!moves_forward(Some(4), 4));
     assert!(!moves_forward(Some(9), 2));
+}
+
+fn joined() -> WorkloadSpec {
+    WorkloadSpec {
+        inputs: vec!["orders".into(), "payments".into()],
+        ..spec()
+    }
+}
+
+#[test]
+fn several_inputs_are_written_as_inputs_and_round_trip() {
+    let json = String::from_utf8(joined().encode()).unwrap();
+    assert!(
+        json.contains(r#""inputs":["orders","payments"],"output""#),
+        "{json}"
+    );
+    assert!(!json.contains(r#""input":"#), "{json}");
+    assert_eq!(WorkloadSpec::decode(json.as_bytes()), Ok(joined()));
+    assert!(joined().merged());
+    assert!(!spec().merged());
+}
+
+#[test]
+fn a_build_that_reads_one_input_refuses_several() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct OneInput {
+        module: String,
+        input: String,
+    }
+    let value: serde_json::Value = serde_json::from_slice(&joined().encode()).unwrap();
+    assert!(serde_json::from_value::<OneInput>(value["value"].clone()).is_err());
+}
+
+#[test]
+fn a_spec_names_one_input_or_several_distinct_ones() {
+    let with = |inputs: &str| {
+        let json = format!(
+            r#"{{"module":"{}",{inputs},"output":"o","state":"running"}}"#,
+            "00".repeat(32)
+        );
+        WorkloadSpec::decode(json.as_bytes())
+    };
+    assert!(with(r#""input":"a""#).is_ok());
+    assert!(with(r#""inputs":["a","b"]"#).is_ok());
+    for bad in [
+        r#""x":1"#,
+        r#""input":"a","inputs":["b","c"]"#,
+        r#""inputs":["a"]"#,
+        r#""inputs":[]"#,
+        r#""inputs":["a","a"]"#,
+    ] {
+        assert!(with(bad).is_err(), "{bad}");
+    }
+    let many: Vec<String> = (0..=crate::merge::MAX_INPUTS)
+        .map(|i| i.to_string())
+        .collect();
+    assert_eq!(
+        validate_inputs(&many),
+        Err(InvalidInputs::Count(crate::merge::MAX_INPUTS + 1))
+    );
+}
+
+#[test]
+fn reordering_the_inputs_conflicts_with_written_history() {
+    let mut next = joined();
+    next.inputs.reverse();
+    assert!(joined().conflicts_with_history(&next).is_some());
 }

@@ -30,6 +30,20 @@
 //! - `freeze-before-append=N`: stop the whole process with `SIGSTOP` just before
 //!   its Nth output append, after the lease was checked. It carries on when
 //!   the test sends `SIGCONT`, as a node out of a long GC pause would.
+//! - `freeze-before-merge=N`: stop the process with `SIGSTOP` just before its
+//!   Nth merge log append, after the lease was checked. It carries on at
+//!   `SIGCONT`.
+//! - `crash-after-merge=N`: abort once the Nth merge log append has landed,
+//!   before any of its entries is stepped.
+//! - `freeze-before-merge-claim=N`: stop the process with `SIGSTOP` just
+//!   before its Nth merge log claim is sent, after the tail was read. It
+//!   carries on at `SIGCONT`.
+//! - `drop-merge=N`, `drop-merge-claim=N`, `lose-merge-answer=N`,
+//!   `lose-merge-claim-answer=N`: as for output appends and claims, for the
+//!   Nth merge log append or claim.
+//! - `merge-write-limit=K`: refuse, with an error, any merge log write of
+//!   more than K records (0 counts as 1), as Felix refuses a write too large for a frame, and
+//!   write at most K entries at a time.
 //! - `freeze-before-claim=N`: stop the process with `SIGSTOP` just before its
 //!   Nth claim append, after the lease was checked. It carries on at `SIGCONT`.
 //! - `delay-failure-record=MS`: wait MS milliseconds between reading a failed
@@ -65,6 +79,8 @@ static SKIPPED: AtomicU64 = AtomicU64::new(0);
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
 static FAILURE_RECORDS: AtomicU64 = AtomicU64::new(0);
+static MERGES: AtomicU64 = AtomicU64::new(0);
+static MERGE_CLAIMS: AtomicU64 = AtomicU64::new(0);
 
 /// A conditional write the answer faults count.
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +88,8 @@ pub(crate) enum Write {
     Append,
     Claim,
     Failure,
+    Merge,
+    MergeClaim,
 }
 
 /// What the answer faults do to the current write of a kind.
@@ -159,6 +177,8 @@ pub(crate) fn answer(write: Write) -> Answer {
         Write::Append => (&APPENDS, "drop-append", "lose-append-answer"),
         Write::Claim => (&CLAIMS, "drop-claim", "lose-claim-answer"),
         Write::Failure => (&FAILURES, "drop-failure", "lose-failure-answer"),
+        Write::Merge => (&MERGES, "drop-merge", "lose-merge-answer"),
+        Write::MergeClaim => (&MERGE_CLAIMS, "drop-merge-claim", "lose-merge-claim-answer"),
     };
     let n = n.load(Ordering::Relaxed);
     if fault(dropped) == Some(n) {
@@ -193,6 +213,32 @@ pub(crate) fn before_append() {
     let n = APPENDS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-append") == Some(n) {
         freeze();
+    }
+}
+
+pub(crate) fn before_merge() {
+    let n = MERGES.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-merge") == Some(n) {
+        freeze();
+    }
+}
+
+pub(crate) fn before_merge_claim() {
+    let n = MERGE_CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-merge-claim") == Some(n) {
+        freeze();
+    }
+}
+
+/// The most records one merge log write may hold, under `merge-write-limit`.
+pub(crate) fn merge_write_limit() -> Option<usize> {
+    // Every write holds at least one record, so 0 means 1.
+    fault("merge-write-limit").map(|k| usize::try_from(k).unwrap_or(usize::MAX).max(1))
+}
+
+pub(crate) fn after_merge() {
+    if fault("crash-after-merge") == Some(MERGES.load(Ordering::Relaxed)) {
+        crash("crash-after-merge");
     }
 }
 

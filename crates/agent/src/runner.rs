@@ -9,18 +9,21 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use felix_client::{ConditionalWrite, StreamRecord};
 use felixd_core::class::{self, OperatorReason};
+use felixd_core::merge::{self, Entry};
 use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::{MAX_WRITE_BYTES, module, names};
 use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::{OnceCell, Semaphore, mpsc};
+use tokio::task::JoinSet;
 
 use crate::faults;
 use crate::felix::Felix;
-use crate::input::{self, StepInput};
+use crate::input::{self, Feed, StepInput, merge_unreadable};
 use crate::lease::Fence;
+use crate::merge::MergeLog;
 use crate::output::OutputLog;
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
@@ -388,6 +391,11 @@ async fn run(
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
     specs::refuse_stale_or_foreign(felix, id, spec).await?;
+    let merge_stream = names::merge_stream(id);
+    let mut merge = match spec.merged() {
+        true => Some(MergeLog::claim(felix, &merge_stream, fence, spec.inputs.len()).await?),
+        false => None,
+    };
     let output_tail = log.tail();
     let compiled = runtime.compiled(felix, &spec.module).await?;
     let mut workload = Some(
@@ -426,11 +434,19 @@ async fn run(
         output_tail,
     })
     .map_err(poison)?;
-    not_behind(
-        &spec.input,
-        felix.read_tail(&spec.input).await?,
-        resume.stepped_to(),
-    )?;
+    match &merge {
+        None => not_behind(
+            &spec.inputs[0],
+            felix.read_tail(&spec.inputs[0]).await?,
+            resume.stepped_to(),
+        )?,
+        Some(merge) => {
+            not_behind(&merge_stream, merge.tail(), resume.stepped_to())?;
+            for (stream, &next) in spec.inputs.iter().zip(merge.next()) {
+                not_behind(stream, felix.read_tail(stream).await?, next)?;
+            }
+        }
+    }
     if let Some(snapshot) = snapshot.as_ref().filter(|_| resume.restore) {
         let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
             .await
@@ -456,12 +472,16 @@ async fn run(
         })?;
     }
     tracing::info!(workload = id, from = resume.next_input, "resumed");
-    let skip_claims = names::is_output_stream(&spec.input);
+    let input = &spec.inputs[0];
+    let skip_claims = names::is_output_stream(input);
     // Chunks the next snapshot need not write again.
     let previous = snapshot.as_ref().and_then(Snapshot::manifest).cloned();
-    let previous_stamp = match spec.snapshot_every_ms {
-        Some(_) => last_input_stamp(felix, &spec.input, resume.next_input, skip_claims).await?,
-        None => None,
+    let previous_stamp = match (spec.snapshot_every_ms, &merge) {
+        (None, _) => None,
+        (Some(_), None) => last_input_stamp(felix, input, resume.next_input, skip_claims).await?,
+        (Some(_), Some(_)) => {
+            last_merged_stamp(felix, &merge_stream, &spec.inputs, resume.next_input).await?
+        }
     };
 
     let mut steps = Steps {
@@ -486,7 +506,10 @@ async fn run(
         previous_stamp,
         hold,
     };
-    let mut events = felix.subscribe_from(&spec.input, resume.next_input).await?;
+    if let Some(merge) = &mut merge {
+        return merged(felix, id, spec, &mut steps, merge, resume.next_input).await;
+    }
+    let mut events = felix.subscribe_from(input, resume.next_input).await?;
     let mut next_input = resume.next_input;
     loop {
         let event = events
@@ -499,7 +522,7 @@ async fn run(
         if offset < next_input {
             // A subscription from `next_input` only goes below it if the
             // stream started over.
-            not_behind(&spec.input, felix.read_tail(&spec.input).await?, next_input)?;
+            not_behind(input, felix.read_tail(input).await?, next_input)?;
             continue;
         }
         if faults::drop_input(offset) {
@@ -509,10 +532,15 @@ async fn run(
             // Felix drops records for a slow subscriber by default, and a jump
             // in offsets is all that shows it. Offsets that hold no event jump
             // too, so read the gap back to see which it was.
-            for record in felix.read_range(&spec.input, next_input, offset).await? {
+            for record in felix.read_range(input, next_input, offset).await? {
                 if record.offset >= next_input {
                     steps
-                        .step(record.offset, record.timestamp_micros, record.payload)
+                        .read(
+                            input,
+                            record.offset,
+                            record.timestamp_micros,
+                            record.payload,
+                        )
                         .await?;
                     next_input = record.offset + 1;
                 }
@@ -521,12 +549,158 @@ async fn run(
         // A read stamps every record; an event without a stamp is from a
         // broker that keeps none, whose reads say 0.
         let stamp = event.timestamp_micros.unwrap_or(0);
-        steps.step(offset, stamp, event.payload).await?;
+        steps.read(input, offset, stamp, event.payload).await?;
         next_input = offset + 1;
         if faults::restart_input_after(offset) {
-            events = felix.subscribe_from(&spec.input, 0).await?;
+            events = felix.subscribe_from(input, 0).await?;
         }
     }
+}
+
+/// The most input records merged in one append.
+const MERGE_BATCH: usize = 256;
+
+/// Runs a workload with several inputs. Entries already on the merge log
+/// past the last step are stepped first: an earlier holder merged them and
+/// stopped before stepping them all, and the order it chose stands. Then the
+/// inputs are merged as their records arrive, each batch appended to the
+/// merge log before any of it is stepped, so every step is on the log first.
+async fn merged(
+    felix: &Felix,
+    id: &str,
+    spec: &WorkloadSpec,
+    steps: &mut Steps<'_>,
+    merge: &mut MergeLog<'_>,
+    next_input: u64,
+) -> Result<Infallible> {
+    let mut feed = Feed::new(felix, id, spec);
+    let mut next = next_input;
+    let end = merge.tail();
+    while next < end {
+        let (page, after) = feed.page(next, end).await?;
+        for step in page {
+            if let Some(input) = step.input? {
+                steps.step(step.at, input).await?;
+            }
+        }
+        next = after;
+    }
+
+    let mut cursor = merge.next().to_vec();
+    let (sender, mut arrivals) = mpsc::channel(MERGE_BATCH);
+    // Dropped with this function, which ends every subscription.
+    let mut subscriptions = JoinSet::new();
+    for (input, stream) in spec.inputs.iter().enumerate() {
+        let mut events = felix.subscribe_from(stream, cursor[input]).await?;
+        let sender = sender.clone();
+        subscriptions.spawn(async move {
+            loop {
+                let event = events
+                    .next_event()
+                    .await
+                    .and_then(|e| e.context("an input stream closed"));
+                let ended = event.is_err();
+                if sender.send((input, event)).await.is_err() || ended {
+                    return;
+                }
+            }
+        });
+    }
+    drop(sender);
+    loop {
+        let first = arrivals
+            .recv()
+            .await
+            .context("every input subscription ended")?;
+        let mut arrived = vec![first];
+        while arrived.len() < MERGE_BATCH
+            && let Ok(more) = arrivals.try_recv()
+        {
+            arrived.push(more);
+        }
+        let mut pending = Vec::new();
+        for (input, event) in arrived {
+            let event = event?;
+            let stream = &spec.inputs[input];
+            let offset = event
+                .offset
+                .ok_or_else(|| poison(format!("{stream} is not durable, so it has no offsets")))?;
+            if offset < cursor[input] {
+                not_behind(stream, felix.read_tail(stream).await?, cursor[input])?;
+                continue;
+            }
+            if faults::drop_input(offset) {
+                continue;
+            }
+            // A dropped delivery or offsets holding no event, as for one input.
+            // A long gap is read a page at a time and merged in writes that
+            // fit, so neither the reply nor the write grows with it.
+            let mut from = cursor[input];
+            while from < offset {
+                let (page, after) = felix.read_page(stream, from, offset).await?;
+                for record in page {
+                    let found = (record.offset, record.timestamp_micros, record.payload);
+                    take(&mut pending, &mut cursor, input, found);
+                    if pending.len() >= merge.per_write() {
+                        merge_and_step(spec, steps, merge, &mut pending).await?;
+                    }
+                }
+                from = after;
+            }
+            let stamp = event.timestamp_micros.unwrap_or(0);
+            take(
+                &mut pending,
+                &mut cursor,
+                input,
+                (offset, stamp, event.payload),
+            );
+            if pending.len() >= merge.per_write() {
+                merge_and_step(spec, steps, merge, &mut pending).await?;
+            }
+        }
+        merge_and_step(spec, steps, merge, &mut pending).await?;
+    }
+}
+
+/// Adds the record `(offset, append time, payload)` of input `input` to
+/// `pending` and moves that input's cursor past it.
+fn take(
+    pending: &mut Vec<(Entry, Bytes)>,
+    cursor: &mut [u64],
+    input: usize,
+    (offset, timestamp_micros, payload): (u64, u64, Bytes),
+) {
+    let entry = Entry {
+        input: u16::try_from(input).expect("at most MAX_INPUTS inputs"),
+        offset,
+        timestamp_micros,
+    };
+    pending.push((entry, payload));
+    cursor[input] = offset + 1;
+}
+
+/// Appends the `pending` entries to the merge log, then steps each at the
+/// offset it landed at.
+async fn merge_and_step(
+    spec: &WorkloadSpec,
+    steps: &mut Steps<'_>,
+    merge: &mut MergeLog<'_>,
+    pending: &mut Vec<(Entry, Bytes)>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let entries: Vec<Entry> = pending.iter().map(|(entry, _)| *entry).collect();
+    let landed = merge.append(&entries).await?;
+    for ((entry, payload), at) in pending.drain(..).zip(landed) {
+        let stream = &spec.inputs[usize::from(entry.input)];
+        if let Some(input) =
+            StepInput::read(stream, entry.offset, entry.timestamp_micros, &payload)?
+        {
+            steps.step(at, input).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Refuses an input stream whose `tail` is below `next_input`, the input
@@ -570,10 +744,19 @@ struct Steps<'a> {
 }
 
 impl Steps<'_> {
-    async fn step(&mut self, offset: u64, stamp: u64, record: Bytes) -> Result<()> {
-        let Some(input) = StepInput::read(self.spec, offset, stamp, &record)? else {
-            return Ok(());
-        };
+    /// Steps the record at `offset` on input `stream`, unless it is passed
+    /// over.
+    async fn read(&mut self, stream: &str, offset: u64, stamp: u64, record: Bytes) -> Result<()> {
+        match StepInput::read(stream, offset, stamp, &record)? {
+            Some(input) => self.step(offset, input).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Runs the step at `offset`, the input's offset for a workload with one
+    /// input and the merge entry's for one with several.
+    async fn step(&mut self, offset: u64, input: StepInput) -> Result<()> {
+        let stamp = input.timestamp_micros();
         let interval = self
             .spec
             .snapshot_every_ms
@@ -774,6 +957,46 @@ async fn last_input_stamp(
             if !(skip_claims && output::passed_over(&record.payload, output::DEFAULT_NAME)) {
                 return Ok(Some(record.timestamp_micros));
             }
+        }
+        end = from;
+        window = window.saturating_mul(8);
+    }
+    Ok(None)
+}
+
+/// As [`last_input_stamp`], for a workload with several inputs: the append
+/// time the last merge entry below step `next` that is stepped records.
+async fn last_merged_stamp(
+    felix: &Felix,
+    stream: &str,
+    inputs: &[String],
+    next: u64,
+) -> Result<Option<u64>> {
+    let mut end = next;
+    let mut window = 16;
+    while end > 0 {
+        let from = end.saturating_sub(window);
+        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+            let decoded = merge::decode(&record.payload)
+                .map_err(|e| merge_unreadable(stream, record.offset, e))?;
+            let Some(entry) = decoded.entry() else {
+                continue;
+            };
+            let input = inputs
+                .get(usize::from(entry.input))
+                .ok_or_else(|| poison(format!("{stream}:{} names {entry}", record.offset)))?;
+            if names::is_output_stream(input) {
+                let found = felix
+                    .read_range(input, entry.offset, entry.offset + 1)
+                    .await?;
+                if found
+                    .first()
+                    .is_none_or(|r| output::passed_over(&r.payload, output::DEFAULT_NAME))
+                {
+                    continue;
+                }
+            }
+            return Ok(Some(entry.timestamp_micros));
         }
         end = from;
         window = window.saturating_mul(8);

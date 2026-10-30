@@ -2,7 +2,9 @@
 
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
-use felixd_core::spec::{DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, WorkloadSpec, WorkloadState};
+use felixd_core::spec::{
+    DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, WorkloadSpec, WorkloadState, validate_inputs,
+};
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
@@ -18,7 +20,8 @@ pub const DEFAULT_REPLICATION_FACTOR: u32 = 3;
 pub struct Submission {
     pub id: String,
     pub module: Vec<u8>,
-    pub input: String,
+    /// One stream, or several merged through a merge log.
+    pub inputs: Vec<String>,
     pub snapshot_every: u64,
     pub snapshot_every_ms: Option<u64>,
     pub limits: Limits,
@@ -30,7 +33,7 @@ impl Submission {
         Submission {
             id: id.to_owned(),
             module,
-            input: input.to_owned(),
+            inputs: vec![input.to_owned()],
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
             snapshot_every_ms: None,
             limits: Limits::default(),
@@ -45,6 +48,7 @@ impl Submission {
 /// spec finds everything else. Returns the module's hash.
 pub async fn submit(settings: &Settings, submission: Submission) -> Result<String> {
     names::validate_id(&submission.id)?;
+    validate_inputs(&submission.inputs)?;
     Runtime::new()
         .map_err(|e| anyhow!("{e}"))?
         .compile(&submission.module)
@@ -71,6 +75,9 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let output = names::output_stream(&submission.id);
     admin::ensure_stream(settings, &output, kind).await?;
     admin::ensure_stream(settings, &names::snapshot_stream(&submission.id), kind).await?;
+    if submission.inputs.len() > 1 {
+        admin::ensure_stream(settings, &names::merge_stream(&submission.id), kind).await?;
+    }
 
     let felix = Felix::connect(settings).await?;
     let hash = module::hash(&submission.module);
@@ -79,7 +86,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     felix.cache_put(names::MODULES, &hash, module).await?;
     let mut spec = WorkloadSpec {
         module: hash.clone(),
-        input: submission.input,
+        inputs: submission.inputs,
         output,
         snapshot_every: submission.snapshot_every,
         snapshot_every_ms: submission.snapshot_every_ms,

@@ -50,6 +50,11 @@ pub fn output_of(stream: &str) -> Option<&str> {
         .filter(|id| validate_id(id).is_ok())
 }
 
+/// The stream a workload with several inputs records their merge order on.
+pub fn merge_stream(id: &str) -> String {
+    format!("wl.{id}.merge")
+}
+
 /// The stream a workload writes its snapshots to.
 pub fn snapshot_stream(id: &str) -> String {
     format!("wl.{id}.snap")

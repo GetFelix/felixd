@@ -81,7 +81,9 @@ enum Command {
         id: String,
         /// An input offset, for the state after that input, or an RFC 3339
         /// time such as 2026-10-29T14:02:00Z, for the state after every input
-        /// appended before it. A diff runs to the last input by default.
+        /// appended before it. For a workload with several inputs, an offset on
+        /// its merge log, or a time compared with when entries were merged. A
+        /// diff runs to the last input by default.
         #[arg(long, value_parser = parse_target, required_unless_present = "diff")]
         to: Option<Target>,
         /// Compare each output the replay produces with the one on the output
@@ -105,9 +107,11 @@ enum Command {
         /// The workload's name, used in its stream names.
         #[arg(long)]
         id: String,
-        /// The stream the workload reads. It must be a durable stream.
-        #[arg(long)]
-        input: String,
+        /// The stream the workload reads. It must be a durable stream. Repeat
+        /// for several: their records are merged in the order the lease
+        /// holder records on the workload's merge log.
+        #[arg(long = "input", required = true)]
+        inputs: Vec<String>,
         /// Write a snapshot after this many inputs.
         #[arg(long, default_value_t = felixd_core::spec::DEFAULT_SNAPSHOT_EVERY)]
         snapshot_every: u64,
@@ -179,7 +183,9 @@ async fn main() -> Result<()> {
                 if report.findings.is_empty() {
                     println!(
                         "{}: {} records, ok, from {}",
-                        report.output, report.records, report.input
+                        report.output,
+                        report.records,
+                        report.inputs.join(", ")
                     );
                 }
                 for finding in &report.findings {
@@ -235,7 +241,7 @@ async fn main() -> Result<()> {
         Command::Run {
             connection,
             id,
-            input,
+            inputs,
             snapshot_every,
             snapshot_every_ms,
             fuel,
@@ -246,7 +252,8 @@ async fn main() -> Result<()> {
         } => {
             let bytes =
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
-            let mut submission = Submission::new(&id, bytes, &input);
+            let mut submission = Submission::new(&id, bytes, &inputs[0]);
+            submission.inputs = inputs;
             submission.snapshot_every = snapshot_every;
             submission.snapshot_every_ms = snapshot_every_ms;
             submission.limits = Limits {

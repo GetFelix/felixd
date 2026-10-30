@@ -1,24 +1,9 @@
 use bytes::Bytes;
 use felixd_core::class::{ErrorClass, OperatorReason};
 use felixd_core::output::{self, Addressed, OutputHeader, Rejected};
-use felixd_core::spec::{Limits, WorkloadSpec, WorkloadState};
 
 use super::StepInput;
 use crate::runner::{NeedsOperator, Poison};
-
-fn spec(input: &str) -> WorkloadSpec {
-    WorkloadSpec {
-        module: "00".repeat(32),
-        input: input.to_owned(),
-        output: "wl.down.out".to_owned(),
-        snapshot_every: 10,
-        snapshot_every_ms: None,
-        state: WorkloadState::Running,
-        limits: Limits::default(),
-        failure: None,
-        record: Some(0),
-    }
-}
 
 fn header(input_offset: u64, index: u32) -> OutputHeader {
     OutputHeader {
@@ -36,7 +21,7 @@ fn named(epoch: u64, at: OutputHeader, name: &str, key: Option<&[u8]>, payload: 
 /// payload, or `None` when the record is passed over.
 fn read(input: &str, offset: u64, record: Vec<u8>) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
     let record = Bytes::from(record);
-    StepInput::read(&spec(input), offset, 7, &record)
+    StepInput::read(input, offset, 7, &record)
         .unwrap()
         .map(|step| {
             let given = step.as_input();
@@ -132,7 +117,7 @@ fn a_record_of_an_unknown_version_or_kind_needs_an_operator() {
     let mut kind = output::encode_claim(2, "node-a");
     kind[1] = 9;
     for record in [b"\x09junk".to_vec(), kind] {
-        let error = StepInput::read(&spec("wl.up.out"), 4, 0, &Bytes::from(record))
+        let error = StepInput::read("wl.up.out", 4, 0, &Bytes::from(record))
             .err()
             .expect("an unknown record stops the reader");
         let problem = error
@@ -147,7 +132,7 @@ fn a_record_of_an_unknown_version_or_kind_needs_an_operator() {
 fn an_output_that_does_not_decode_is_poison() {
     let mut record = output::encode(header(1, 0), 1, b"p");
     record.truncate(15);
-    let error = StepInput::read(&spec("wl.up.out"), 4, 0, &Bytes::from(record))
+    let error = StepInput::read("wl.up.out", 4, 0, &Bytes::from(record))
         .err()
         .expect("a truncated output fails the reader");
     assert!(error.is::<Poison>(), "{error:#}");
