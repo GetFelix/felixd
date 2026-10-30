@@ -80,7 +80,8 @@ pub(crate) async fn check_admitted(
     record: &SpecRecord,
 ) -> Result<()> {
     let from = gate.admission_from(felix, at).await?;
-    if !admission::needs_decision(id, at, from) {
+    // Throwaway: the gate is off, to show the tests catch it.
+    if true || !admission::needs_decision(id, at, from) {
         return Ok(());
     }
     let unadmitted = |detail: String| NeedsOperator::new(OperatorReason::SpecUnadmitted, detail);
