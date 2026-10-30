@@ -95,15 +95,12 @@ impl Logs {
         Agent::new(child, node_id)
     }
 
-    fn scan(&self, needles: &[String]) -> usize {
-        let mut bytes = 0;
+    fn scan(&self, needles: &[String]) {
         for entry in std::fs::read_dir(&self.dir).unwrap() {
             let path = entry.unwrap().path();
             let text = std::fs::read(&path).unwrap();
-            bytes += text.len();
             assert_clean(&path.display().to_string(), &text, needles);
         }
-        bytes
     }
 }
 
@@ -111,6 +108,40 @@ fn token_file(dir: &Path, name: &str, token: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, token).unwrap();
     path
+}
+
+/// The names of every `kind` (`streams` or `caches`) in the test's
+/// namespace, from the control plane, every page.
+async fn listed(t: &TestFelix, kind: &str, field: &str) -> Vec<String> {
+    let s = &t.settings;
+    let base = format!(
+        "{}/v1/tenants/{}/namespaces/{}/{kind}",
+        s.controlplane_url.trim_end_matches('/'),
+        s.tenant,
+        s.namespace
+    );
+    let authorization = format!("Bearer {}", s.controlplane_token.as_ref().unwrap().expose());
+    let field = field.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut names = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut request = ureq::get(&base).header("Authorization", &authorization);
+            if let Some(c) = &cursor {
+                request = request.query("cursor", c);
+            }
+            let page: serde_json::Value = request.call().unwrap().body_mut().read_json().unwrap();
+            for item in page["items"].as_array().unwrap() {
+                names.push(item[field.as_str()].as_str().unwrap().to_owned());
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return names,
+            }
+        }
+    })
+    .await
+    .unwrap()
 }
 
 async fn scrape(addr: &str) -> String {
@@ -195,9 +226,21 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     std::fs::remove_file(&bad_broker).unwrap();
     std::fs::remove_file(&wasm).unwrap();
 
-    // Records on every stream a run writes, and every cache entry.
+    // Every stream and cache in the namespace, as the control plane lists
+    // them, so one added later is scanned without changing this test.
+    let streams = listed(&t, "streams", "stream").await;
+    let caches = listed(&t, "caches", "cache").await;
+    for want in [INPUT, OUTPUT, SNAPSHOTS, names::SPECS, names::FACTS] {
+        assert!(
+            streams.iter().any(|s| s == want),
+            "{want} not in {streams:?}"
+        );
+    }
+    for want in [names::WORKLOADS, names::LEASES, names::EPOCHS, names::NODES] {
+        assert!(caches.iter().any(|c| c == want), "{want} not in {caches:?}");
+    }
     let mut records = 0;
-    for stream in [INPUT, OUTPUT, SNAPSHOTS, names::SPECS] {
+    for stream in &streams {
         for (offset, payload) in t.read_all(stream).await {
             assert_clean(&format!("{stream} at {offset}"), &payload, &secrets);
             records += 1;
@@ -207,14 +250,7 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
         !t.read_all(SNAPSHOTS).await.is_empty(),
         "no snapshot written"
     );
-    for cache in [
-        names::WORKLOADS,
-        names::LEASES,
-        names::EPOCHS,
-        names::NODES,
-        names::MODULES,
-        names::DRAINS,
-    ] {
+    for cache in &caches {
         for (key, value) in t.felix.entries(cache).await.unwrap() {
             assert_clean(&format!("{cache}/{key}"), key.as_bytes(), &secrets);
             assert_clean(&format!("{cache}/{key}"), &value, &secrets);
@@ -224,9 +260,17 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     assert_clean("metrics", scraped_a.as_bytes(), &secrets);
     assert_clean("metrics", scraped_b.as_bytes(), &secrets);
 
-    let logged = logs.scan(&secrets);
-    // The scan means something only if the logs say what the run did.
-    assert!(logged > 10_000, "only {logged} bytes logged");
+    logs.scan(&secrets);
+    // The scan means something only if the connect and auth path logged at
+    // the levels it runs at, and not just the compiler.
+    for (name, line) in [
+        ("secrets-a.log", "stream authenticated"),
+        ("secrets-b.log", "stream authenticated"),
+        ("ps.log", "stream authenticated"),
+    ] {
+        let text = std::fs::read_to_string(logs.dir.join(name)).unwrap();
+        assert!(text.contains(line), "{name} has no \"{line}\" line");
+    }
     assert!(records > 30, "only {records} records scanned");
     std::fs::remove_dir_all(&logs.dir).unwrap();
 }
