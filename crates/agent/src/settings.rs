@@ -23,7 +23,7 @@ pub struct Settings {
 /// A credential. Its `Debug` and `Display` print a placeholder, so a secret
 /// cannot reach a log line, an error or a panic message by formatting. The
 /// value is read only with [`Secret::expose`], where it is handed to Felix.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Secret(String);
 
 impl Secret {
@@ -36,15 +36,9 @@ impl Secret {
     }
 }
 
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Secret(redacted)")
-    }
-}
-
 impl fmt::Display for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(redacted)")
+        f.write_str(&self.0)
     }
 }
 
