@@ -271,6 +271,14 @@ impl Felix {
         from: u64,
         end: u64,
     ) -> Result<(Vec<StreamRecord>, u64)> {
+        if let Some(oldest) = crate::faults::trimmed_below(stream, from) {
+            return Err(Trimmed {
+                stream: stream.to_owned(),
+                requested: from,
+                oldest,
+            }
+            .into());
+        }
         let page = self
             .client
             .read(
@@ -282,8 +290,31 @@ impl Felix {
                 Some(end),
                 PAGE_RECORDS,
             )
-            .await?;
+            .await
+            .map_err(|error| trimmed_from(error, stream))?;
         Ok((page.records, page.next_offset))
+    }
+
+    /// The records at `from..end` for a reader walking back from a tail.
+    /// When Felix has trimmed below `end`, it reads from the oldest offset
+    /// still held instead, and says the walk ends there, so a reader that
+    /// only needs records above a trim point never asks for one below it.
+    pub(crate) async fn read_back(
+        &self,
+        stream: &str,
+        from: u64,
+        end: u64,
+    ) -> Result<(Vec<StreamRecord>, bool)> {
+        match self.read_range(stream, from, end).await {
+            Ok(records) => Ok((records, from == 0)),
+            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
+                Some(oldest) if oldest > from && oldest >= end => Ok((Vec::new(), true)),
+                Some(oldest) if oldest > from => {
+                    Ok((self.read_range(stream, oldest, end).await?, true))
+                }
+                _ => Err(error),
+            },
+        }
     }
 
     /// The last record of the stream, given its `tail`.
@@ -291,10 +322,11 @@ impl Felix {
         let mut window = 16;
         loop {
             let from = tail.saturating_sub(window);
-            if let Some(last) = self.read_range(stream, from, tail).await?.pop() {
+            let (mut records, ended) = self.read_back(stream, from, tail).await?;
+            if let Some(last) = records.pop() {
                 return Ok(Some(last));
             }
-            if from == 0 {
+            if ended {
                 return Ok(None);
             }
             window *= 8;
@@ -314,6 +346,14 @@ impl Felix {
 
     /// Subscribes to the stream starting at input offset `from`.
     pub async fn subscribe_from(&self, stream: &str, from: u64) -> Result<Subscription> {
+        if let Some(oldest) = crate::faults::trimmed_below(stream, from) {
+            return Err(Trimmed {
+                stream: stream.to_owned(),
+                requested: from,
+                oldest,
+            }
+            .into());
+        }
         self.client
             .subscribe_from(
                 &self.tenant,
@@ -322,6 +362,7 @@ impl Felix {
                 Some(StartPosition::Offset(from)),
             )
             .await
+            .map_err(|error| trimmed_from(error, stream))
     }
 
     /// Whether the broker serving `watch` answers a read of `cache` within
@@ -453,3 +494,44 @@ fn not_ready(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// A read or subscription asked for records Felix no longer holds: retention
+/// or a trim passed them.
+#[derive(Debug)]
+pub struct Trimmed {
+    pub stream: String,
+    pub requested: u64,
+    pub oldest: u64,
+}
+
+impl std::fmt::Display for Trimmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} no longer holds offset {}: history before {} is trimmed",
+            self.stream, self.requested, self.oldest
+        )
+    }
+}
+
+impl std::error::Error for Trimmed {}
+
+impl Trimmed {
+    /// The trim `error` reports, if it is one.
+    pub fn of(error: &anyhow::Error) -> Option<&Trimmed> {
+        error.downcast_ref::<Trimmed>()
+    }
+}
+
+/// `error` as [`Trimmed`] when Felix said the offset is too old.
+fn trimmed_from(error: anyhow::Error, stream: &str) -> anyhow::Error {
+    match error.downcast_ref::<SubscribeCursorError>() {
+        Some(refused) if matches!(refused.reason, CursorErrorReason::TooOld) => Trimmed {
+            stream: stream.to_owned(),
+            requested: refused.requested,
+            oldest: refused.available,
+        }
+        .into(),
+        _ => error,
+    }
+}

@@ -15,13 +15,14 @@ use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
+use felixd_core::trim::{self, Trim};
 use felixd_core::{MAX_WRITE_BYTES, module, names};
 use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
 use tokio::sync::{OnceCell, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use crate::faults;
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed, StepInput, merge_unreadable};
 use crate::lease::Fence;
 use crate::merge::MergeLog;
@@ -333,7 +334,8 @@ pub(crate) async fn run_workload(
     // input and replay the whole gap each time.
     let mut hold = 0;
     let error = loop {
-        match run(felix, runtime, id, spec, fence, claim_from, &mut hold).await {
+        let running = run(felix, runtime, id, spec, fence, claim_from, &mut hold);
+        match faults::scoped(id, running).await {
             Ok(never) => match never {},
             Err(error) if error.is::<SnapshotSkipped>() => continue,
             Err(error) => break error,
@@ -346,6 +348,15 @@ pub(crate) async fn run_workload(
         return Ok(Outcome::FailedOnStream {
             spec_version: found.spec_version,
             failure: found.failure.clone(),
+        });
+    }
+    // Retention or a trim passed a record this run needed. No node can read
+    // it again, so retrying would loop.
+    if let Some(trimmed) = Trimmed::of(&error) {
+        faults::trimmed_read(trimmed);
+        return Ok(Outcome::NeedsOperator {
+            problem: NeedsOperator::new(OperatorReason::HistoryTrimmed, trimmed.to_string()),
+            recorded: false,
         });
     }
     if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
@@ -395,6 +406,15 @@ async fn run(
         claim_from,
     )
     .await?;
+    // A new owner carries on from the last trim on the stream, so its floors
+    // never go below an earlier owner's, whatever `keep_snapshots` says now.
+    let last_trim = match spec.keep_snapshots.is_some() || faults::enforce_trim_floors() {
+        true => last_trim(felix, &spec.output, log.tail()).await?,
+        false => None,
+    };
+    if let Some(trim) = &last_trim {
+        enforce_floors(spec, trim);
+    }
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
     specs::refuse_stale_or_foreign(felix, id, spec).await?;
@@ -516,6 +536,7 @@ async fn run(
         since_snapshot: 0,
         previous_stamp,
         hold,
+        last_trim,
         metrics: workload_metrics,
         positions,
     };
@@ -744,6 +765,71 @@ fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
     .into())
 }
 
+/// The last trim record on `.out` below `tail`, walking back no further
+/// than Felix holds.
+async fn last_trim(felix: &Felix, stream: &str, tail: u64) -> Result<Option<Trim>> {
+    let mut end = tail;
+    let mut window = 16;
+    while end > 0 {
+        let from = end.saturating_sub(window);
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
+            let found = output::decode(&record.payload)
+                .map_err(|e| poison(format!("output at {stream}:{}: {e}", record.offset)))?;
+            if let Some(trim) = found.trim() {
+                return Ok(Some(trim));
+            }
+        }
+        if ended {
+            break;
+        }
+        end = from;
+        window = window.saturating_mul(8);
+    }
+    Ok(None)
+}
+
+/// Under the `enforce-trim-floors` fault, refuses this workload's reads
+/// below `trim`'s floors from now on, as if they were deleted.
+fn enforce_floors(spec: &WorkloadSpec, trim: &Trim) {
+    if !faults::enforce_trim_floors() {
+        return;
+    }
+    let Some(id) = names::output_of(&spec.output) else {
+        return;
+    };
+    faults::set_floor(id, &names::snapshot_stream(id), trim.snap_floor);
+    if spec.merged() {
+        faults::set_floor(id, &names::merge_stream(id), trim.merge_floor);
+    }
+    for (input, &floor) in spec.inputs.iter().zip(&trim.input_floors) {
+        faults::set_floor(id, input, floor);
+    }
+}
+
+/// The input floors at merge log step `step`: the entry's `next`, where
+/// each input carries on, with the entry's own input lowered to its record.
+async fn merge_next_at(felix: &Felix, spec: &WorkloadSpec, step: u64) -> Result<Vec<u64>> {
+    let id = names::output_of(&spec.output).context("the output is not a workload's")?;
+    let stream = names::merge_stream(id);
+    let found = felix.read_range(&stream, step, step + 1).await?;
+    let record = found.first().filter(|r| r.offset == step).ok_or_else(|| {
+        poison(format!(
+            "a snapshot names {stream}:{step}, which holds no record"
+        ))
+    })?;
+    let decoded = merge::decode(&record.payload)
+        .map_err(|e| poison(format!("merge log at {stream}:{step}: {e}")))?;
+    let mut floors = decoded.next().to_vec();
+    // A resume reads the stepped record back for its append time.
+    if let Some(entry) = decoded.entry()
+        && let Some(floor) = floors.get_mut(usize::from(entry.input))
+    {
+        *floor = (*floor).min(entry.offset);
+    }
+    Ok(floors)
+}
+
 /// Runs inputs through the workload in order, writing what they produce.
 struct Steps<'a> {
     felix: &'a Felix,
@@ -764,6 +850,8 @@ struct Steps<'a> {
     previous_stamp: Option<u64>,
     /// No snapshot is taken at an input below this.
     hold: &'a mut u64,
+    /// The last trim this owner wrote, or the last on `.out` when it resumed.
+    last_trim: Option<Trim>,
     metrics: Option<Arc<WorkloadMetrics>>,
     positions: Vec<Arc<InputMetrics>>,
 }
@@ -878,6 +966,62 @@ impl Steps<'_> {
         }
         self.previous = Some(manifest);
         faults::after_snapshot();
+        self.trim().await
+    }
+
+    /// With `keep_snapshots` set, records on `.out` the floors below the
+    /// oldest kept snapshot that this workload's resume no longer reads. It goes
+    /// on `.out` with `publish_if` at the tail, so a stale holder's is
+    /// refused like its outputs. It deletes nothing (Felix#1662).
+    async fn trim(&mut self) -> Result<()> {
+        let Some(keep) = self.spec.keep_snapshots else {
+            return Ok(());
+        };
+        let keep = keep as usize;
+        let newest = snapshots::newest(self.felix, self.snap_stream, self.snap_tail, keep)
+            .await
+            .map_err(read_error)?;
+        // Plan refuses these too; checking first spares the merge log read.
+        if newest.len() < keep.max(1) || newest[0].epoch != self.fence.epoch() {
+            return Ok(());
+        }
+        let merge_next = match self.spec.merged() {
+            true => {
+                let oldest = newest.iter().take(keep).map(|k| k.step).min();
+                match oldest {
+                    Some(step) => Some(merge_next_at(self.felix, self.spec, step).await?),
+                    None => None,
+                }
+            }
+            false => None,
+        };
+        let planned = trim::plan(
+            self.fence.epoch(),
+            keep,
+            &newest,
+            |_| merge_next,
+            self.last_trim.as_ref(),
+        );
+        let planned = match planned {
+            Ok(planned) => planned,
+            Err(trim::Skip::Regressed) => {
+                // As after `keep_snapshots` is raised: the earlier trim
+                // stands until the kept snapshots pass it.
+                tracing::info!(
+                    workload = self.snap_stream,
+                    "a trim floor would go back; keeping the last trim"
+                );
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
+        };
+        if self.last_trim.as_ref() == Some(&planned) {
+            return Ok(());
+        }
+        let record = output::encode_trim(self.fence.epoch(), &planned);
+        self.log.append_trim(record).await?;
+        enforce_floors(self.spec, &planned);
+        self.last_trim = Some(planned);
         Ok(())
     }
 
@@ -993,10 +1137,14 @@ async fn last_input_stamp(
     let mut window = 16;
     while end > 0 {
         let from = end.saturating_sub(window);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
             if !(skip_claims && output::passed_over(&record.payload, output::DEFAULT_NAME)) {
                 return Ok(Some(record.timestamp_micros));
             }
+        }
+        if ended {
+            break;
         }
         end = from;
         window = window.saturating_mul(8);
@@ -1016,7 +1164,8 @@ async fn last_merged_stamp(
     let mut window = 16;
     while end > 0 {
         let from = end.saturating_sub(window);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
             let decoded = merge::decode(&record.payload)
                 .map_err(|e| merge_unreadable(stream, record.offset, e))?;
             let Some(entry) = decoded.entry() else {
@@ -1038,6 +1187,9 @@ async fn last_merged_stamp(
             }
             return Ok(Some(entry.timestamp_micros));
         }
+        if ended {
+            break;
+        }
         end = from;
         window = window.saturating_mul(8);
     }
@@ -1055,12 +1207,16 @@ pub(crate) async fn last_output(
     let mut window = 16;
     while end > 0 {
         let from = end.saturating_sub(window);
-        for record in felix.read_range(stream, from, end).await?.iter().rev() {
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        for record in records.iter().rev() {
             let found = output::decode(&record.payload)
                 .map_err(|e| poison(format!("output at {stream}:{}: {e}", record.offset)))?;
             if let Some(written) = found.written() {
                 return Ok(Some((record.offset, written)));
             }
+        }
+        if ended {
+            break;
         }
         end = from;
         window = window.saturating_mul(8);

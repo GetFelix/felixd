@@ -8,6 +8,7 @@ fn spec() -> WorkloadSpec {
         output: "wl.temp.out".into(),
         snapshot_every: 50,
         snapshot_every_ms: None,
+        keep_snapshots: None,
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: 1000,

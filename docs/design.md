@@ -882,9 +882,73 @@ but a compromised node could write garbage. Per-lease tokens close that
 
 ## Retention
 
-Inputs older than a workload's oldest kept snapshot can't be replayed, and
-`subscribe_from` fails with `CursorTooOld` instead of silently skipping. v0
-keeps everything. Trimming to "the last K snapshots" comes with M4.
+`keep_snapshots` (`felixd run --keep-snapshots K`) keeps a workload's last K
+snapshots. After each snapshot the holder writes, it appends a trim record to
+`wl.<id>.out` ([records.md](records.md#output-stream-records)) naming the
+floors below which this workload's resume reads nothing:
+
+- `.snap` below the lowest offset any kept snapshot reads, its manifest or a
+  chunk it shares with an older snapshot;
+- the merge log below the oldest kept step, whose entry is kept for its
+  `next` and its append time;
+- each input below the record that step read, with one input, or below the
+  entry's `next`, with several, the entry's own record kept.
+
+A resume reads back the last stepped record for its append time
+(`snapshot_every_ms`), so that record stays above the floor. Every read that
+walks back from a tail stops at the oldest offset Felix holds rather than
+asking below it. That holds for Felix's own age and size retention too: a walk
+that used to fail on `CursorTooOld` now ends quietly. When retention has
+removed the last stepped record, the resume has no append time for it, so the
+next `snapshot_every_ms` snapshot can fall on a different input than an
+uninterrupted run's. Outputs are unaffected.
+
+A new owner reads the last trim record on `.out` when it resumes and never
+writes floors below it. After `keep_snapshots` is raised the last trim stands
+until the kept snapshots pass it.
+
+The oldest kept snapshot is the one with the lowest step among the last K on
+the stream, not the first of them: a stale holder's snapshot can land after a
+newer holder's and be behind it. A holder trims only once the newest snapshot
+on `.snap` is its own. Until then an earlier holder can still land one, of a
+lower step, that the next resume would restore. Once it is, every snapshot
+written later is from this epoch or a later one and at or past a kept step, so
+the floors never go back, and `trim::plan` refuses one that would.
+
+The record goes on `.out` with `publish_if` at the tail like an output, so a
+stale holder's is refused by the next claim. A crash before it lands changes
+nothing, and one after leaves a record the next holder passes over, like a
+claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
+
+Nothing is deleted yet. Felix trims only by age or size, which knows nothing
+of what a resume needs, and has no call to trim a stream before an offset
+([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). When it does,
+the floors decide different things per stream:
+
+- `.snap` and the merge log are the workload's own. A holder may delete them
+  up to its last trim record's floors, after the record has landed, so a crash
+  at any point leaves less deleted than recorded.
+- An input may be another workload's `.out` or a stream other workloads and
+  programs read. One workload's floor says only what that workload's resume
+  needs. An input is deleted only below the lowest floor of all its readers
+  ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
+  workload's floor.
+- `.out` is not trimmed. It is every downstream's input, it holds the first
+  claim that spec lineage reads, and `felixd check` lines records up with
+  claims from the start of the stream (#150).
+
+`felixd check` and `felixd replay` read from the start of each stream while
+the records are there, trim records or not. Once something they need is
+deleted they stop and report the stream and the oldest offset Felix holds;
+checking from the oldest kept snapshot instead comes with #150.
+
+A workload whose input Felix has trimmed past what it still needs, through
+retention or a later trim, is recorded as needing an operator (reason 9)
+rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
+
+`tests/trim.rs` and `tests/merge.rs` resume with every read below the floors
+refused (the `enforce-trim-floors` fault), as if they were deleted, and the
+workload carries on.
 
 ## Build order
 
@@ -894,7 +958,7 @@ keeps everything. Trimming to "the last K snapshots" comes with M4.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); snapshot trimming is not) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix

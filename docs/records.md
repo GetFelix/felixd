@@ -11,7 +11,7 @@ On `wl.<id>.out`. The version is 4, followed by a kind byte.
 | Bytes | Field |
 |---|---|
 | 1 | version, 4 |
-| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator |
+| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator, 7 for a trim |
 | 8 | the writer's lease epoch |
 
 An output continues with:
@@ -63,7 +63,7 @@ continues with:
 | Bytes | Field |
 |---|---|
 | 8 | the `sys.specs` offset of the spec record |
-| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel, 7 input record unreadable by this build, 8 input stream behind the workload |
+| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel, 7 input record unreadable by this build, 8 input stream behind the workload, 9 a record the workload needs was trimmed |
 | rest | detail for people, UTF-8 |
 
 A holder appends it the way it appends a failure, behind everything of earlier epochs, and then
@@ -101,6 +101,24 @@ version or kind it does not know is refused, never skipped: the reader cannot te
 an input, so the workload is recorded as needing an operator (reason 7), and upgrading the node
 fixes it. That includes kinds 5 and 6 read by a build from before them, so upgrade every node before
 a workload can write them. An output that does not decode is poison.
+
+A trim, kind 7, names the floors below which this workload's resume reads nothing
+([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start
+while the records are there. Its holder appends it after a snapshot of its own when the spec sets
+`keep_snapshots`, with `publish_if` at the tail like an output. It continues with:
+
+| Bytes | Field |
+|---|---|
+| 8 | the `.snap` offset of the oldest kept snapshot |
+| 8 | that snapshot's step: its input offset, or merge log offset with several inputs |
+| 8 | the `.snap` floor: the lowest offset a kept snapshot's manifest or chunks sit at |
+| 8 | the merge log floor, the step's own entry, kept for its `next`; 0 with one input |
+| 2 | input count |
+| 8 each | per input, in the spec's order, this workload's floor: the record the step read with one input; the entry's `next`, lowered to the entry's own record, with several |
+
+Bytes after the last floor are refused. Readers pass over a trim like a claim, and only its epoch is
+checked. Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's:
+an input shared with other readers is deleted only below all of theirs (#150).
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
@@ -197,7 +215,7 @@ fields at the top, refuses it instead of reading what it can. A value with no `f
 a build and still reads.
 
 - A workload spec has `module` (hex sha256), `input` or `inputs`, `output`, `snapshot_every` (default 1000),
-  `snapshot_every_ms` (absent unless set), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000),
+  `snapshot_every_ms` (absent unless set), `keep_snapshots` (absent unless set: keep every snapshot), `state` (`running`, `stopped` or `failed`) and `limits`, with `fuel_per_call` (default 50,000,000),
   `max_memory_bytes` (default 64 MiB) and `snapshot_fuel` (default 500,000,000, for a whole
   snapshot or restore; a snapshot that runs out is skipped, a restore that runs out
 needs an operator). A spec without `limits` gets the defaults. A failed spec

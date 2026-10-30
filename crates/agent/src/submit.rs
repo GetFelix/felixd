@@ -24,6 +24,7 @@ pub struct Submission {
     pub inputs: Vec<String>,
     pub snapshot_every: u64,
     pub snapshot_every_ms: Option<u64>,
+    pub keep_snapshots: Option<u32>,
     pub limits: Limits,
     pub replication_factor: u32,
 }
@@ -36,6 +37,7 @@ impl Submission {
             inputs: vec![input.to_owned()],
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
             snapshot_every_ms: None,
+            keep_snapshots: None,
             limits: Limits::default(),
             replication_factor: DEFAULT_REPLICATION_FACTOR,
         }
@@ -55,6 +57,9 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         .map_err(|e| anyhow!("{e}"))?;
     if submission.snapshot_every == 0 {
         bail!("snapshot_every must be at least 1");
+    }
+    if submission.keep_snapshots == Some(0) {
+        bail!("keep_snapshots must be at least 1");
     }
     if submission.snapshot_every_ms == Some(0) {
         bail!("snapshot_every_ms must be at least 1");
@@ -91,6 +96,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         output,
         snapshot_every: submission.snapshot_every,
         snapshot_every_ms: submission.snapshot_every_ms,
+        keep_snapshots: submission.keep_snapshots,
         state: WorkloadState::Running,
         limits: submission.limits,
         failure: None,

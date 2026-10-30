@@ -41,6 +41,19 @@ async fn submit(t: &TestFelix) -> Vec<u8> {
     module
 }
 
+/// As [`submit`], with `args` passed to `felixd run`.
+async fn submit_with(t: &TestFelix, args: &[&str]) -> Vec<u8> {
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    for input in INPUTS {
+        ensure_stream(&t.settings, input, kind).await.unwrap();
+    }
+    let module = felixd_testkit::workload("faulty");
+    assert!(t.run_on(ID, &module, &INPUTS, args).success());
+    module
+}
+
 /// Each merge log record as `(offset, epoch, entry)`, `None` for a claim.
 async fn merge_log(t: &TestFelix) -> Vec<(u64, u64, Option<merge::Entry>)> {
     t.read_all(MERGE)
@@ -480,4 +493,107 @@ async fn check_upstream_on_a_join_checks_each_upstream_first() {
     assert_eq!(order.len(), 3, "{report}");
     assert_eq!(order[2], "wl.join.out", "{report}");
     assert!(order[..2].contains(&"wl.a.out") && order[..2].contains(&"wl.b.out"));
+}
+
+/// A merged workload that keeps two snapshots trims by the merge log: each
+/// trim's input floors are the `next` of the entry at its step, and that
+/// entry is kept. A holder killed after trimming leaves the next one a
+/// resume that still works.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_workload_trims_by_the_merge_log() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit_with(&t, &["--snapshot-every", "4", "--keep-snapshots", "2"]).await;
+    for _ in 0..10 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    let mut first = t.start_agent();
+    eventually("a trim", Duration::from_secs(60), || async {
+        (!trims(&t).await.is_empty()).then_some(())
+    })
+    .await;
+    first.kill();
+    let _next = t.start_agent();
+    for _ in 0..5 {
+        t.publish_all(PAYMENTS, [meta()]).await;
+        t.publish_all(ORDERS, [meta()]).await;
+    }
+    assert_merged(&t, &module, 30).await;
+
+    let found = trims(&t).await;
+    assert!(found.len() >= 2, "{found:?}");
+    let log = t.read_all(MERGE).await;
+    for trim in &found {
+        assert_eq!(trim.merge_floor, trim.step, "{trim:?}");
+        let (_, entry) = log
+            .iter()
+            .find(|(at, _)| *at == trim.step)
+            .expect("the trim's step is on the merge log");
+        let record = merge::decode(entry).unwrap();
+        let entry = record.entry().expect("the trim's step is an entry");
+        // Each input carries on from `next`; the entry's own record is kept
+        // for its append time.
+        let mut want = record.next().to_vec();
+        let own = usize::from(entry.input);
+        want[own] = want[own].min(entry.offset);
+        assert_eq!(trim.input_floors, want, "{trim:?}");
+    }
+}
+
+async fn trims(t: &TestFelix) -> Vec<felixd_core::trim::Trim> {
+    t.read_all(OUTPUT)
+        .await
+        .iter()
+        .filter_map(|(_, r)| output::decode(r).unwrap().trim())
+        .collect()
+}
+
+/// As `a_resume_reads_nothing_below_the_trim_floors` in `trim.rs`, for a
+/// merged workload: the merge log entry at the step and its input record are
+/// kept for the resume's append time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit_with(
+        &t,
+        &[
+            "--snapshot-every",
+            "4",
+            "--snapshot-every-ms",
+            "3600000",
+            "--keep-snapshots",
+            "1",
+        ],
+    )
+    .await;
+    for _ in 0..10 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    let mut first = t.start_agent();
+    eventually("a trim past the start", Duration::from_secs(60), || async {
+        trims(&t)
+            .await
+            .iter()
+            .any(|trim| trim.step >= 8)
+            .then_some(())
+    })
+    .await;
+    first.kill();
+    let mut next = t.start_agent_with_faults("enforce-trim-floors=1");
+    for _ in 0..5 {
+        t.publish_all(PAYMENTS, [meta()]).await;
+        t.publish_all(ORDERS, [meta()]).await;
+    }
+    assert_merged(&t, &module, 30).await;
+    // A read below a floor that reached the run would have aborted it.
+    assert!(next.alive(), "a read below the floors reached the run");
+    next.kill();
+    let parked = t.read_all(OUTPUT).await.iter().any(|(_, r)| {
+        matches!(
+            output::decode(r).unwrap(),
+            output::Record::NeedsOperator { .. }
+        )
+    });
+    assert!(!parked, "the resume read below the floors");
 }

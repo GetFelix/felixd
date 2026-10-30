@@ -3,6 +3,14 @@
 //!
 //! - `crash-before-snapshot=N`: abort the process just before its Nth snapshot.
 //! - `crash-after-snapshot=N`: abort it just after its Nth snapshot is written.
+//! - `crash-after-trim-sent=N`: abort once the Nth trim record has been
+//!   sent, before its answer is acted on. The record may have landed.
+//! - `freeze-before-trim=N`: stop the process with `SIGSTOP` just before its
+//!   Nth trim record is sent. It carries on at `SIGCONT`.
+//! - `enforce-trim-floors=1`: refuse a workload's reads and subscriptions
+//!   below the floors of its last trim record, read when a run starts and
+//!   updated as trims land, with the error Felix gives for trimmed history,
+//!   as if they were deleted. One that reaches the run aborts the process.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-append-sent=N`: abort once the Nth output append has been
@@ -90,6 +98,7 @@ static FAILURES: AtomicU64 = AtomicU64::new(0);
 static FAILURE_RECORDS: AtomicU64 = AtomicU64::new(0);
 static MERGES: AtomicU64 = AtomicU64::new(0);
 static MERGE_CLAIMS: AtomicU64 = AtomicU64::new(0);
+static TRIMS: AtomicU64 = AtomicU64::new(0);
 
 /// A conditional write the answer faults count.
 #[derive(Clone, Copy, Debug)]
@@ -167,6 +176,69 @@ pub(crate) fn skip_snapshot() -> bool {
             (n < skip).then_some(n + 1)
         })
         .is_ok()
+}
+
+/// Floors below which reads are refused under `enforce-trim-floors`, as
+/// `(workload, stream, floor)`.
+static FLOORS: std::sync::Mutex<Vec<(String, String, u64)>> = std::sync::Mutex::new(Vec::new());
+
+tokio::task_local! {
+    /// The workload a run belongs to, so its floors apply to its reads only.
+    static WORKLOAD: String;
+}
+
+/// Runs `run` as workload `id`'s, for [`trimmed_below`].
+pub(crate) async fn scoped<F: std::future::Future>(id: &str, run: F) -> F::Output {
+    WORKLOAD.scope(id.to_owned(), run).await
+}
+
+/// Whether to act as if history below each trim floor were deleted.
+pub(crate) fn enforce_trim_floors() -> bool {
+    fault("enforce-trim-floors") == Some(1)
+}
+
+/// Refuses workload `id`'s reads of `stream` below `floor` from now on.
+pub(crate) fn set_floor(id: &str, stream: &str, floor: u64) {
+    let mut floors = FLOORS.lock().unwrap_or_else(|e| e.into_inner());
+    floors.retain(|(w, s, _)| !(w == id && s == stream));
+    floors.push((id.to_owned(), stream.to_owned(), floor));
+}
+
+/// The oldest offset `stream` holds for the running workload, if a read
+/// from `from` is below it.
+pub(crate) fn trimmed_below(stream: &str, from: u64) -> Option<u64> {
+    WORKLOAD
+        .try_with(|id| {
+            let floors = FLOORS.lock().unwrap_or_else(|e| e.into_inner());
+            floors
+                .iter()
+                .find(|(w, s, floor)| w == id && s == stream && from < *floor)
+                .map(|(_, _, floor)| *floor)
+        })
+        .ok()
+        .flatten()
+}
+
+/// A read below a trim floor reached the run. Under `enforce-trim-floors`
+/// that is the bug the fault exists to find, so the process aborts.
+pub(crate) fn trimmed_read(trimmed: &impl std::fmt::Display) {
+    if enforce_trim_floors() {
+        tracing::error!(%trimmed, "a run read below a trim floor");
+        crash("enforce-trim-floors");
+    }
+}
+
+pub(crate) fn before_trim() {
+    let n = TRIMS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("freeze-before-trim") == Some(n) {
+        freeze();
+    }
+}
+
+pub(crate) fn after_trim_sent() {
+    if fault("crash-after-trim-sent") == Some(TRIMS.load(Ordering::Relaxed)) {
+        crash("crash-after-trim-sent");
+    }
 }
 
 pub(crate) fn after_append_sent() {

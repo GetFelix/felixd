@@ -80,7 +80,10 @@ impl Produced {
                 code: found.code,
                 detail: found.detail.to_vec(),
             }),
-            Record::Claim { .. } | Record::Failure { .. } | Record::NeedsOperator { .. } => None,
+            Record::Claim { .. }
+            | Record::Failure { .. }
+            | Record::NeedsOperator { .. }
+            | Record::Trim { .. } => None,
         }
     }
 

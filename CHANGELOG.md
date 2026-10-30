@@ -23,6 +23,29 @@
   nothing. Grant node credentials read on `drains` before upgrading the
   nodes; `felixd ps` then shows a drain mark as `pending` on any node that
   has not said it read it.
+- `felixd run --keep-snapshots K` keeps a workload's last K snapshots. After
+  each snapshot of its own, the holder appends a trim record to the output
+  stream naming the floors below which this workload's resume reads nothing:
+  on the snapshot stream, the merge log and each input. It is fenced by the
+  lease epoch like an output. Nothing is deleted yet: Felix has no call to
+  trim a stream at an offset
+  ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). `felixd
+  check` and `felixd replay` still read from the start. The output stream is
+  not trimmed, and a shared input will be trimmed only below every reader's
+  floor (#150).
+- Upgrading: a trim record is a new output record kind (7). A node from an
+  earlier build that takes over a workload with one fails it as poison, and
+  one whose workload reads that output stream leaves it to an operator. Upgrade
+  every node before setting `--keep-snapshots`.
+- Reads that walk back from a stream's tail stop at the oldest offset Felix
+  holds instead of failing with `CursorTooOld`. With age or size retention on
+  an input, a resume that finds its last stepped record gone has no append
+  time for it, so the next `snapshot_every_ms` snapshot can fall on a
+  different input than before. Outputs are unaffected.
+- A record a running workload needs that Felix no longer holds, after
+  retention passed it, now leaves the workload to an operator (reason 9,
+  history trimmed) instead of retrying. `felixd replay` and `felixd check`
+  say which stream and offset were trimmed.
 
 ## 0.1.0-preview.1
 

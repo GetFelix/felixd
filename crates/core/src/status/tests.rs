@@ -8,6 +8,7 @@ fn spec(state: WorkloadState, record: Option<u64>) -> WorkloadSpec {
         output: "wl.w.out".into(),
         snapshot_every: 10,
         snapshot_every_ms: None,
+        keep_snapshots: None,
         state,
         limits: Default::default(),
         failure: None,

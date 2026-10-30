@@ -363,3 +363,7 @@ composition.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
+
+No model has a trim action yet. A trim record is a fenced append that every reader passes over and
+that deletes nothing, so it can break no property the models check; the action and its twins come
+with deletion ([#151](https://github.com/GetFelix/felixd/issues/151)).

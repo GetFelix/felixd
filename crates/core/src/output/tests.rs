@@ -374,6 +374,10 @@ fn an_unknown_version_or_kind_is_refused() {
     record[0] = 5;
     assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(5)));
     record[0] = 4;
+    record[1] = 8;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(8)));
+    // A trim record is version 4 only.
+    record[0] = 3;
     record[1] = 7;
     assert_eq!(decode(&record), Err(DecodeError::UnknownKind(7)));
 }

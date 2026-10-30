@@ -33,6 +33,7 @@
 use crate::class::{ErrorClass, OperatorReason};
 use crate::codec::{DecodeError, Reader};
 use crate::names::validate_id;
+use crate::trim::Trim;
 
 const VERSION: u8 = 4;
 const UNNAMED: u8 = 3;
@@ -44,6 +45,7 @@ const REJECTION: u8 = 3;
 const CLAIM_UNDER: u8 = 4;
 const CLASSED_FAILURE: u8 = 5;
 const NEEDS_OPERATOR: u8 = 6;
+const TRIM: u8 = 7;
 
 /// The name an output gets when the workload gives none, and the one a
 /// downstream workload reads unless its spec says otherwise.
@@ -129,6 +131,10 @@ pub enum Record<'a> {
         reason: OperatorReason,
         detail: &'a [u8],
     },
+    /// The owner at `epoch` says history before the floors in `body` is no
+    /// longer read ([`crate::trim`]). It holds no output. `body` decodes with
+    /// [`Record::trim`].
+    Trim { epoch: u64, body: &'a [u8] },
 }
 
 impl<'a> Record<'a> {
@@ -138,7 +144,16 @@ impl<'a> Record<'a> {
             Record::Output(written, _) | Record::Rejection(written, _) => written.epoch,
             Record::Claim { epoch, .. }
             | Record::Failure { epoch, .. }
-            | Record::NeedsOperator { epoch, .. } => *epoch,
+            | Record::NeedsOperator { epoch, .. }
+            | Record::Trim { epoch, .. } => *epoch,
+        }
+    }
+
+    /// The trim a trim record holds.
+    pub fn trim(&self) -> Option<Trim> {
+        match self {
+            Record::Trim { body, .. } => crate::trim::decode_body(body).ok(),
+            _ => None,
         }
     }
 
@@ -146,7 +161,10 @@ impl<'a> Record<'a> {
     pub fn written(&self) -> Option<Written> {
         match self {
             Record::Output(written, _) | Record::Rejection(written, _) => Some(*written),
-            Record::Claim { .. } | Record::Failure { .. } | Record::NeedsOperator { .. } => None,
+            Record::Claim { .. }
+            | Record::Failure { .. }
+            | Record::NeedsOperator { .. }
+            | Record::Trim { .. } => None,
         }
     }
 
@@ -296,6 +314,14 @@ pub fn encode_needs_operator(
     out
 }
 
+/// Builds the trim record an owner at `epoch` appends.
+pub fn encode_trim(epoch: u64, trim: &Trim) -> Vec<u8> {
+    let mut out = vec![VERSION, TRIM];
+    out.extend(epoch.to_be_bytes());
+    crate::trim::encode_body(trim, &mut out);
+    out
+}
+
 /// Reads an output stream record.
 pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     let mut r = Reader::new(record);
@@ -347,6 +373,11 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
             reason: OperatorReason::from_code(u16::from_be_bytes(r.array()?))?,
             detail: r.rest(),
         }),
+        TRIM => {
+            let body = r.rest();
+            crate::trim::decode_body(body)?;
+            Ok(Record::Trim { epoch, body })
+        }
         REJECTION => {
             let input_offset = r.u64()?;
             let index = r.u32()?;
@@ -411,7 +442,7 @@ fn kind_after(version: u8, r: &mut Reader<'_>) -> Result<u8, DecodeError> {
     if !matches!(kind, OUTPUT | CLAIM | FAILURE)
         && !(matches!(
             kind,
-            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR
+            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM
         ) && version == VERSION)
     {
         return Err(DecodeError::UnknownKind(kind));
@@ -431,14 +462,14 @@ fn kind_of(record: &[u8]) -> Result<u8, DecodeError> {
     kind_after(version, &mut r)
 }
 
-/// Whether `record` is a claim, a failure or a needs-operator record, which
+/// Whether `record` is a claim, a failure, a needs-operator or a trim record, which
 /// no step produced, judged by its version and kind bytes only. The
 /// owner's own checks pass over them; rejections are not passed over, since
 /// they stand in for an input's outputs.
 pub fn is_marker(record: &[u8]) -> bool {
     matches!(
         kind_of(record),
-        Ok(CLAIM | CLAIM_UNDER | FAILURE | CLASSED_FAILURE | NEEDS_OPERATOR)
+        Ok(CLAIM | CLAIM_UNDER | FAILURE | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM)
     )
 }
 

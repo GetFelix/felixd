@@ -14,6 +14,7 @@
 //! - [`replay`]: where a replay starts and stops.
 //! - [`check`]: what is wrong with an output stream, against a replay.
 //! - [`status`]: what `felixd ps` says about a workload, from its records.
+//! - [`trim`]: where history may be trimmed, by the last snapshots kept.
 
 pub mod check;
 pub mod class;
@@ -29,6 +30,7 @@ pub mod resume;
 pub mod snapshot;
 pub mod spec;
 pub mod status;
+pub mod trim;
 
 mod codec;
 
