@@ -584,8 +584,7 @@ async fn recorded_needs_operator(felix: &Felix, spec: &WorkloadSpec) -> Result<O
 fn parked_by(found: &[u8], record: u64) -> Option<String> {
     match output::decode(found) {
         Ok(found) => found.needs_operator_under(record).map(|r| r.to_string()),
-        Err(error) => (output::needs_operator_spec_of(found) == Some(record))
-            .then(|| format!("a reason this build cannot read ({error})")),
+        Err(_) => None,
     }
 }
 
