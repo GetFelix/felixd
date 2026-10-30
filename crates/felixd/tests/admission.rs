@@ -559,7 +559,7 @@ async fn a_record_naming_a_decision_without_admission_slows_nothing() {
     assert!(t.run("first", &counter, INPUT, &[]).success());
     let mut odd = SpecRecord::new(
         "odd",
-        admission::running("odd", &module::hash(&counter), vec![]),
+        admission::running("odd", &module::hash(&counter), vec![INPUT.to_owned()]),
     );
     odd.admitted = Some(0);
     append_record(&t, &odd).await;
