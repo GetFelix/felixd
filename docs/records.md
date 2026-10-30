@@ -206,6 +206,30 @@ workload spec as below with `state` `running` or `stopped`. A reader refuses ano
 record's offset is the spec's version, so a later record for an id supersedes an earlier one and
 the stream is the spec history. Records are never rewritten; `failed` stays in the cache.
 
+A record that admission's projector wrote also has `admitted`, the `wl.admission.out` offset of
+the decision that accepted it. Once a record for `admission` is on the stream, a node runs a later
+record of any other workload only if `admitted` names a decision accepting that workload and
+exactly that spec; otherwise the spec needs an operator with reason `spec_unadmitted` (code 10),
+which is logged and counted but not written to the output stream. A record that does not decode
+counts as admission's, so a node fails closed on one from a newer build.
+
+## Requests and decisions
+
+Requests are on `sys.intake`, one shard. Each is JSON: `format` (1), `id`, the workload id, `spec`,
+a workload spec as below with no `record` or `failure`, `module_bytes`, the module's length, and
+`replication_factor`. Who asked is not in the payload, which a publisher can fill with anything.
+
+Admission's outputs on `wl.admission.out` are ordinary output records under the name `out`, keyed
+by the workload id (no key for a request that did not decode). Each payload is JSON: `format` (1),
+`request`, the `sys.intake` offset it answers, `id`, and `outcome`:
+
+- `accepted`, with `spec`, `module_bytes` and `replication_factor` as asked.
+- `rejected`, with `reason` and `detail`, for people. Reasons and their codes: `unreadable` (1),
+  `invalid_id` (2), `reserved` (3), `invalid_inputs` (4), `invalid_spec` (5), `over_limit` (6),
+  `module_too_large` (7).
+
+Every request gets exactly one decision. A reader refuses another format.
+
 ## Node facts and assignments
 
 Node facts are on `sys.facts`, one shard, and are the scheduler's second input. Each is

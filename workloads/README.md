@@ -13,6 +13,10 @@ key, and snapshot their state as one chunk.
 `scheduler` is the placement scheduler, which felixd runs as an ordinary workload. It reads spec
 records and node facts and writes assignments; see [scheduler/README.md](scheduler/README.md).
 
+`admission` decides requests on `sys.intake`, one decision each, accepting the spec or rejecting it
+with a reason code; see [admission/README.md](admission/README.md). `admission-strict` is the same
+component under a stricter policy, which the tests replay against admission's recorded requests.
+
 They are a separate cargo workspace because they build for `wasm32-unknown-unknown`. The tests in
 `felixd-runtime` build them on demand with `felixd-testkit` and run them in wasmtime:
 

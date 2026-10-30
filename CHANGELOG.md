@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Admission (#114). `felixd init admission.wasm` brings up the admission
+  workload, reading the new `sys.intake` stream; it is the one spec still
+  written directly. From then on `felixd run` uploads the module, publishes a
+  request on `sys.intake` and prints admission's decision with how long it
+  took, exiting 1 on a rejection, and needs no control plane token. Admission
+  outputs one decision per request on `wl.admission.out`, accepting the spec
+  or rejecting it with a reason code (limits, module size, ids, inputs), and
+  decides from the request alone, so `felixd replay --id admission --diff
+  --all --module <hash>` lists the recorded requests a new policy decides
+  otherwise (`--all` is new). The node holding admission's lease records
+  each accepted decision on `sys.specs`, naming it, after checking the
+  module's hash and length and creating the streams; only nodes with a control
+  plane token hold admission. A node then runs a spec record written after
+  admission's own only if it names a decision that accepted exactly that
+  spec; any other needs an operator with the new reason `spec_unadmitted` and
+  never claims. New fault `crash-after-projection-sent=N` for tests.
+- Upgrading for admission: run `init` only once every node runs this build,
+  since an older node ignores admission. Without `init` nothing changes. The
+  requester, grants (#117) and quotas are not built; see
+  [Submitting work](docs/design.md#submitting-work).
 - felixd keeps its Felix and control plane tokens out of what it writes
   (part of #74). They are held in a type whose `Debug` and `Display` print a
   placeholder, and a new integration test runs a workload through a failover
