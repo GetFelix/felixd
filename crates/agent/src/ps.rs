@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use felixd_core::lease::Lease;
-use felixd_core::node::NodeInfo;
+use felixd_core::node::{self, Drain, NodeInfo};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::status::{self, Found, State};
 use felixd_core::{merge, names, output};
@@ -72,6 +72,8 @@ pub struct Node {
     pub info: Option<NodeInfo>,
     /// Whether it is marked in `drains`.
     pub draining: bool,
+    /// The mark, if this build reads it.
+    pub mark: Option<Drain>,
     /// How many live leases name it.
     pub leases: usize,
 }
@@ -81,7 +83,7 @@ impl Node {
     /// under way. A node of an older build, or one that cannot read
     /// `drains`, never does.
     pub fn acknowledged(&self) -> bool {
-        self.info.as_ref().is_some_and(|i| i.draining)
+        node::acknowledges(self.info.as_ref(), self.mark.as_ref())
     }
 }
 
@@ -90,7 +92,8 @@ impl Node {
 pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
     let felix = Felix::connect(settings).await?;
     let leases: HashMap<String, Lease> = drain::leases(&felix).await?.into_iter().collect();
-    let draining: BTreeSet<String> = drain::draining(&felix).await?.into_iter().collect();
+    let marks = drain::draining(&felix).await?;
+    let draining: BTreeSet<String> = marks.iter().map(|(n, _)| n.clone()).collect();
     let specs = felix.entries(names::WORKLOADS).await?;
     let mut workloads = Vec::new();
     for (id, value) in specs {
@@ -130,8 +133,10 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
         entry.up = true;
         entry.info = NodeInfo::decode(&value).ok();
     }
-    for id in &draining {
-        node_entry(&mut nodes, id).draining = true;
+    for (id, mark) in marks {
+        let entry = node_entry(&mut nodes, &id);
+        entry.draining = true;
+        entry.mark = mark;
     }
     for lease in leases.values() {
         node_entry(&mut nodes, &lease.owner).leases += 1;
@@ -148,6 +153,7 @@ fn node_entry<'a>(nodes: &'a mut BTreeMap<String, Node>, id: &str) -> &'a mut No
         up: false,
         info: None,
         draining: false,
+        mark: None,
         leases: 0,
     })
 }

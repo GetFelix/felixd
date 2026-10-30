@@ -267,25 +267,37 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+            let felix = felixd_agent::felix::Felix::connect(&settings).await?;
+            let mut last = None;
             loop {
-                let progress = drain::progress(&settings, &node).await?;
-                if progress.done() {
-                    println!("node {node} holds no leases and claims nothing");
-                    return Ok(());
+                // Each read is bounded so the timeout holds; a failed one is
+                // tried again until then.
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match tokio::time::timeout(left, drain::progress(&felix, &node)).await {
+                    Ok(Ok(progress)) if progress.done() => {
+                        println!("node {node} holds no leases and claims nothing");
+                        return Ok(());
+                    }
+                    Ok(Ok(progress)) => last = Some(progress),
+                    Ok(Err(error)) => eprintln!("reading the drain's progress: {error:#}"),
+                    Err(_) => {}
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    if !progress.held.is_empty() {
-                        eprintln!("node {node} still holds {}", progress.held.join(", "));
-                    }
-                    if !progress.acknowledged {
-                        eprintln!(
-                            "node {node} has not said it read its drain mark; a node of an \
-                             older build, or one without read on the drains cache, never does"
-                        );
+                    eprintln!("node {node} has not finished draining after {timeout_secs} s");
+                    if let Some(progress) = last {
+                        if !progress.held.is_empty() {
+                            eprintln!("it still holds {}", progress.held.join(", "));
+                        }
+                        if !progress.acknowledged {
+                            eprintln!(
+                                "it has not said it read this drain mark; a node of an older \
+                                 build, or one without read on the drains cache, never does"
+                            );
+                        }
                     }
                     std::process::exit(1);
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(500).min(left)).await;
             }
         }
         Command::Undrain { connection, node } => {

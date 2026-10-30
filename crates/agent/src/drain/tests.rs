@@ -15,7 +15,7 @@ fn a_mark_this_build_cannot_read_still_drains() {
     let newer = Bytes::from_static(br#"{"format": 9, "value": {}}"#);
     assert!(reads.decide(Lookup::Value(Some(newer.clone()))).unwrap());
     assert!(reads.decide(Lookup::Value(Some(newer))).unwrap());
-    let ours = Bytes::from(Drain {}.encode());
+    let ours = Bytes::from(Drain { nonce: 5 }.encode());
     assert!(reads.decide(Lookup::Value(Some(ours))).unwrap());
     assert!(reads.decide(Lookup::NoCache).is_err());
 }
@@ -33,4 +33,19 @@ fn a_drain_is_done_once_the_node_holds_nothing_and_has_said_so_or_is_down() {
     assert!(!progress(true, false, &[]).done());
     assert!(!progress(true, true, &["w"]).done());
     assert!(!progress(false, false, &["w"]).done());
+}
+
+#[test]
+fn the_nonce_of_the_last_mark_read_is_kept_until_the_mark_goes() {
+    let reads = MarkReads::default();
+    let mark = |nonce| Lookup::Value(Some(Bytes::from(Drain { nonce }.encode())));
+    reads.decide(mark(5)).unwrap();
+    assert_eq!(reads.nonce(), Some(5));
+    reads.decide(mark(6)).unwrap();
+    assert_eq!(reads.nonce(), Some(6));
+    // Unknown, so the node keeps what it read.
+    assert!(reads.decide(Lookup::NoCache).is_err());
+    assert_eq!(reads.nonce(), Some(6));
+    reads.decide(Lookup::Value(None)).unwrap();
+    assert_eq!(reads.nonce(), None);
 }

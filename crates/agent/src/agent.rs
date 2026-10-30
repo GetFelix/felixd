@@ -314,7 +314,9 @@ async fn announce(node: Arc<Node>) {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             max_workloads: node.max_workloads,
             held: node.held.load(Ordering::Relaxed),
-            draining: draining && node.claiming.load(Ordering::SeqCst) == 0,
+            draining: (draining && node.claiming.load(Ordering::SeqCst) == 0)
+                .then(|| node.mark_reads.nonce())
+                .flatten(),
         };
         let put = node
             .felix

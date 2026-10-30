@@ -18,15 +18,12 @@ pub struct NodeInfo {
     pub max_workloads: usize,
     /// How many it holds now.
     pub held: usize,
-    /// It has read its drain mark and has no claim under way, so it will
-    /// claim nothing until the mark is gone. Left out when false, so an
-    /// entry that is not draining reads the same as before the field.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub draining: bool,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
+    /// The nonce of the drain mark it has read, once it also has no claim
+    /// under way, so it will claim nothing until that mark is gone. Left
+    /// out when there is none, so an entry that is not draining reads the
+    /// same as before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draining: Option<u64>,
 }
 
 impl NodeInfo {
@@ -42,7 +39,23 @@ impl NodeInfo {
 /// The value in `drains` under a node's id: an operator wants the node to
 /// give up its leases and claim nothing until the mark is deleted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Drain {}
+pub struct Drain {
+    /// Picked by whoever writes the mark, never 0. A node echoes it in
+    /// [`NodeInfo::draining`], so an acknowledgement of an earlier mark is
+    /// not taken for this one.
+    #[serde(default)]
+    pub nonce: u64,
+}
+
+/// Whether `info` acknowledges `mark`: the node has read that very mark and
+/// has no claim under way. A mark this build cannot read is never
+/// acknowledged.
+pub fn acknowledges(info: Option<&NodeInfo>, mark: Option<&Drain>) -> bool {
+    match (info.and_then(|i| i.draining), mark) {
+        (Some(acked), Some(mark)) => mark.nonce != 0 && acked == mark.nonce,
+        _ => false,
+    }
+}
 
 impl Drain {
     pub fn encode(&self) -> Vec<u8> {

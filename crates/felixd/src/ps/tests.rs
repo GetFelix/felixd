@@ -1,7 +1,7 @@
 use felixd_agent::ps::{Node, Position, Report, Workload};
 use felixd_core::class::{ErrorClass, Failure};
 use felixd_core::lease::Lease;
-use felixd_core::node::NodeInfo;
+use felixd_core::node::{Drain, NodeInfo};
 use felixd_core::status::{Parked, State};
 
 use super::render;
@@ -32,9 +32,10 @@ fn node(id: &str, up: bool, draining: bool, leases: usize) -> Node {
             version: "0.1.0".into(),
             max_workloads: 64,
             held: leases,
-            draining,
+            draining: draining.then_some(1),
         }),
         draining,
+        mark: draining.then_some(Drain { nonce: 1 }),
         leases,
     }
 }
@@ -139,7 +140,8 @@ fn waiting_with_every_node_draining_says_so() {
 #[test]
 fn a_mark_the_node_has_not_acknowledged_is_pending_and_an_unreadable_entry_is_up() {
     let mut old = node("old", true, true, 1);
-    old.info.as_mut().unwrap().draining = false;
+    // An acknowledgement left from an earlier mark.
+    old.info.as_mut().unwrap().draining = Some(0x5eed);
     let mut newer = node("newer", true, false, 0);
     newer.info = None;
     let report = Report {

@@ -562,13 +562,17 @@ in a process that was stopped, so a drained node takes no new work. A read
 that fails means no claim, so a node needs read on `drains`. A broker that
 answers that it does not know the cache counts as "not draining" only until
 the node has once found the cache: after that it is a broker restarting or not
-serving it yet, and the answer is unknown. Tasks for new specs still start on
-a drained node, but they wait until the mark is gone.
+serving it yet, and the answer is unknown. That is kept per process, so a node
+that restarts while the broker does not serve `drains` yet reads "not
+draining" until it finds the cache. Tasks for new specs still start on a
+drained node, but they wait until the mark is gone.
 
 A claim that read the mark just before it was written can still land. So a
-node counts its claims between that read and the end of the claim, and says
-`draining` in its `nodes` entry only once it has read its mark and none are
-under way. Any claim it starts after that finds the mark.
+node counts its claims between that read and the end of the claim, and puts
+the mark's nonce in its `nodes` entry as `draining` only once it has read the
+mark and none are under way. Any claim it starts after that finds the mark.
+`felixd drain` picks a new nonce for each mark, so an acknowledgement left
+from an earlier drain, before an undrain, does not count for this one.
 
 A drain needs nothing new for safety. Releasing is what a clean shutdown
 already does, and a write the old holder still has in flight meets the new
@@ -578,7 +582,7 @@ followed at once by the lease expiring, which the model already explores. Two
 things are not guaranteed: a node of an older build ignores the mark, and a
 node that cannot read the mark keeps what it holds while its renewals still
 succeed. `felixd drain --wait` returns once no live lease names the node and
-the node says `draining`, or it is down, since its leases expire. A node that
+the node acknowledges this mark, or it is down, since its leases expire. A node that
 is stopped with a claim under way is not up and can land the claim when it
 wakes; it releases it at its next read. `--wait` gives up after
 `--timeout-secs` (300) with exit code 1, which is what a node of an older build

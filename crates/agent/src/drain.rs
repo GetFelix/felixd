@@ -3,27 +3,34 @@
 //! deletes its lease, so another node can claim it at once, and claims
 //! nothing until the mark is deleted.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use felixd_core::lease::Lease;
 use felixd_core::names;
-use felixd_core::node::{Drain, NodeInfo};
+use felixd_core::node::{self, Drain, NodeInfo};
 
 use crate::admin::{self, StreamKind};
 use crate::faults;
 use crate::felix::{Felix, Lookup};
 use crate::settings::Settings;
 
-/// Marks `node` as draining. Creates the `drains` cache with
-/// `replication_factor` replicas if it does not exist.
+/// Marks `node` as draining, with a new nonce. Creates the `drains` cache
+/// with `replication_factor` replicas if it does not exist.
 pub async fn mark(settings: &Settings, node: &str, replication_factor: u32) -> Result<()> {
     let kind = StreamKind { replication_factor };
     admin::ensure_cache(settings, names::DRAINS, kind).await?;
     let felix = Felix::connect(settings).await?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let mark = Drain {
+        nonce: (nanos ^ (u64::from(std::process::id()) << 32)) | 1,
+    };
     felix
-        .cache_put(names::DRAINS, node, Bytes::from(Drain {}.encode()))
+        .cache_put(names::DRAINS, node, Bytes::from(mark.encode()))
         .await
 }
 
@@ -52,6 +59,9 @@ pub(crate) struct MarkReads {
     found_cache: AtomicBool,
     /// The warning about a mark this build cannot read has been logged.
     warned: AtomicBool,
+    /// The nonce of the mark last read, 0 for none or one this build
+    /// cannot read.
+    nonce: AtomicU64,
 }
 
 impl MarkReads {
@@ -66,6 +76,11 @@ impl MarkReads {
         self.decide(faults::drain_lookup(found))
     }
 
+    /// The nonce of the mark last read, if there is one this build reads.
+    pub(crate) fn nonce(&self) -> Option<u64> {
+        Some(self.nonce.load(Ordering::SeqCst)).filter(|&n| n != 0)
+    }
+
     /// A broker that does not know the cache is believed only until a read
     /// has found it: after that it is a broker restarting or not yet serving
     /// it, and the answer is unknown, never "not draining".
@@ -75,16 +90,24 @@ impl MarkReads {
                 "the broker does not serve the {} cache, which this node has read before",
                 names::DRAINS
             ),
-            Lookup::NoCache => Ok(false),
+            Lookup::NoCache => {
+                self.nonce.store(0, Ordering::SeqCst);
+                Ok(false)
+            }
             Lookup::Value(value) => {
                 self.found_cache.store(true, Ordering::SeqCst);
                 let Some(value) = value else {
+                    self.nonce.store(0, Ordering::SeqCst);
                     return Ok(false);
                 };
-                if let Err(error) = Drain::decode(&value)
-                    && !self.warned.swap(true, Ordering::SeqCst)
-                {
-                    tracing::warn!(%error, "a drain mark this build cannot read, draining anyway");
+                match Drain::decode(&value) {
+                    Ok(mark) => self.nonce.store(mark.nonce, Ordering::SeqCst),
+                    Err(error) => {
+                        self.nonce.store(0, Ordering::SeqCst);
+                        if !self.warned.swap(true, Ordering::SeqCst) {
+                            tracing::warn!(%error, "a drain mark this build cannot read, draining anyway");
+                        }
+                    }
                 }
                 Ok(true)
             }
@@ -97,8 +120,8 @@ impl MarkReads {
 pub struct Progress {
     /// Whether the node has an entry in `nodes`.
     pub up: bool,
-    /// Whether the node has said it read its mark and has no claim under
-    /// way.
+    /// Whether the node has said it read the current mark and has no claim
+    /// under way. An acknowledgement of an earlier mark does not count.
     pub acknowledged: bool,
     /// The workloads whose live lease names it.
     pub held: Vec<String>,
@@ -116,14 +139,13 @@ impl Progress {
 
 /// Reads how far draining `node` has got. The node's entry is read before
 /// the leases, so a lease it took before saying it was draining is seen.
-pub async fn progress(settings: &Settings, node: &str) -> Result<Progress> {
-    let felix = Felix::connect(settings).await?;
+pub async fn progress(felix: &Felix, node: &str) -> Result<Progress> {
+    let mark = felix.cache_get(names::DRAINS, node).await?;
+    let mark = mark.and_then(|m| Drain::decode(&m).ok());
     let entry = felix.cache_get(names::NODES, node).await?;
-    let acknowledged = entry
-        .as_ref()
-        .and_then(|e| NodeInfo::decode(e).ok())
-        .is_some_and(|info| info.draining);
-    let held = leases(&felix)
+    let info = entry.as_ref().and_then(|e| NodeInfo::decode(e).ok());
+    let acknowledged = node::acknowledges(info.as_ref(), mark.as_ref());
+    let held = leases(felix)
         .await?
         .into_iter()
         .filter(|(_, lease)| lease.owner == node)
@@ -147,13 +169,13 @@ pub(crate) async fn leases(felix: &Felix) -> Result<Vec<(String, Lease)>> {
         .collect())
 }
 
-/// The nodes marked as draining.
-pub(crate) async fn draining(felix: &Felix) -> Result<Vec<String>> {
+/// The nodes marked as draining, with each mark if this build reads it.
+pub(crate) async fn draining(felix: &Felix) -> Result<Vec<(String, Option<Drain>)>> {
     Ok(felix
         .entries(names::DRAINS)
         .await?
         .into_iter()
-        .map(|(node, _)| node)
+        .map(|(node, mark)| (node, Drain::decode(&mark).ok()))
         .collect())
 }
 
