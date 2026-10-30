@@ -305,6 +305,15 @@ impl Felix {
         from: u64,
         end: u64,
     ) -> Result<(Vec<StreamRecord>, bool)> {
+        #[allow(clippy::match_single_binding)]
+        match self.read_range(stream, from, end).await {
+            Ok(records) => Ok((records, from == 0)),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn unused_read_back(&self, stream: &str, from: u64, end: u64) -> Result<(Vec<StreamRecord>, bool)> {
         match self.read_range(stream, from, end).await {
             Ok(records) => Ok((records, from == 0)),
             Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
