@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ID, INPUT, LEASE_TTL, OUTPUT, TestFelix, eventually, test_felix};
-use felixd_agent::admin::{StreamKind, delete_stream, ensure_stream};
+use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_core::class::{ErrorClass, OperatorReason};
 use felixd_core::names;
 use felixd_core::output::{self, Record};
@@ -250,33 +250,24 @@ async fn a_failure_found_while_recording_fails_the_spec() {
     assert_eq!(t.needs_operator().await.0, []);
 }
 
-/// The upstream's stream is deleted and created again while the downstream
-/// is down. The new stream ends before the inputs the downstream already
-/// stepped, so it needs an operator instead of stepping the new stream's
-/// records as if they continued the old one.
+/// The downstream's output says it stepped inputs past the end of its input
+/// stream, which is what an upstream stream deleted and created again looks
+/// like from the downstream. Felix 0.6.2 leaves a recreated stream's shard
+/// unplaced in the single-broker test setup, so the test writes that output
+/// instead of recreating the stream. The node needs an operator rather than
+/// waiting for the new stream to reach offsets the old one held.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_recreated_upstream_shorter_than_what_was_read_needs_an_operator() {
+async fn an_input_that_ends_below_what_was_stepped_needs_an_operator() {
     let Some(t) = test_felix().await else { return };
     let up = "wl.up.out";
     let kind = StreamKind {
         replication_factor: common::replication_factor(),
     };
     ensure_stream(&t.settings, up, kind).await.unwrap();
-    let outputs = |from: u64, n: u64| {
-        (from..from + n)
-            .map(|i| {
-                output::encode(
-                    output::OutputHeader {
-                        input_offset: i,
-                        index: 0,
-                    },
-                    1,
-                    &count(i),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    t.publish_if(up, outputs(0, 4), 0).await;
+    let records: Vec<Vec<u8>> = (0..4)
+        .map(|i| output::encode(header(i), 1, &count(i)))
+        .collect();
+    t.publish_if(up, records, 0).await;
     let module = felixd_testkit::workload("counter");
     assert!(t.run(ID, &module, up, &[]).success());
     let mut agent = t.start_agent();
@@ -286,23 +277,20 @@ async fn a_recreated_upstream_shorter_than_what_was_read_needs_an_operator() {
     .await;
     agent.kill();
 
-    delete_stream(&t.settings, up).await.unwrap();
-    ensure_stream(&t.settings, up, kind).await.unwrap();
-    // Brokers learn of the delete and the new stream from the catalog after
-    // the control plane answers.
-    eventually("the new stream", Duration::from_secs(60), || async {
-        matches!(t.felix.tail(up).await, Ok(0)).then_some(())
-    })
-    .await;
-    t.publish_if(up, outputs(0, 1), 0).await;
+    let (epoch, tail) = last_epoch(&t).await;
+    t.publish_if(OUTPUT, vec![output::encode(header(100), epoch, b"")], tail)
+        .await;
     let _agent = t.start_agent();
     assert_eq!(
         t.needs_operator_recorded().await,
         OperatorReason::InputBehind
     );
-    assert_eq!(
-        t.outputs(OUTPUT).await.len(),
-        4,
-        "it stepped the new stream"
-    );
+    assert_eq!(t.outputs(OUTPUT).await.len(), 5);
+}
+
+fn header(input_offset: u64) -> output::OutputHeader {
+    output::OutputHeader {
+        input_offset,
+        index: 0,
+    }
 }
