@@ -261,3 +261,18 @@ fn reordering_the_inputs_conflicts_with_written_history() {
     next.inputs.reverse();
     assert!(joined().conflicts_with_history(&next).is_some());
 }
+
+#[test]
+fn history_passes_over_skip_records() {
+    let mut skip = SpecRecord::new("temp", spec());
+    skip.admitted = Some(4);
+    skip.skipped = true;
+    let encoded = skip.encode();
+    assert_eq!(SpecRecord::decode(&encoded).unwrap(), skip);
+    let records = [(0, encoded)];
+    let history = History::read("temp", records.iter().map(|(o, r)| (*o, r.as_slice()))).unwrap();
+    assert_eq!(history.latest(), None);
+    // A record that is not a skip encodes as before.
+    let plain = SpecRecord::new("temp", spec()).encode();
+    assert!(!String::from_utf8(plain).unwrap().contains("skipped"));
+}

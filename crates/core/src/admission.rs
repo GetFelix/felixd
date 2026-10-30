@@ -347,13 +347,14 @@ pub fn admits(output: &[u8], id: &str, spec: &WorkloadSpec) -> Result<(), String
     }
 }
 
-/// Whether a spec record of workload `id` at `sys.specs` offset `at` must
-/// name an accepting decision, given the offset of the first record that
-/// could be admission's own (`admission_from`). System workloads' records are
-/// written by an operator and need none; records before admission was
-/// bootstrapped predate it.
-pub fn needs_decision(id: &str, at: u64, admission_from: Option<u64>) -> bool {
-    !names::is_system(id) && admission_from.is_some_and(|from| from < at)
+/// Whether a spec record of workload `id` must name an accepting decision,
+/// given whether admission's own record, `felixd init`'s marker, is anywhere
+/// on `sys.specs` (`admission_runs`). System workloads' records are written by
+/// an operator and need none. Every other record does once the marker is
+/// there, including one written before it: otherwise pointing `workloads`
+/// back at such a record would undo any later change or stop.
+pub fn needs_decision(id: &str, admission_runs: bool) -> bool {
+    admission_runs && !names::is_system(id)
 }
 
 /// The end of a one-record read of decision `decision` on

@@ -74,6 +74,9 @@ pub(crate) async fn read_record(felix: &Felix, id: &str, offset: u64) -> Result<
         ))
         .into());
     }
+    if record.skipped {
+        return Err(unrecorded(format!("the record at {at} is a skip record, not a spec")).into());
+    }
     Ok(record)
 }
 

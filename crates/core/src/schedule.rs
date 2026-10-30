@@ -221,7 +221,8 @@ impl Scheduler {
                 spec_step = true;
                 let record = SpecRecord::decode(payload).map_err(Refused::Spec)?;
                 // The scheduler is placed by first claim wins, never by itself.
-                if record.id != names::SCHEDULER {
+                // A skip record is not a spec.
+                if record.id != names::SCHEDULER && !record.skipped {
                     wanted_changed = if record.spec.state == WorkloadState::Running {
                         self.wanted.insert(record.id)
                     } else {

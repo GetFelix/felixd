@@ -578,7 +578,8 @@ async fn a_skipped_acceptance_stays_skipped_after_the_projector_restarts() {
     let a = t.start_agent();
     admission_held_by(&t, &a.node_id).await;
 
-    // Accepted, then skipped by the projector: its module is not uploaded.
+    // Accepted, then skipped by the projector with a skip record: its module
+    // is not uploaded.
     let window = felixd_testkit::workload("window");
     let spec = admission::running("skipped", &module::hash(&window), vec![INPUT.to_owned()]);
     let request = Request::new("skipped", spec, window.len() as u64, replication_factor());
@@ -610,8 +611,13 @@ async fn a_skipped_acceptance_stays_skipped_after_the_projector_restarts() {
     drop(a);
     admission_held_by(&t, &b.node_id).await;
     assert!(t.run("last", &counter, INPUT, &[]).success());
+    let skipped: Vec<_> = records(&t)
+        .await
+        .into_iter()
+        .filter(|(_, r)| r.id == "skipped")
+        .collect();
     assert!(
-        records(&t).await.iter().all(|(_, r)| r.id != "skipped"),
-        "a restarted projector recorded an acceptance its predecessor skipped"
+        matches!(&skipped[..], [(_, r)] if r.skipped),
+        "a restarted projector recorded an acceptance its predecessor skipped: {skipped:?}"
     );
 }

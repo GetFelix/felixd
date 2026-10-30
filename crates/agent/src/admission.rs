@@ -49,9 +49,9 @@ pub(crate) struct Gate(StdMutex<Scanned>);
 struct Scanned {
     /// Every record below this has been folded.
     to: u64,
-    /// The first record that is admission's own, or does not decode and so
-    /// might be.
-    first: Option<u64>,
+    /// Whether a record is admission's own, `felixd init`'s marker, or does
+    /// not decode and so might be.
+    admission_runs: bool,
     /// Per workload, the records naming a decision.
     named: HashMap<String, Named>,
 }
@@ -69,6 +69,19 @@ struct Named {
     unverified: Vec<(u64, u64)>,
 }
 
+/// What reading a record's decision found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The decision accepted exactly the record's id and spec.
+    Verified,
+    /// It did not, and never will: records and decisions are never
+    /// rewritten.
+    Refused,
+    /// The decision is past the tail. It may yet be written, so the record
+    /// is read again next time rather than kept as unverified.
+    NotYet,
+}
+
 impl Named {
     fn note(&mut self, record: u64, decision: u64) {
         if self.verified.is_none_or(|(newest, _)| newest < decision) {
@@ -76,41 +89,51 @@ impl Named {
         }
     }
 
-    /// The record to read next: if it verifies, it is the newest.
-    fn candidate(&self) -> Option<(u64, u64)> {
-        self.unverified.iter().copied().max()
-    }
-
-    fn settle(&mut self, (decision, record): (u64, u64), verifies: bool) {
-        self.unverified.retain(|&found| found != (decision, record));
-        if verifies && self.verified.is_none_or(|(newest, _)| newest < decision) {
-            self.verified = Some((decision, record));
-            self.unverified.retain(|&(later, _)| later > decision);
+    fn settle(&mut self, (decision, record): (u64, u64), verdict: Verdict) {
+        match verdict {
+            Verdict::NotYet => {}
+            Verdict::Refused => self.unverified.retain(|&found| found != (decision, record)),
+            Verdict::Verified => {
+                self.unverified.retain(|&found| found != (decision, record));
+                if self.verified.is_none_or(|(newest, _)| newest < decision) {
+                    self.verified = Some((decision, record));
+                    self.unverified.retain(|&(later, _)| later > decision);
+                }
+            }
         }
     }
 }
 
 /// The newest verified `(decision, record)` of the records `with` gives
 /// access to, reading candidates newest first with `verify(record, decision)`
-/// and stopping at the first that verifies. `with` is called only between
-/// reads, so it can take a lock.
+/// and stopping at the first that verifies. Only definite verdicts are kept.
+/// `with` is called only between reads, so it can take a lock.
 async fn newest<V, Fut>(
     mut with: impl FnMut(&mut dyn FnMut(&mut Named)),
     mut verify: V,
 ) -> Result<Option<(u64, u64)>>
 where
     V: FnMut(u64, u64) -> Fut,
-    Fut: Future<Output = Result<bool>>,
+    Fut: Future<Output = Result<Verdict>>,
 {
+    let mut not_yet = Vec::new();
     loop {
         let mut next = Err(None);
-        with(&mut |named| next = named.candidate().ok_or(named.verified));
+        with(&mut |named| {
+            next = (named.unverified.iter().copied())
+                .filter(|found| !not_yet.contains(found))
+                .max()
+                .ok_or(named.verified);
+        });
         let candidate = match next {
             Ok(candidate) => candidate,
             Err(newest) => return Ok(newest),
         };
-        let verifies = verify(candidate.1, candidate.0).await?;
-        with(&mut |named| named.settle(candidate, verifies));
+        let verdict = verify(candidate.1, candidate.0).await?;
+        if verdict == Verdict::NotYet {
+            not_yet.push(candidate);
+        }
+        with(&mut |named| named.settle(candidate, verdict));
     }
 }
 
@@ -122,8 +145,8 @@ impl Gate {
     }
 
     /// Folds `sys.specs` up to `end`. A record that does not decode counts as
-    /// admission's, so a newer build's admission record is not missed.
-    /// Nothing here reads `wl.admission.out`, which a namespace without
+    /// admission's, so a newer build's admission record is not missed. Skip
+    /// records are not specs and do not count. Nothing here reads `wl.admission.out`, which a namespace without
     /// admission does not have.
     async fn fold(&self, felix: &Felix, end: u64) -> Result<()> {
         loop {
@@ -140,32 +163,29 @@ impl Gate {
             for record in page {
                 match SpecRecord::decode(&record.payload) {
                     Ok(found) => {
-                        if found.id == names::ADMISSION && scanned.first.is_none() {
-                            scanned.first = Some(record.offset);
-                        }
-                        if let Some(decision) = found.admitted {
+                        scanned.admission_runs |= found.id == names::ADMISSION;
+                        if let Some(decision) = found.admitted
+                            && !found.skipped
+                        {
                             let named = scanned.named.entry(found.id).or_default();
                             named.note(record.offset, decision);
                         }
                     }
-                    Err(_) => {
-                        scanned.first.get_or_insert(record.offset);
-                    }
+                    Err(_) => scanned.admission_runs = true,
                 }
             }
             scanned.to = after;
         }
     }
 
-    /// The first record below `at` that is, or might be, admission's own.
-    fn admission_before(&self, at: u64) -> Option<u64> {
-        self.scanned().first.filter(|&first| first < at)
+    fn admission_runs(&self) -> bool {
+        self.scanned().admission_runs
     }
 
-    fn settle(&self, id: &str, candidate: (u64, u64), verifies: bool) {
+    fn settle(&self, id: &str, candidate: (u64, u64), verdict: Verdict) {
         let mut scanned = self.scanned();
         let named = scanned.named.entry(id.to_owned()).or_default();
-        named.settle(candidate, verifies);
+        named.settle(candidate, verdict);
     }
 
     /// The newest verified `(decision, record)` of workload `id`'s records.
@@ -212,7 +232,7 @@ impl std::fmt::Display for Superseded {
 impl std::error::Error for Superseded {}
 
 /// Checks that spec record `record`, at `sys.specs` offset `at`, may run:
-/// either admission had not been bootstrapped before it, or it names a
+/// either admission's own record is nowhere on `sys.specs`, or it names a
 /// decision on `wl.admission.out` that accepted exactly its spec, and no
 /// record of the workload anywhere on `sys.specs` names a later decision that
 /// verifies, so an old acceptance cannot run over a later change or stop,
@@ -230,7 +250,7 @@ pub(crate) async fn check_admitted(
 ) -> Result<()> {
     let specs_tail = felix.tail(names::SPECS).await?;
     gate.fold(felix, specs_tail).await?;
-    if !admission::needs_decision(id, at, gate.admission_before(at)) {
+    if !admission::needs_decision(id, gate.admission_runs()) {
         return Ok(());
     }
     let unadmitted = |detail: String| NeedsOperator::new(OperatorReason::SpecUnadmitted, detail);
@@ -274,7 +294,7 @@ pub(crate) async fn check_admitted(
         ))
     })?;
     // This record verifies, so only records naming a later decision are read.
-    gate.settle(id, (decision, at), true);
+    gate.settle(id, (decision, at), Verdict::Verified);
     gate.compact(felix).await?;
     let Some((latest, by)) = gate
         .newest(felix, id)
@@ -338,12 +358,12 @@ async fn decisions_tail(felix: &Felix) -> Result<u64> {
     Ok(felix.tail_if_exists(&stream).await?.unwrap_or(0))
 }
 
-/// Whether the spec record at `record`, of workload `id` if one is given,
-/// names `decision` and that decision on `wl.admission.out` accepted exactly
-/// its spec. A decision past the tail, out of range or gone does not verify:
-/// the projector writes a record only after reading its decision, so the
-/// tail is read after the record.
-async fn verifies(felix: &Felix, id: Option<&str>, record: u64, decision: u64) -> Result<bool> {
+/// Whether the record at `record`, of workload `id` if one is given, names
+/// `decision` and that decision on `wl.admission.out` accepted exactly its id
+/// and spec. The tail is read after the record: the projector writes a record
+/// only after reading its decision, so an honest record's decision is below
+/// it, and one past it is [`Verdict::NotYet`], since it may yet be written.
+async fn verifies(felix: &Felix, id: Option<&str>, record: u64, decision: u64) -> Result<Verdict> {
     let found = felix
         .read_range(names::SPECS, record, record.saturating_add(1))
         .await?
@@ -351,47 +371,91 @@ async fn verifies(felix: &Felix, id: Option<&str>, record: u64, decision: u64) -
         .find(|r| r.offset == record)
         .with_context(|| format!("the folded record at {}:{record} is gone", names::SPECS))?;
     let Ok(found) = SpecRecord::decode(&found.payload) else {
-        return Ok(false);
+        return Ok(Verdict::Refused);
     };
     if found.admitted != Some(decision) || id.is_some_and(|id| id != found.id) {
-        return Ok(false);
+        return Ok(Verdict::Refused);
     }
     let Some(end) = admission::decision_end(decision, decisions_tail(felix).await?) else {
-        return Ok(false);
+        return Ok(match decision {
+            u64::MAX => Verdict::Refused,
+            _ => Verdict::NotYet,
+        });
     };
     let stream = names::output_stream(names::ADMISSION);
     let decisions = match felix.read_range(&stream, decision, end).await {
         Ok(decisions) => decisions,
-        Err(error) if Trimmed::of(&error).is_some() => return Ok(false),
+        Err(error) if Trimmed::of(&error).is_some() => return Ok(Verdict::Refused),
         Err(error) => return Err(error),
     };
-    Ok(decisions.into_iter().any(|r| {
+    let admits = decisions.into_iter().any(|r| {
         r.offset == decision && admission::admits(&r.payload, &found.id, &found.spec).is_ok()
-    }))
+    });
+    Ok(if admits {
+        Verdict::Verified
+    } else {
+        Verdict::Refused
+    })
+}
+
+/// The records on `sys.specs` naming decisions, as the projector reads them.
+#[derive(Default)]
+struct Recorded {
+    /// Every record, skip records included: the newest verified one is the
+    /// projector's progress.
+    all: Named,
+    /// Spec records alone, for pointing `workloads` again.
+    specs: Named,
+}
+
+impl Recorded {
+    fn note(&mut self, offset: u64, record: &SpecRecord) {
+        if let Some(decision) = record.admitted {
+            self.all.note(offset, decision);
+            if !record.skipped {
+                self.specs.note(offset, decision);
+            }
+        }
+    }
+}
+
+/// The newest verified `(decision, record)` among `named`, reading newest
+/// first, so usually one record.
+async fn newest_of(felix: &Felix, named: &mut Named) -> Result<Option<(u64, u64)>> {
+    newest(
+        |f| f(named),
+        |record, decision| verifies(felix, None, record, decision),
+    )
+    .await
 }
 
 /// What the projector knows of `sys.specs` and `wl.admission.out`.
 struct Projector {
     /// The tail of `sys.specs` as last read.
     specs_tail: u64,
-    /// The next decision to look at. Every earlier one is recorded or
-    /// skipped for good: a projector resumes after the newest decision
-    /// recorded on `sys.specs`, so an acceptance it passed over, such as one
-    /// whose module did not match, is never recorded later by another.
+    /// The next decision to look at. Every earlier one is recorded, skipped
+    /// with a skip record, or rejected. It comes from `sys.specs` alone, the
+    /// newest decision a verified record names, so a projector keeps nothing
+    /// of its own across a restart or a failover and never records a
+    /// decision another passed over.
     next: u64,
 }
 
 impl Projector {
     /// Resumes after the newest recorded decision and points `workloads` at
-    /// its record again, in case a projector stopped between the two.
+    /// the newest spec record again, in case a projector stopped between the
+    /// two.
     async fn start(felix: &Felix) -> Result<Projector> {
         let specs_tail = felix.tail(names::SPECS).await?;
         let mut projector = Projector {
             specs_tail: 0,
             next: 0,
         };
-        if let Some((decision, at)) = projector.newest_recorded(felix, specs_tail).await? {
+        let mut recorded = projector.read(felix, specs_tail).await?;
+        if let Some((decision, _)) = newest_of(felix, &mut recorded.all).await? {
             projector.next = decision.saturating_add(1);
+        }
+        if let Some((_, at)) = newest_of(felix, &mut recorded.specs).await? {
             let found = felix
                 .read_range(names::SPECS, at, at.saturating_add(1))
                 .await?
@@ -406,27 +470,19 @@ impl Projector {
         Ok(projector)
     }
 
-    /// Reads `sys.specs` from where it last read up to `end`. Returns the
-    /// newest `(decision, record)` those records name that verifies, reading
-    /// decisions newest first, so usually only one.
-    async fn newest_recorded(&mut self, felix: &Felix, end: u64) -> Result<Option<(u64, u64)>> {
-        let mut named = Named::default();
+    /// Reads `sys.specs` from where it last read up to `end`.
+    async fn read(&mut self, felix: &Felix, end: u64) -> Result<Recorded> {
+        let mut recorded = Recorded::default();
         while self.specs_tail < end {
             let (page, after) = felix.read_page(names::SPECS, self.specs_tail, end).await?;
             for found in page {
-                if let Ok(record) = SpecRecord::decode(&found.payload)
-                    && let Some(decision) = record.admitted
-                {
-                    named.note(found.offset, decision);
+                if let Ok(record) = SpecRecord::decode(&found.payload) {
+                    recorded.note(found.offset, &record);
                 }
             }
             self.specs_tail = after;
         }
-        newest(
-            |f| f(&mut named),
-            |record, decision| verifies(felix, None, record, decision),
-        )
-        .await
+        Ok(recorded)
     }
 
     async fn catch_up(&mut self, felix: &Felix, settings: &Settings) -> Result<()> {
@@ -454,8 +510,9 @@ impl Projector {
         Ok(())
     }
 
-    /// Records accepted decision `at` on `sys.specs`, unless another
-    /// projector already has, or has recorded a later one.
+    /// Records accepted decision `at` on `sys.specs`, or a skip record if its
+    /// module does not match, unless another projector has recorded it or a
+    /// later one. Each is a conditional append at the tail last read.
     async fn record(
         &mut self,
         felix: &Felix,
@@ -472,21 +529,23 @@ impl Projector {
             return Ok(());
         };
         let id = decision.id;
-        // Admission cannot read the cache, so presence and size are checked
-        // here. A spec whose module is wrong is never recorded, so it never
-        // runs.
-        if let Err(why) = module_matches(felix, &spec.module, module_bytes).await? {
-            tracing::error!(workload = %id, decision = at, %why, "not recording an accepted spec");
-            return Ok(());
-        }
-        let kind = StreamKind { replication_factor };
-        admin::ensure_stream(settings, &spec.output, kind).await?;
-        admin::ensure_stream(settings, &names::snapshot_stream(&id), kind).await?;
-        if spec.merged() {
-            admin::ensure_stream(settings, &names::merge_stream(&id), kind).await?;
-        }
         let mut record = SpecRecord::new(&id, spec.clone());
         record.admitted = Some(at);
+        // Admission cannot read the cache, so presence and size are checked
+        // here. A spec whose module is wrong is never recorded, so it never
+        // runs; the skip record says so for good, so no later projector
+        // records it once the module turns up.
+        if let Err(why) = module_matches(felix, &spec.module, module_bytes).await? {
+            tracing::error!(workload = %id, decision = at, %why, "skipping an accepted spec");
+            record.skipped = true;
+        } else {
+            let kind = StreamKind { replication_factor };
+            admin::ensure_stream(settings, &spec.output, kind).await?;
+            admin::ensure_stream(settings, &names::snapshot_stream(&id), kind).await?;
+            if spec.merged() {
+                admin::ensure_stream(settings, &names::merge_stream(&id), kind).await?;
+            }
+        }
         let payload = record.encode();
         let offset = loop {
             let sent = felix
@@ -499,7 +558,8 @@ impl Projector {
                     break offset;
                 }
                 ConditionalWrite::Refused { tail } => {
-                    if let Some((newest, _)) = self.newest_recorded(felix, tail).await?
+                    let mut recorded = self.read(felix, tail).await?;
+                    if let Some((newest, _)) = newest_of(felix, &mut recorded.all).await?
                         && newest >= at
                     {
                         self.next = self.next.max(newest.saturating_add(1));
@@ -508,6 +568,9 @@ impl Projector {
                 }
             }
         };
+        if record.skipped {
+            return Ok(());
+        }
         spec.record = Some(offset);
         // The record is in; only `workloads` is left, which is safe to retry
         // and is redone by the next projector to start.
@@ -622,7 +685,7 @@ pub async fn request(
             detail,
         }),
         Outcome::Accepted { .. } => {
-            let (_, record) = wait_for(felix, names::SPECS, specs_from, deadline, |payload| {
+            let (found, record) = wait_for(felix, names::SPECS, specs_from, deadline, |payload| {
                 SpecRecord::decode(payload)
                     .ok()
                     .filter(|r| r.admitted == Some(decision_at))
@@ -634,6 +697,14 @@ pub async fn request(
                      record names it yet; its module may not match what was uploaded"
                 )
             })?;
+            if found.skipped {
+                bail!(
+                    "admission accepted the request at {decisions}:{decision_at}, and its \
+                     projector skipped it at {}:{record} for good: the module did not match \
+                     what was uploaded; submit it again",
+                    names::SPECS
+                );
+            }
             Ok(Submitted::Accepted {
                 decision: decision_at,
                 record,

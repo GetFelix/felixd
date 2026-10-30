@@ -254,6 +254,12 @@ pub struct SpecRecord {
     /// for a record admission's projector wrote ([`crate::admission`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted: Option<u64>,
+    /// Set on a record saying admission's projector passed over the
+    /// accepted decision `admitted`, whose module did not match, for good.
+    /// It is not a version of the spec: nothing runs it, and readers of the
+    /// spec history pass over it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 impl SpecRecord {
@@ -263,6 +269,7 @@ impl SpecRecord {
             id: id.to_owned(),
             spec,
             admitted: None,
+            skipped: false,
         }
     }
 
@@ -300,7 +307,7 @@ impl History {
         let mut history = Vec::new();
         for (offset, bytes) in records {
             let record = SpecRecord::decode(bytes)?;
-            if record.id == id {
+            if record.id == id && !record.skipped {
                 history.push((offset, record.spec));
             }
         }

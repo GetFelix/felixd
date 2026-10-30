@@ -100,7 +100,7 @@ fn system_workloads_are_refused_through_intake_and_need_no_decision() {
     // it is reserved and exempt together.
     for id in names::SYSTEM {
         assert_eq!(rejected(&decided(&request(id))), Reason::Reserved, "{id}");
-        assert!(!needs_decision(id, 10, Some(9)), "{id}");
+        assert!(!needs_decision(id, true), "{id}");
     }
     assert!(names::is_system(names::SCHEDULER));
 }
@@ -202,10 +202,11 @@ fn only_an_accepting_decision_for_exactly_the_spec_admits() {
 }
 
 #[test]
-fn records_after_admissions_first_need_a_decision() {
-    assert!(!needs_decision("wl", 5, None));
-    assert!(!needs_decision("wl", 5, Some(9)));
-    assert!(needs_decision("wl", 10, Some(9)));
-    assert!(!needs_decision(names::ADMISSION, 10, Some(9)));
-    assert!(!needs_decision(names::SCHEDULER, 10, Some(9)));
+fn every_record_needs_a_decision_once_admission_runs() {
+    assert!(!needs_decision("wl", false));
+    // Including one written before admission's own record: the model's
+    // BeforeAt twin points `workloads` back at it after a stop.
+    assert!(needs_decision("wl", true));
+    assert!(!needs_decision(names::ADMISSION, true));
+    assert!(!needs_decision(names::SCHEDULER, true));
 }
