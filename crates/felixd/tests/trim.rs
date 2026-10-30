@@ -7,7 +7,8 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, test_felix};
+use common::{Agent, ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, eventually, test_felix};
+use felixd_core::names;
 use felixd_core::output::{self, Record};
 use felixd_core::snapshot;
 
@@ -69,4 +70,61 @@ async fn a_crash_with_a_trim_in_flight_resumes_and_checks() {
     }
     let (ok, report) = t.check(&["--id", ID, "--complete"]);
     assert!(ok, "{report}");
+}
+
+/// A holder is frozen just before its first trim record, after its own
+/// snapshot, and its lease ends. The next holder claims, snapshots and
+/// trims. When the first wakes, its own lease check passes, so only the
+/// `.out` fence can stop its trim: it must never land.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_holders_trim_is_refused_by_the_claim() {
+    let Some(t) = test_felix().await else { return };
+    let module = t
+        .submit(
+            "counter",
+            &["--snapshot-every", "5", "--keep-snapshots", "1"],
+        )
+        .await;
+    t.publish_all(INPUT, (0..8).map(count)).await;
+    let node = t.start_node_with_ttl("holder", "freeze-before-trim=1", Duration::from_secs(30));
+    eventually("the freeze", Duration::from_secs(60), || async {
+        node.stopped().then_some(())
+    })
+    .await;
+    let (held, version) = t.lease(ID).await.expect("the frozen node's lease");
+    assert_eq!(held.owner, "holder");
+    let stale = held.epoch;
+    t.felix
+        .cache_delete_if(names::LEASES, ID, version)
+        .await
+        .unwrap();
+    assert!(trims(&t).await.is_empty());
+
+    let mut next = t.start_agent();
+    t.publish_all(INPUT, (8..20).map(count)).await;
+    eventually(
+        "the next holder's trim",
+        Duration::from_secs(60),
+        || async {
+            trims(&t)
+                .await
+                .iter()
+                .any(|(epoch, _)| *epoch > stale)
+                .then_some(())
+        },
+    )
+    .await;
+    let mut frozen: Agent = node;
+    frozen.resume();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    t.publish_all(INPUT, (20..25).map(count)).await;
+    assert_uninterrupted(&t, &module, 25).await;
+    next.kill();
+
+    let found = trims(&t).await;
+    assert!(
+        found.iter().all(|(epoch, _)| *epoch > stale),
+        "a stale holder's trim landed: {found:?}"
+    );
+    assert!(frozen.alive(), "the frozen node exited");
 }

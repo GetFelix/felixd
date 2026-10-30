@@ -289,3 +289,41 @@ async fn a_downstream_cannot_switch_upstreams_once_it_has_output() {
     assert!(ok, "{report}");
     assert!(report.contains("ok, from wl.up.out"), "{report}");
 }
+
+/// An upstream that keeps one snapshot writes trim records on its output
+/// stream. A downstream reading it passes over them like claims, steps every
+/// output and is never left to an operator.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_downstream_reads_through_its_upstreams_trim_records() {
+    let Some(t) = test_felix().await else { return };
+    let module = t
+        .submit_as(
+            "up",
+            "counter",
+            &["--snapshot-every", "5", "--keep-snapshots", "1"],
+        )
+        .await;
+    assert!(t.run(common::ID, &module, "wl.up.out", &[]).success());
+    let _agent = t.start_agent();
+    t.publish_all(INPUT, (0..30u64).map(|i| i.to_be_bytes().to_vec()))
+        .await;
+    eventually("downstream output", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 30).then_some(())
+    })
+    .await;
+    let upstream = t.read_all("wl.up.out").await;
+    let trims = upstream
+        .iter()
+        .filter(|(_, r)| output::decode(r).unwrap().trim().is_some())
+        .count();
+    assert!(trims > 0, "the upstream wrote no trim record");
+    let parked = t.read_all(OUTPUT).await.iter().any(|(_, r)| {
+        matches!(
+            output::decode(r).unwrap(),
+            output::Record::NeedsOperator { .. }
+        )
+    });
+    assert!(!parked, "the downstream was left to an operator");
+    let (ok, report) = t.check(&["--id", common::ID, "--upstream"]);
+    assert!(ok, "{report}");
+}
