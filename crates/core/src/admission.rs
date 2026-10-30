@@ -10,9 +10,9 @@
 //! requests a policy change would decide differently.
 //!
 //! The node holding admission's lease then projects each accepted decision
-//! to `sys.specs` as a spec record naming the decision. Agents run a spec
-//! record written after admission's first one only if the decision it names
-//! accepted exactly that spec ([`admits`]).
+//! to `sys.specs` as a spec record naming the decision. Once admission's own
+//! record is there, agents run a spec record of any other workload only if
+//! the decision it names accepted exactly that spec ([`admits`]).
 
 use serde::{Deserialize, Serialize};
 

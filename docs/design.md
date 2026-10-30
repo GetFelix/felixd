@@ -1519,18 +1519,19 @@ its lease and fence; the node holding its lease records each accepted one on
 hash and length in `modules` and creating the streams. Rejections stay on
 `wl.admission.out` rather than `sys.specs`, so every reader of the spec
 history, the scheduler included, reads only specs. Once admission's own
-record is on `sys.specs`, a node runs a later record only if the decision it
-names accepted that workload and exactly that spec, so a record written around
+record is on `sys.specs`, a node runs a record of any other workload, one
+written before admission's included, only if the decision it names accepted
+that workload and exactly that spec, so a record written around
 admission, by a stale tool or a submitter with direct write rights, never
 runs or claims, and a record runs only if no record of the workload anywhere
 on `sys.specs` names a later decision that verifies, so an old acceptance
 cannot run again over a later change or stop, whether it is appended again
 or `workloads` is pointed back at it. Nodes read each workload's decisions
 newest first and stop at the first that verifies, so a check reads about one
-decision however long the history. A projector resumes after the newest
-decision recorded on `sys.specs`, so an acceptance it passed over, such as
-one whose module did not match, stays unrecorded; only one passed over with
-nothing recorded since is looked at again by the next holder. A record whose decision Felix no longer
+decision however long the history. An accepted decision whose module does
+not match gets a skip record on `sys.specs` instead (`skipped`), which no
+reader treats as a spec, and a projector resumes after the newest decision any
+verified record names, so an acceptance passed over stays passed over. A record whose decision Felix no longer
 holds needs an operator; no admitted workload may read admission's streams,
 so no trim record marks a decision trimmable, and `felixd init` sets no
 `keep_snapshots` on admission. System workloads (`admission`, `scheduler`)
@@ -1548,15 +1549,14 @@ requests a new policy decides otherwise.
 
 `specs/FelixdAdmission.tla` models the gate and the projector against a writer
 that can append any record to `sys.specs` and point `workloads` anywhere
-([formal.md](formal.md#admission)). It checks the rule as it should be, which
-the code above does not yet follow in four places: the gate is on once
-`felixd init`'s marker exists, not only for records after admission's own; it
-reads every record up to the tail it read, not only those before the one it
-checks; it judges a record naming a decision past the tail again on each read
-rather than keeping it unverified; and the projector appends a skip record for
-an accepted decision it does not record, and takes its progress from the latest
-decision any verified record names instead of walking the decisions from the
-first.
+([formal.md](formal.md#admission)), and the code follows it: the gate is on
+once `felixd init`'s marker, admission's own record, is anywhere on
+`sys.specs`, so a record written before it needs a decision too; it reads
+every record up to the tail it read; it reads a record naming a decision past
+the tail again on each check rather than keeping it unverified; and the
+projector appends a skip record for an accepted decision whose module does not
+match, and takes its progress from the latest decision any verified record,
+skip records included, names.
 
 Not built: the requester. Felix records a record's publisher only when the
 broker is configured to and a reader asks, and the workload contract has no

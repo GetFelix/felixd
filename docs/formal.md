@@ -398,7 +398,7 @@ modules by hash.
 | `Point` | `specs::project`, which only moves `workloads` forward: `crates/agent/src/specs.rs` |
 | `CrashProjector`, `CrashNode` | a crash, a lost lease, or the `crash-after-projection-sent` fault |
 | `Forge`, `Repoint` | a principal that can write `sys.specs` and `workloads` |
-| `Check` | `check_admitted` and `Gate::before`: `crates/agent/src/admission.rs` |
+| `Check` | `check_admitted`, `Gate::fold` and `Gate::newest`: `crates/agent/src/admission.rs` |
 
 Not in this model: the scheduler and other system workloads, which the gate lets through by id
 alone; forged skip records, which only make the projector pass over decisions, a delay rather

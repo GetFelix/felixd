@@ -23,13 +23,16 @@
   before. A spec record runs only if no record of the workload anywhere on
   `sys.specs` names a later accepting decision, so an old acceptance cannot
   run again, whether it is appended again or `workloads` is pointed back at
-  it. A projector resumes after the newest recorded decision, so an
-  acceptance one passed over is not recorded later by another.
+  it. An accepted decision whose module does not match gets a skip record
+  (`skipped`), and a projector resumes after the newest decision any verified
+  record names, so an acceptance one passed over is never recorded later.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.
 - Upgrading for admission: run `init` only once every node runs this build,
-  since an older node ignores admission. Without `init` nothing changes. The
+  since an older node ignores admission. After `init`, every workload but the
+  system ones needs a decision, so resubmit existing workloads through
+  intake. Without `init` nothing changes. The
   requester, grants (#117) and quotas are not built; see
   [Submitting work](docs/design.md#submitting-work).
 - felixd keeps its Felix and control plane tokens out of what it writes

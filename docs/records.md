@@ -207,14 +207,22 @@ record's offset is the spec's version, so a later record for an id supersedes an
 the stream is the spec history. Records are never rewritten; `failed` stays in the cache.
 
 A record that admission's projector wrote also has `admitted`, the `wl.admission.out` offset of
-the decision that accepted it. Once a record for `admission` is on the stream, a node runs a later
-record of any other workload only if `admitted` names a decision accepting that workload and
+the decision that accepted it. Once a record for `admission` is on the stream, `felixd init`'s
+marker, a node runs a record of any other workload, earlier or later, only if `admitted` names a decision accepting that workload and
 exactly that spec; otherwise the spec needs an operator with reason `spec_unadmitted` (code 10),
 which is logged and counted but not written to the output stream. So is a record whose decision is
 older than one an earlier record of the same workload names, and one whose decision Felix no
 longer holds. A record older than one a later record of the workload names is not run either, and
 is retried, since `workloads` may lag a record just appended. Records of the system workloads,
-`admission` and `scheduler`, need no decision. Only records whose own decision verifies count. Nodes read `sys.specs` from offset 0, so it must
+`admission` and `scheduler`, need no decision. Only records whose own decision verifies count. A
+record naming a decision past the tail is read again on the next check, since the decision may yet
+be written.
+
+A record with `skipped` set to `true` (absent otherwise) is a skip record: the projector passed
+over the accepted decision it names for good, because its module did not match. It is not a
+version of the spec: nodes refuse to run it, the scheduler and the spec history pass over it, and
+it counts only toward the projector's progress, which is the newest decision any verified record
+names. Nodes read `sys.specs` from offset 0, so it must
 never be trimmed. A record that does not decode
 counts as admission's, so a node fails closed on one from a newer build.
 
