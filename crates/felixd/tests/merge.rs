@@ -289,48 +289,48 @@ async fn a_gap_longer_than_one_write_is_merged_in_several() {
     assert_merged(&t, &module, 6).await;
 }
 
-/// A stale holder is frozen before its first merge append, and the next
-/// holder is frozen after reading the merge log's tail, before its claim.
-/// The stale holder wakes and its entry lands at that tail. The next holder's
-/// claim is refused there; it must claim again after the entry and step it,
-/// at its own epoch, rather than give up.
+/// The holder is frozen after reading the merge log's tail, before its
+/// claim. A stale holder's claim and entry land at that tail meanwhile,
+/// written here at epoch 0, below every lease's: a stale holder can be
+/// frozen with its write in flight, but whether that write is sent before
+/// its task is cancelled depends on timing. The holder's claim is refused
+/// there; it must claim again after the entry and step it, at its own
+/// epoch, rather than give up.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_entry_before_the_next_claim_is_adopted() {
     let Some(t) = test_felix().await else { return };
     let module = submit(&t).await;
     t.publish_all(ORDERS, [meta()]).await;
-    let stale = t.start_agent_with_faults("freeze-before-merge=1");
-    eventually("the stale freeze", Duration::from_secs(60), || async {
-        stale.stopped().then_some(())
+    let tail = t.felix.tail(ORDERS).await.unwrap();
+    let record = t.felix.read_range(ORDERS, 0, tail).await.unwrap()[0].clone();
+    let holder = t.start_agent_with_faults("freeze-before-merge-claim=1");
+    eventually("the freeze", Duration::from_secs(60), || async {
+        holder.stopped().then_some(())
     })
     .await;
-    let (old, _) = t.lease(ID).await.expect("the stale node's lease");
+    let (held, _) = t.lease(ID).await.expect("the holder's lease");
+    assert!(held.epoch > 0);
 
-    // A long TTL, so the next holder keeps its lease while frozen.
-    let next = t.start_node_with_ttl(
-        "next",
-        "freeze-before-merge-claim=1",
-        Duration::from_secs(30),
-    );
-    eventually("the next freeze", Duration::from_secs(60), || async {
-        next.stopped().then_some(())
-    })
-    .await;
-    let (held, _) = t.lease(ID).await.expect("the next node's lease");
-    assert_eq!(held.owner, "next");
-    assert!(held.epoch > old.epoch);
-
-    stale.resume();
-    eventually("the stale entry", Duration::from_secs(30), || async {
-        (shape(&t).await == [(old.epoch, true), (old.epoch, false)]).then_some(())
-    })
-    .await;
-    next.resume();
+    let mut next = vec![0, 0];
+    let entry = merge::Entry {
+        input: 0,
+        offset: record.offset,
+        timestamp_micros: record.timestamp_micros,
+    };
+    let stale = vec![
+        merge::encode_claim(0, &next, "stale"),
+        merge::encode_entry(0, entry, &mut next),
+    ];
+    // The tail the holder read: on a cluster a generation-start record can
+    // already take offset 0.
+    let at = t.felix.tail(MERGE).await.unwrap();
+    t.publish_if(MERGE, stale, at).await;
+    holder.resume();
     assert_merged(&t, &module, 1).await;
     assert_eq!(
         shape(&t).await,
-        [(old.epoch, true), (old.epoch, false), (held.epoch, true)],
-        "the next holder did not claim after the stale entry at its own epoch"
+        [(0, true), (0, false), (held.epoch, true)],
+        "the holder did not claim after the stale entry at its own epoch"
     );
     let epochs: Vec<u64> = t
         .outputs(OUTPUT)
