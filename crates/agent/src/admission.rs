@@ -248,7 +248,8 @@ pub(crate) async fn check_admitted(
     at: u64,
     record: &SpecRecord,
 ) -> Result<()> {
-    let specs_tail = felix.tail(names::SPECS).await?;
+    // A read, not a probe write: nodes may only read sys.specs.
+    let specs_tail = felix.read_tail(names::SPECS).await?;
     gate.fold(felix, specs_tail).await?;
     if !admission::needs_decision(id, gate.admission_runs()) {
         return Ok(());
@@ -279,7 +280,7 @@ pub(crate) async fn check_admitted(
         Err(error) => return Err(error),
     };
     let Some(found) = found else {
-        if decision >= felix.tail(&stream).await? {
+        if decision >= decisions_tail(felix).await? {
             return Err(specs::PastTail(format!(
                 "no decision at {stream}:{decision}, past the tail"
             ))
@@ -355,7 +356,7 @@ pub(crate) async fn project(felix: &Felix, settings: &Settings, mut stop: watch:
 /// namespace without admission, where no decision verifies.
 async fn decisions_tail(felix: &Felix) -> Result<u64> {
     let stream = names::output_stream(names::ADMISSION);
-    Ok(felix.tail_if_exists(&stream).await?.unwrap_or(0))
+    Ok(felix.read_tail_if_exists(&stream).await?.unwrap_or(0))
 }
 
 /// Whether the record at `record`, of workload `id` if one is given, names
@@ -642,8 +643,8 @@ pub async fn request(
     let decisions = names::output_stream(names::ADMISSION);
     // Read before the request is published, so its decision and record are
     // after both.
-    let decisions_from = felix.tail(&decisions).await?;
-    let specs_from = felix.tail(names::SPECS).await?;
+    let decisions_from = felix.read_tail(&decisions).await?;
+    let specs_from = felix.read_tail(names::SPECS).await?;
     let request = Request::new(id, spec, module.len() as u64, replication_factor);
     felix
         .cache_put(names::MODULES, &module::hash(&module), Bytes::from(module))
@@ -724,7 +725,7 @@ async fn wait_for<T>(
     mut find: impl FnMut(&[u8]) -> Option<T>,
 ) -> Result<(T, u64)> {
     loop {
-        let tail = felix.tail(stream).await?;
+        let tail = felix.read_tail(stream).await?;
         while from < tail {
             let (page, after) = felix.read_page(stream, from, tail).await?;
             for record in page {
