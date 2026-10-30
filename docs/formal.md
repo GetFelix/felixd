@@ -6,12 +6,15 @@ epoch from `epochs`, and fold its input into `wl.<id>.out` and `wl.<id>.snap` wi
 and holds each to its registered outcome; the `tla` job in CI runs the script.
 `specs/FelixdSpecs.tla` models spec history on the same stream, and the `tla-specs` job checks
 it ([Spec history](#spec-history)).
+`specs/FelixdMerge.tla` models the merge log of a workload with several inputs, and the
+`tla-merge` job checks it ([Several inputs](#several-inputs)).
 
 ```bash
 scripts/check_tla.sh                 # every configuration (needs Java 11+)
 scripts/check_tla.sh FelixdNoMarker  # one
 TLC_SIMULATE=100000 scripts/check_tla.sh FelixdFull  # random behaviours, not every state
 TLA_MODULE=FelixdSpecs scripts/check_tla.sh          # the spec history model
+TLA_MODULE=FelixdMerge scripts/check_tla.sh          # the merge log model
 ```
 
 ## What it checks
@@ -231,6 +234,83 @@ without finishing, so the `TLA nightly` workflow walks it with `TLC_SIMULATE` in
 Not in this model: failures, snapshots, epochs (`Felixd.tla`), inputs with no output, and
 `felixd run`'s own history check, which the agent's refusal backs.
 
+## Several inputs
+
+`specs/FelixdMerge.tla` models a workload with several inputs: the merge log, `wl.<id>.merge`,
+and the outputs stepped from it on `.out`. An input record is its input and offset, and its
+output is a function of it. A step's number is its entry's offset on the merge log, and its
+output names it.
+
+A holder takes an epoch above the counter and the last `.out` record, and claims `.out` at the
+tail it read with that floor. Only then does it claim the merge log, at a tail it reads then: it
+stops if the last record there is from a later epoch, and does not claim again over a record of
+its own epoch. It resumes from the last output. It steps the entries from there up to its claim,
+which covers entries an earlier holder merged and never stepped, and then merges records from
+the inputs in any order, up to `PerWrite` in one append, stepping each batch once it is on the
+log. Every append to either stream is `publish_if` at the tail its holder expects, stamped with
+its epoch. A refused append, or one whose answer was lost, reads the records past the tail: its
+own are taken as written and a later epoch stops it. Anything else, or a lost answer after the
+retries, ends the run, and the holder starts again under the same lease without claiming `.out`.
+
+As in `FelixdSpecs.tla`, leases are reduced to the fence: any idle node may begin at any time, as
+if the lease had expired, and a stale holder keeps running until a later record stops it.
+Requests may land late, after their sender stopped waiting, or not at all, and a batch of
+entries may land in part. A holder may crash at any point, including between a merge append and
+its steps. The `epochs` cache may be recreated while every epoch a holder or a request in flight
+could still write is on `.out`, the assumption design.md states.
+
+| Invariant | Says |
+|---|---|
+| `MergeExact` | Every record of every input is on the merge log at most once and in its input's order, and each record's `next` follows from the entries up to it. |
+| `MergeEpochMonotone` | Epochs on the merge log never decrease, and nothing from an earlier epoch lands after a later holder began there. |
+| `EntriesClaimed` | Every entry follows a claim of its own epoch, with no other claim between (`felixd check`'s `MergeUnclaimed`). |
+| `OutputsFenced` | The same as `MergeEpochMonotone`, for `.out`. |
+| `OneWriter` | One holder writes under each epoch, on both streams. |
+| `OutputsFollowMerge` | The outputs on `.out` are a prefix of the outputs of the merge log's entries, in log order: no gap, no duplicate. |
+| `StepsFollowMerge` | Each output names the offset of the entry it was stepped from, in increasing order, so a replay of the log steps the same records in the same order. |
+
+| Configuration | Expected | Model | Distinct states | Time |
+|---|---|---|---|---|
+| `FelixdMerge` | pass | two inputs (two records and one), three holders, a crash mid-merge, a lost answer, batches of up to two | 7,212,850 | 5 min 56 s |
+| `FelixdMergeLost` | pass | one record on each input, two holders, two lost answers or timeouts, a batch that lands in part | 486,394 | 18 s |
+| `FelixdMergeRecreate` | pass | one record on each input, three holders, a crash, `epochs` recreated once | 157,557 | 8 s |
+| `FelixdMergeNoSkip` | pass | the same-epoch skip off, a crash and a lost answer | 91,744 | 4 s |
+| `FelixdMergeNoClaim` | `MergeEpochMonotone` | no merge claim: a stale holder appends after the new holder read the tail | about 250 | under 3 s |
+| `FelixdMergeNoClaimCheck` | `MergeEpochMonotone` | the claim does not check the last record: a holder frozen after its `.out` claim claims the merge log after a later holder | about 350 | under 3 s |
+| `FelixdMergeNoCatchUp` | `OutputsFollowMerge` | the entries before the claim not stepped: a holder that crashed between its merge append and its steps leaves a gap | about 2,300 | under 3 s |
+| `FelixdMergeBeforeOut` | `OneWriter` | the merge log claimed before `.out`, with `epochs` recreated | about 250 | under 3 s |
+
+Every configuration has two nodes. Counts and times are from the `tla-merge` job on the CI
+runner, where the whole script takes about six and a half minutes. `FelixdMergeFull` has two records on each input, four holders, two crashes, two lost
+answers, a partial batch and a recreated `epochs`; the `TLA nightly` workflow walks it with
+`TLC_SIMULATE`.
+
+`FelixdMergeBeforeOut` is why the merge claim waits for the `.out` claim. The epoch floor reads
+`.out`, not the merge log, so a holder that claims the merge log and crashes before its `.out`
+claim leaves an epoch the floor does not see. Once `epochs` is recreated, the next holder takes
+the same epoch, finds that claim last, takes it as its own, and writes under it too. Claiming
+`.out` first keeps the merge log's highest epoch at or below `.out`'s.
+
+`FelixdMergeNoSkip` passes: claiming again over a claim of the holder's own epoch only adds a
+record, so the skip is not a guard.
+
+| Action | Code |
+|---|---|
+| `Begin` | the lease claim, the epoch floor and the `.out` tail: `crates/agent/src/agent.rs`, `crates/agent/src/lease.rs` |
+| `OClaim`, `OClaimAns` | `OutputLog::claim`: `crates/agent/src/output.rs` |
+| `MRead`, `MClaim`, `MClaimAns` | `MergeLog::claim`: `crates/agent/src/merge.rs`; the record is `merge::encode_claim`: `crates/core/src/merge.rs` |
+| `Probe` | a run that ended in an error starting again under the same lease: `crates/agent/src/agent.rs` |
+| `Resume` | the last output, `resume::fold` and the catch-up loop in `merged`: `crates/agent/src/runner.rs` |
+| `Merge`, `MAns` | `merged`, `merge_and_step` and `MergeLog::append` with `merge::reconcile`: `crates/agent/src/runner.rs`, `crates/agent/src/merge.rs`, `crates/core/src/merge.rs` |
+| `OSend`, `OAns` | `Steps::step` and `OutputLog::append`: `crates/agent/src/runner.rs`, `crates/agent/src/output.rs` |
+| `Deliver`, `LoseAnswer`, `Timeout`, `DeliverPrefix` | `publish_if` landing late or not at all, and the `drop-*`, `lose-*-answer` and `append-prefix` test faults: `crates/agent/src/faults.rs` |
+| `Crash` | an agent killed, or `crash-after-merge` |
+| `Recreate` | the `epochs` cache recreated |
+
+Not in this model: snapshots, failure and needs-operator records, generation-start records,
+records a step passes over (every entry has one output here), and the gap read-back, which the
+model covers by letting a holder merge any input's next record.
+
 ## Pipelines
 
 A pipeline needs no new model. `Felixd.tla` takes the input as a fixed sequence of records, each
@@ -258,7 +338,9 @@ composition.
   record's.
 - Spec edits and spec records in `Felixd.tla`. `FelixdSpecs.tla` models them
   ([Spec history](#spec-history)).
-- Several inputs and the merge log (#138), `felixd check` beyond which spec each input ran under, and drain.
+- Several inputs and the merge log in `Felixd.tla`. `FelixdMerge.tla` models them
+  ([Several inputs](#several-inputs)).
+- `felixd check` beyond which spec each input ran under, and drain.
 - Placement, `max_workloads` and the claim delay: any idle node may claim.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
