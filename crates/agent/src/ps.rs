@@ -66,12 +66,23 @@ impl Position {
 #[derive(Debug)]
 pub struct Node {
     pub id: String,
-    /// Its entry in `nodes`, `None` if it has none, which means it is not
-    /// up.
+    /// Whether it has an entry in `nodes`, which it keeps while it runs.
+    pub up: bool,
+    /// That entry, `None` if there is none or this build cannot read it.
     pub info: Option<NodeInfo>,
+    /// Whether it is marked in `drains`.
     pub draining: bool,
     /// How many live leases name it.
     pub leases: usize,
+}
+
+impl Node {
+    /// Whether the node has said that it read its mark and has no claim
+    /// under way. A node of an older build, or one that cannot read
+    /// `drains`, never does.
+    pub fn acknowledged(&self) -> bool {
+        self.info.as_ref().is_some_and(|i| i.draining)
+    }
 }
 
 /// Reports on the workloads in `ids`, or every workload when it is empty,
@@ -116,6 +127,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
     for (id, value) in felix.entries(names::NODES).await? {
         let entry = node_entry(&mut nodes, &id);
+        entry.up = true;
         entry.info = NodeInfo::decode(&value).ok();
     }
     for id in &draining {
@@ -133,6 +145,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
 fn node_entry<'a>(nodes: &'a mut BTreeMap<String, Node>, id: &str) -> &'a mut Node {
     nodes.entry(id.to_owned()).or_insert_with(|| Node {
         id: id.to_owned(),
+        up: false,
         info: None,
         draining: false,
         leases: 0,

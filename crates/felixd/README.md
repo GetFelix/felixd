@@ -47,14 +47,16 @@ the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a 
 
 Flags of `ps`: `--id` (repeat for several; every workload by default).
 
-Flags of `drain`: `--wait`, which returns once no live lease names the node, and
+Flags of `drain`: `--wait`, which returns once no live lease names the node and the node says it
+claims nothing (or it is down), `--timeout-secs` (300) for `--wait`, after which it exits 1, and
 `--replication-factor` (3) for the `drains` cache if this creates it.
 
 Connection flags, each also read from an environment variable: `--brokers` (`FELIX_BROKERS`),
 `--server-name` (`FELIX_SERVER_NAME`), `--tenant` (`FELIX_AUTH_TENANT`), `--namespace`
 (`FELIX_NAMESPACE`), `--token-file` (`FELIX_AUTH_TOKEN_FILE`), `--ca-file` (`FELIX_CA_FILE`),
 `--controlplane-url` (`FELIX_CONTROLPLANE_URL`) and `--controlplane-token-file`
-(`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `run` and `drain`). `felixd <command> --help` lists them all.
+(`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `run` and `drain`). A node needs read on the `drains`
+cache, or it claims nothing. `felixd <command> --help` lists them all.
 
 Submit a workload and start a node (set the variables as in the top-level
 [README](../../README.md#try-it) first):

@@ -18,6 +18,15 @@ pub struct NodeInfo {
     pub max_workloads: usize,
     /// How many it holds now.
     pub held: usize,
+    /// It has read its drain mark and has no claim under way, so it will
+    /// claim nothing until the mark is gone. Left out when false, so an
+    /// entry that is not draining reads the same as before the field.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub draining: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl NodeInfo {

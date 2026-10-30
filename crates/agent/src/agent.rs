@@ -79,6 +79,13 @@ struct Node {
     random: AtomicU64,
     /// Whether this node is marked in `drains`, as last read.
     draining: watch::Sender<bool>,
+    mark_reads: drain::MarkReads,
+    /// Tasks between their read of the drain mark and the end of their
+    /// lease claim. A claim that read the mark before it was written can
+    /// still land, so the node says it is draining only when this is 0.
+    claiming: AtomicUsize,
+    /// Notified when what this node writes to `nodes` should change now.
+    announce_now: Notify,
 }
 
 /// What the leases watch last said about one workload's lease.
@@ -127,6 +134,9 @@ pub async fn run(
         room: Notify::new(),
         random: AtomicU64::new(seed | 1),
         draining: watch::channel(false).0,
+        mark_reads: drain::MarkReads::default(),
+        claiming: AtomicUsize::new(0),
+        announce_now: Notify::new(),
     });
     tracing::info!(node = %node.node_id, "agent started");
     let presence = tokio::spawn({
@@ -297,10 +307,14 @@ fn seen_for<'a>(
 /// away soon after the node does.
 async fn announce(node: Arc<Node>) {
     loop {
+        // Draining is read before the claims under way, so a claim that
+        // starts after both reads finds the mark itself.
+        let draining = *node.draining.borrow();
         let info = NodeInfo {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             max_workloads: node.max_workloads,
             held: node.held.load(Ordering::Relaxed),
+            draining: draining && node.claiming.load(Ordering::SeqCst) == 0,
         };
         let put = node
             .felix
@@ -314,7 +328,10 @@ async fn announce(node: Arc<Node>) {
         if let Err(error) = put {
             tracing::warn!(%error, "could not write this node to nodes");
         }
-        tokio::time::sleep(node.timing.renew_after()).await;
+        tokio::select! {
+            () = tokio::time::sleep(node.timing.renew_after()) => {}
+            () = node.announce_now.notified() => {}
+        }
     }
 }
 
@@ -322,14 +339,25 @@ async fn announce(node: Arc<Node>) {
 /// workloads it holds stop and release their leases when it is set, and
 /// nothing is claimed until it is lifted.
 async fn follow_drain(node: Arc<Node>) {
+    let mut failing = false;
     loop {
-        match drain::marked(&node.felix, &node.node_id).await {
-            Ok(marked) => note_drain(&node, marked && !faults::miss_drain_marks()),
-            Err(error) => tracing::warn!(%error, "could not read this node's drain mark"),
+        match node.mark_reads.marked(&node.felix, &node.node_id).await {
+            Ok(marked) => {
+                failing = false;
+                note_drain(&node, marked && !faults::miss_drain_marks());
+            }
+            // Keeps what it last read. Logged once per run of failures.
+            Err(error) if !std::mem::replace(&mut failing, true) => {
+                tracing::warn!(error = %format!("{error:#}"), "{CANNOT_READ_MARK}");
+            }
+            Err(_) => {}
         }
         tokio::time::sleep(READ_DRAIN_EVERY).await;
     }
 }
+
+const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \
+                                until it can (a node needs read on the drains cache)";
 
 fn note_drain(node: &Node, marked: bool) {
     if node
@@ -339,6 +367,25 @@ fn note_drain(node: &Node, marked: bool) {
         match marked {
             true => tracing::info!("draining: releasing every lease and claiming nothing"),
             false => tracing::info!("no longer draining"),
+        }
+        node.announce_now.notify_one();
+    }
+}
+
+/// A task between its read of the drain mark and the end of its claim.
+struct ClaimUnderWay<'a>(&'a Node);
+
+impl<'a> ClaimUnderWay<'a> {
+    fn start(node: &'a Node) -> ClaimUnderWay<'a> {
+        node.claiming.fetch_add(1, Ordering::SeqCst);
+        ClaimUnderWay(node)
+    }
+}
+
+impl Drop for ClaimUnderWay<'_> {
+    fn drop(&mut self) {
+        if self.0.claiming.fetch_sub(1, Ordering::SeqCst) == 1 && *self.0.draining.borrow() {
+            self.0.announce_now.notify_one();
         }
     }
 }
@@ -501,14 +548,16 @@ async fn own(
         }
         // Read again here: the last regular read can be a second old, or
         // much older in a process that was stopped.
-        match drain::marked(&node.felix, &node.node_id).await {
+        let under_way = ClaimUnderWay::start(&node);
+        match node.mark_reads.marked(&node.felix, &node.node_id).await {
             Ok(false) => {}
             Ok(true) => {
                 note_drain(&node, true);
                 continue;
             }
             Err(error) => {
-                tracing::warn!(workload = %id, %error, "could not read this node's drain mark");
+                tracing::debug!(workload = %id, error = %format!("{error:#}"), "{CANNOT_READ_MARK}");
+                drop(under_way);
                 drop(slot);
                 if !pause(&mut stop).await {
                     return;
@@ -516,9 +565,14 @@ async fn own(
                 continue;
             }
         }
+        faults::after_drain_read().await;
         let output_tail = std::sync::Mutex::new(None);
         let floor = written_epoch(&node.felix, &id, &spec.output, &output_tail);
-        match lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await {
+        let claimed = lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await;
+        // A lease it won is in the cache before the node can say it is
+        // draining.
+        drop(under_way);
+        match claimed {
             Ok(Some(mut held)) => {
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();

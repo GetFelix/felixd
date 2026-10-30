@@ -31,6 +31,15 @@ pub struct Felix {
 
 pub use felix_client::{ClusterSubscription as Subscription, Event};
 
+/// What [`Felix::cache_lookup`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// The broker does not know the cache, right now.
+    NoCache,
+    /// The value under the key, if any.
+    Value(Option<Bytes>),
+}
+
 impl Felix {
     pub async fn connect(settings: &Settings) -> Result<Felix> {
         let roots = match &settings.ca_file {
@@ -342,17 +351,20 @@ impl Felix {
             .await
     }
 
-    /// The value under `key`, or `None` when `cache` does not exist. Unlike
-    /// [`Felix::cache_get`] it does not wait for a cache that is not served
-    /// yet, for a cache that may never be created.
-    pub async fn cache_get_if_exists(&self, cache: &str, key: &str) -> Result<Option<Bytes>> {
+    /// The value under `key`, telling a cache the broker does not know
+    /// apart from a missing key, and without [`Felix::cache_get`]'s wait for
+    /// a cache that is not served yet. A broker that is restarting or has
+    /// not loaded the cache answers the same way as for one never created,
+    /// so [`Lookup::NoCache`] is not proof that the cache does not exist.
+    pub async fn cache_lookup(&self, cache: &str, key: &str) -> Result<Lookup> {
         match self
             .client
             .cache_get(&self.tenant, &self.namespace, cache, key)
             .await
         {
-            Err(error) if not_found(&error) => Ok(None),
-            found => found,
+            Ok(value) => Ok(Lookup::Value(value)),
+            Err(error) if not_found(&error) => Ok(Lookup::NoCache),
+            Err(error) => Err(error),
         }
     }
 

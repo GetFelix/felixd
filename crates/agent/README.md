@@ -44,7 +44,9 @@ Behaviour that matters:
   carries on. Each output lands once through lost answers, partial batches and crashes.
 - **Drain.** Each agent reads its own drain mark every second and again right before each claim.
   While marked it stops what it holds, deletes those leases so another node can claim at once, and
-  claims nothing. The output stays fenced as in any takeover.
+  claims nothing; once no claim is under way it says `draining` in `nodes`. A failed read means no
+  claim, and a broker that does not know the `drains` cache counts as no mark only until the node
+  has once found it. The output stays fenced as in any takeover.
 - **Failure.** A trap, running out of fuel or `poison` writes a failure record, then `failed` into
   the spec, and the workload stops. A rejection does not fail it. A component of the old contract
   is left unclaimed rather than failed.

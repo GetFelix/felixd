@@ -122,9 +122,13 @@ enum Command {
         connection: Connection,
         /// The node, by the id it runs with (`felixd agent --node-id`).
         node: String,
-        /// Wait until no live lease names the node.
+        /// Wait until no live lease names the node and it has said it will
+        /// claim nothing, or it is not up.
         #[arg(long)]
         wait: bool,
+        /// With `--wait`, give up after this many seconds and exit with 1.
+        #[arg(long, default_value_t = 300, requires = "wait")]
+        timeout_secs: u64,
         /// Replicas of the `drains` cache, if this creates it.
         #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
         replication_factor: u32,
@@ -243,6 +247,7 @@ async fn main() -> Result<()> {
             connection,
             node,
             wait,
+            timeout_secs,
             replication_factor,
         } => {
             let settings = connection.settings()?;
@@ -252,23 +257,36 @@ async fn main() -> Result<()> {
             if !report
                 .nodes
                 .iter()
-                .any(|n| n.id != node && n.info.is_some() && !n.draining)
+                .any(|n| n.id != node && n.up && !n.draining)
             {
                 eprintln!(
                     "no other node is up and not draining, so its workloads wait until one is"
                 );
             }
-            if wait {
-                loop {
-                    let held = drain::held_by(&settings, &node).await?;
-                    if held.is_empty() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                println!("node {node} holds no leases");
+            if !wait {
+                return Ok(());
             }
-            Ok(())
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+            loop {
+                let progress = drain::progress(&settings, &node).await?;
+                if progress.done() {
+                    println!("node {node} holds no leases and claims nothing");
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    if !progress.held.is_empty() {
+                        eprintln!("node {node} still holds {}", progress.held.join(", "));
+                    }
+                    if !progress.acknowledged {
+                        eprintln!(
+                            "node {node} has not said it read its drain mark; a node of an \
+                             older build, or one without read on the drains cache, never does"
+                        );
+                    }
+                    std::process::exit(1);
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
         }
         Command::Undrain { connection, node } => {
             if drain::lift(&connection.settings()?, &node).await? {

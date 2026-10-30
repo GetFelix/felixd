@@ -8,7 +8,12 @@
 - `felixd drain <node>` makes a node release its leases, so other nodes take
   its workloads over without waiting for them to expire, and claim nothing
   until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`
-  cache.
+  cache. `--wait` waits until the node holds nothing and says it claims
+  nothing, up to `--timeout-secs`.
+- Upgrading: a node must be able to read the `drains` cache, or it claims
+  nothing. Grant node credentials read on `drains` before upgrading the
+  nodes; `felixd ps` then shows a drain mark as `pending` on any node that
+  has not said it read it.
 
 ## 0.1.0-preview.1
 

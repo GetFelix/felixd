@@ -260,3 +260,111 @@ async fn draining_the_last_node_leaves_its_workloads_waiting_until_it_returns() 
     assert!(ok, "{found}");
     assert!(only.alive());
 }
+
+/// No lease on the workload for `secs` seconds.
+async fn never_held(t: &TestFelix, secs: u64, why: &str) {
+    let until = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < until {
+        if let Some((lease, _)) = t.lease(ID).await {
+            panic!("{why}: {lease:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// After the node has read its mark, every read is answered as if the
+/// broker did not know the `drains` cache, as during a broker restart. That
+/// is not "not draining": the node keeps what it read and claims nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drained_node_claims_nothing_while_the_broker_does_not_know_the_drains_cache() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    let _only = t.start_node("only", "drains-gone-after-mark=1");
+    held_by(&t, "only").await;
+    drain(&t, "only", false).await;
+    eventually("the release", Duration::from_secs(30), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+    never_held(
+        &t,
+        6,
+        "the drained node claimed when its mark read went missing",
+    )
+    .await;
+    assert_eq!(claims(&t).await.len(), 1);
+}
+
+/// The node reads its mark before the drain and then waits 10 s before
+/// claiming. `drain --wait` must not return while that claim is under way.
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_wait_covers_a_claim_already_under_way() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    let _only = t.start_node_with_args(
+        "only",
+        "delay-claim-after-drain-read=10000",
+        LEASE_TTL,
+        &["--claim-delay-ms", "0"],
+    );
+    eventually("the node to be up", Duration::from_secs(30), || async {
+        t.felix
+            .cache_get(names::NODES, "only")
+            .await
+            .unwrap()
+            .map(|_| ())
+    })
+    .await;
+    // Time to reach its read of the mark.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let started = Instant::now();
+    drain(&t, "only", true).await;
+    never_held(&t, 12, "drain --wait returned with a claim under way").await;
+    assert!(
+        started.elapsed() > Duration::from_secs(5),
+        "drain --wait returned before the claim it covers"
+    );
+}
+
+/// A node that cannot read its drain mark claims nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_cannot_read_its_mark_claims_nothing() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    let mut blind = t.start_node("blind", "drain-read-error=1");
+    never_held(&t, 8, "a node that cannot read its mark claimed").await;
+    assert!(blind.alive());
+    assert_eq!(t.outputs(OUTPUT).await.len(), 0);
+}
+
+/// The holder fails the workload, but the drain lands while it waits to
+/// record the failure. Dropping the work drops the failure: it is not
+/// recorded after the lease is released, and the next node runs the workload.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_racing_a_failure_leaves_nothing_recorded_after_the_release() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    let _failing = t.start_node("failing", "fail-workload=1,delay-failure-record=8000");
+    held_by(&t, "failing").await;
+    drain(&t, "failing", false).await;
+    eventually("the release", Duration::from_secs(30), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+    let _next = t.start_node("next", "");
+    held_by(&t, "next").await;
+    assert_uninterrupted(&t, &module, 5).await;
+    // Past the failing node's delay.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert_eq!(t.spec().await.state, WorkloadState::Running);
+    let failures = t
+        .read_all(OUTPUT)
+        .await
+        .iter()
+        .filter(|(_, r)| matches!(output::decode(r).unwrap(), Record::Failure { .. }))
+        .count();
+    assert_eq!(failures, 0);
+}

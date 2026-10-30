@@ -63,10 +63,22 @@ pub(crate) fn render(report: &Report) -> String {
 
     let _ = writeln!(out);
     let mut rows = vec![row(&["NODE", "UP", "LEASES", "MAX", "VERSION", "DRAINING"])];
+    let mut pending = false;
     for n in &report.nodes {
-        let (up, max, version) = match &n.info {
-            Some(info) => ("yes", info.max_workloads.to_string(), info.version.clone()),
-            None => ("no", "-".to_owned(), "-".to_owned()),
+        let (up, max, version) = match (&n.info, n.up) {
+            (Some(info), _) => ("yes", info.max_workloads.to_string(), info.version.clone()),
+            // An entry this build cannot read, from a newer one.
+            (None, true) => ("yes", "?".to_owned(), "?".to_owned()),
+            (None, false) => ("no", "-".to_owned(), "-".to_owned()),
+        };
+        let draining = match (n.draining, n.acknowledged()) {
+            (true, true) => "yes",
+            (true, false) if n.up => {
+                pending = true;
+                "pending"
+            }
+            (true, false) => "yes",
+            (false, _) => "no",
         };
         rows.push(vec![
             n.id.clone(),
@@ -74,7 +86,7 @@ pub(crate) fn render(report: &Report) -> String {
             n.leases.to_string(),
             max,
             version,
-            if n.draining { "yes" } else { "no" }.to_owned(),
+            draining.to_owned(),
         ]);
     }
     table(&mut out, &rows);
@@ -82,11 +94,18 @@ pub(crate) fn render(report: &Report) -> String {
         .workloads
         .iter()
         .any(|w| w.state == Some(State::Waiting));
-    let takers = report.nodes.iter().any(|n| n.info.is_some() && !n.draining);
+    let takers = report.nodes.iter().any(|n| n.up && !n.draining);
     if waiting && !takers {
         let _ = writeln!(
             out,
             "no node is up and not draining: waiting workloads wait until one is"
+        );
+    }
+    if pending {
+        let _ = writeln!(
+            out,
+            "pending: the node has not said it read its drain mark; a node of an older build, \
+             or one without read on the drains cache, never does"
         );
     }
     out

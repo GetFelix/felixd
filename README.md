@@ -191,7 +191,10 @@ snapshot, so one that writes nothing for a while shows behind where it is.
 `felixd drain node-1` takes a node out of service without waiting out lease
 TTLs: the node stops each workload it holds and deletes the lease, so another
 node claims it at once and carries on from the same input, and the node
-claims nothing more. `--wait` returns once it holds no lease. `felixd undrain
+claims nothing more. `--wait` returns once it holds no lease and has said it
+claims nothing, or gives up after `--timeout-secs` (300) with exit code 1.
+Nodes need read on the `drains` cache; one that cannot read its mark claims
+nothing, and `ps` shows a mark it has not acknowledged as `pending`. `felixd undrain
 node-1` lets it claim again. Draining the only node that is up leaves its
 workloads `waiting`, and the command says so. The node reads its mark every
 second and again before each claim, so a node drained while it was stopped

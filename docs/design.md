@@ -559,8 +559,16 @@ lease deleted with `cache_delete_if` at the held version, so another node can
 claim at once instead of after the TTL. The mark is read again right before
 every claim, since the last regular read can be a second old, or much older
 in a process that was stopped, so a drained node takes no new work. A read
-that fails means no claim. Tasks for new specs still start on a drained node,
-but they wait until the mark is gone.
+that fails means no claim, so a node needs read on `drains`. A broker that
+answers that it does not know the cache counts as "not draining" only until
+the node has once found the cache: after that it is a broker restarting or not
+serving it yet, and the answer is unknown. Tasks for new specs still start on
+a drained node, but they wait until the mark is gone.
+
+A claim that read the mark just before it was written can still land. So a
+node counts its claims between that read and the end of the claim, and says
+`draining` in its `nodes` entry only once it has read its mark and none are
+under way. Any claim it starts after that finds the mark.
 
 A drain needs nothing new for safety. Releasing is what a clean shutdown
 already does, and a write the old holder still has in flight meets the new
@@ -569,8 +577,13 @@ owner's claim like any stale write
 followed at once by the lease expiring, which the model already explores. Two
 things are not guaranteed: a node of an older build ignores the mark, and a
 node that cannot read the mark keeps what it holds while its renewals still
-succeed. `felixd drain --wait` returns once no live lease names the node, which
-also covers a node that is down, since its leases expire. Draining the last
+succeed. `felixd drain --wait` returns once no live lease names the node and
+the node says `draining`, or it is down, since its leases expire. A node that
+is stopped with a claim under way is not up and can land the claim when it
+wakes; it releases it at its next read. `--wait` gives up after
+`--timeout-secs` (300) with exit code 1, which is what a node of an older build
+or one that cannot read `drains` gets, since it never says `draining`.
+`felixd ps` shows such a mark as `pending`. Draining the last
 node that is up leaves its workloads with no holder; they stay `running` and
 `felixd ps` shows them waiting until a node can take them.
 
@@ -599,7 +612,9 @@ it. For each workload:
   is another workload's output.
 
 For each node: whether it has an entry in `nodes`, how many live leases name
-it, its `--max-workloads`, its version and whether it is draining. Drains are
+it, its `--max-workloads`, its version and whether it is draining: `yes`, or
+`pending` while it is up and has not said it read its mark. An entry this build
+cannot read shows as up with its version unknown. Drains are
 in [Leases and failure detection](#leases-and-failure-detection).
 
 Divergence records, which `felixd ps` would also show, are not built yet

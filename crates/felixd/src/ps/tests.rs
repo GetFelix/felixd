@@ -27,10 +27,12 @@ fn workload(id: &str, state: State, holder: Option<Lease>) -> Workload {
 fn node(id: &str, up: bool, draining: bool, leases: usize) -> Node {
     Node {
         id: id.into(),
+        up,
         info: up.then(|| NodeInfo {
             version: "0.1.0".into(),
             max_workloads: 64,
             held: leases,
+            draining,
         }),
         draining,
         leases,
@@ -130,6 +132,31 @@ fn waiting_with_every_node_draining_says_so() {
     let printed = render(&report);
     assert!(
         printed.contains("no node is up and not draining"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_mark_the_node_has_not_acknowledged_is_pending_and_an_unreadable_entry_is_up() {
+    let mut old = node("old", true, true, 1);
+    old.info.as_mut().unwrap().draining = false;
+    let mut newer = node("newer", true, false, 0);
+    newer.info = None;
+    let report = Report {
+        workloads: vec![],
+        nodes: vec![old, newer],
+    };
+    let printed = render(&report);
+    assert!(
+        printed.contains("old    yes  1       64   0.1.0    pending"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("newer  yes  0       ?    ?        no"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("pending: the node has not said"),
         "{printed}"
     );
 }

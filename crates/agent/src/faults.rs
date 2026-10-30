@@ -67,6 +67,12 @@
 //! - `miss-drain-marks=1`: the agent's regular read of its drain mark never
 //!   finds one, as when that read has not come round yet, so only the read
 //!   before each claim sees it.
+//! - `drains-gone-after-mark=1`: once a read has found this node's drain
+//!   mark, every later read is answered as if the broker did not know the
+//!   `drains` cache, as during a broker restart.
+//! - `drain-read-error=1`: every read of the drain mark fails.
+//! - `delay-claim-after-drain-read=MS`: wait MS milliseconds between a
+//!   claim's read of the drain mark and the claim itself.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -309,6 +315,33 @@ pub(crate) fn drop_watch(key: &str, written: bool) -> Option<std::time::Duration
 
 pub(crate) fn ignore_lease_delete() -> bool {
     fault("ignore-lease-deletes") == Some(1)
+}
+
+pub(crate) fn drain_read_error() -> bool {
+    fault("drain-read-error") == Some(1)
+}
+
+/// What a read of the drain mark returns, given what Felix answered.
+pub(crate) fn drain_lookup(found: crate::felix::Lookup) -> crate::felix::Lookup {
+    use crate::felix::Lookup;
+    static MARK_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if fault("drains-gone-after-mark") != Some(1) {
+        return found;
+    }
+    if MARK_FOUND.load(Ordering::SeqCst) {
+        return Lookup::NoCache;
+    }
+    if matches!(found, Lookup::Value(Some(_))) {
+        MARK_FOUND.store(true, Ordering::SeqCst);
+    }
+    found
+}
+
+/// Waits between a claim's read of the drain mark and the claim.
+pub(crate) async fn after_drain_read() {
+    if let Some(ms) = fault("delay-claim-after-drain-read") {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
 }
 
 pub(crate) fn miss_drain_marks() -> bool {

@@ -208,7 +208,8 @@ needs an operator). A spec without `limits` gets the defaults. A failed spec
   One with several has `inputs`, a list of 2 to 64 distinct names and no `input`, so a build that
   reads only `input` refuses it.
 - A lease has `owner` and `epoch`. Each claim takes an epoch above every earlier claim's and every epoch on the output stream; it is 0 until the claim has taken it. The last epoch handed out is kept in the `epochs` cache, as a number.
-- A node has `version`, `max_workloads` and `held`.
+- A node has `version`, `max_workloads` and `held`, and `draining: true` once it has read its
+  drain mark and has no claim under way. `draining` is left out when false.
 - A drain mark is an empty object under a node's id, with no TTL. `felixd drain` writes it and
   `felixd undrain` deletes it. While it is there the node gives up its leases and claims nothing.
   A mark in a format this build does not know still counts as a drain.
