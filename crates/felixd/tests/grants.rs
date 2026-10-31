@@ -86,8 +86,8 @@ impl Roles {
     /// `t`'s settings with only `role`'s tokens.
     fn settings(&self, t: &TestFelix, role: &str) -> Settings {
         Settings {
-            token: self.token(role, false),
-            controlplane_token: Some(self.token(role, true)),
+            token: self.token(role, false).into(),
+            controlplane_token: Some(self.token(role, true).into()),
             ..t.settings.clone()
         }
     }
@@ -150,7 +150,8 @@ fn list_policies(settings: &Settings) -> Vec<Policy> {
         settings.controlplane_url.trim_end_matches('/'),
         settings.tenant
     );
-    let token = settings.controlplane_token.as_ref().unwrap().expose();
+    let token = settings.controlplane_token.as_ref().unwrap().current();
+    let token = token.expose();
     ureq::get(&url)
         .header("Authorization", &format!("Bearer {token}"))
         .call()
@@ -305,7 +306,8 @@ fn operator_post(settings: &Settings, path: &str, body: serde_json::Value) {
         settings.controlplane_url.trim_end_matches('/'),
         settings.tenant
     );
-    let token = settings.controlplane_token.as_ref().unwrap().expose();
+    let token = settings.controlplane_token.as_ref().unwrap().current();
+    let token = token.expose();
     let sent = ureq::post(&url)
         .config()
         .http_status_as_error(false)

@@ -68,10 +68,10 @@ pub(crate) async fn test_felix_in(namespace: Option<&str>) -> Option<TestFelix> 
             },
             str::to_owned,
         ),
-        token: read("FELIX_AUTH_TOKEN_FILE"),
+        token: read("FELIX_AUTH_TOKEN_FILE").into(),
         ca_file: Some(PathBuf::from(var("FELIX_CA_FILE"))),
         controlplane_url: var("FELIX_CONTROLPLANE_URL"),
-        controlplane_token: Some(read("FELIX_CONTROLPLANE_TOKEN_FILE")),
+        controlplane_token: Some(read("FELIX_CONTROLPLANE_TOKEN_FILE").into()),
     };
     felixd_agent::admin::ensure_namespace(&settings)
         .await

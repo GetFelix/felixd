@@ -198,7 +198,7 @@ pub async fn run(
         Some(_) => {
             let mut settings = settings.clone();
             if let Some(token) = config.admission_token {
-                settings.token = token;
+                settings.token = token.into();
             }
             let felix = Felix::connect(&settings).await?;
             Some(Arc::new(AdmissionCredential { settings, felix }))

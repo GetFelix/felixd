@@ -1476,7 +1476,13 @@ from arguments or the log, and holds them in a type that formats as a
 placeholder, so no log line, error or panic message carries one. An
 integration test (`crates/felixd/tests/secrets.rs`) runs a workload through a
 failover with every log turned up and scans every record, cache entry, metric
-and log line for the token bytes. Per-lease tokens are not built; see below.
+and log line for the token bytes, including a token file rotated under a
+running agent. The broker and control plane token files are read again each
+time a token is used, so an operator rotates a credential in place and the
+agent keeps its leases; a file caught missing or half written keeps the
+previous token. Brokers are addressed by `ip:port` or `host:port`, and a name
+is resolved again when no known broker answers. Per-lease tokens are not built;
+see below.
 
 - **Secrets never enter the log.** A workload names a credential in an effect
   request; the executor resolves the name through a credential agent on its

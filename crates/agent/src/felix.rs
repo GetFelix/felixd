@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
     AckMode, BrokerError, CacheCondition, CacheConditionResult, ClientConfig, ClusterClient,
-    ConditionalWrite, CursorErrorReason, ErrorCode, StartPosition, StreamRecord,
+    ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy, StartPosition, StreamRecord,
     SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
 
@@ -53,14 +53,21 @@ impl Felix {
         let quinn = felix_client::quic_client_config(roots, true)?;
         let config = ClientConfig {
             auth_tenant_id: Some(settings.tenant.clone()),
-            auth_token: Some(settings.token.expose().to_owned()),
+            // The provider is asked on every stream open, so a rotated token
+            // file is used by the next stream and by every reconnect.
+            token_provider: Some(Arc::new(settings.token.clone())),
             // Time-based snapshot points come from input append times.
             timestamps: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
-        let client = ClusterClient::connect(&settings.brokers, &settings.server_name, config)
-            .await
-            .context("connect to Felix")?;
+        let client = ClusterClient::connect_seeds(
+            &settings.brokers,
+            &settings.server_name,
+            config,
+            ReconnectPolicy::default(),
+        )
+        .await
+        .context("connect to Felix")?;
         Ok(Felix {
             client: Arc::new(client),
             tenant: settings.tenant.clone(),

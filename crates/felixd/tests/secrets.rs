@@ -112,6 +112,22 @@ impl Logs {
         Agent::new(child, node_id)
     }
 
+    /// An agent whose broker token is read from `token`, so a test can rotate
+    /// the file under it.
+    fn agent_on_token(&self, t: &TestFelix, node_id: &str, token: &Path) -> Agent {
+        let (_, out, err) = self.file(&format!("{node_id}.log"));
+        let ttl = LEASE_TTL.as_millis().to_string();
+        let child = t
+            .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
+            .env("FELIX_AUTH_TOKEN_FILE", token)
+            .env("RUST_LOG", LOGS)
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .unwrap();
+        Agent::new(child, node_id)
+    }
+
     fn scan(&self, needles: &[String]) {
         for entry in std::fs::read_dir(&self.dir).unwrap() {
             let path = entry.unwrap().path();
@@ -136,7 +152,10 @@ async fn listed(t: &TestFelix, namespace: &str, kind: &str, field: &str) -> Vec<
         s.controlplane_url.trim_end_matches('/'),
         s.tenant,
     );
-    let authorization = format!("Bearer {}", s.controlplane_token.as_ref().unwrap().expose());
+    let authorization = format!(
+        "Bearer {}",
+        s.controlplane_token.as_ref().unwrap().current().expose()
+    );
     let field = field.to_owned();
     tokio::task::spawn_blocking(move || {
         let mut names = Vec::new();
@@ -177,9 +196,14 @@ async fn scrape(addr: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     let Some(t) = test_felix().await else { return };
-    let mut secrets = needles(t.settings.token.expose());
+    let mut secrets = needles(t.settings.token.current().expose());
     secrets.extend(needles(
-        t.settings.controlplane_token.as_ref().unwrap().expose(),
+        t.settings
+            .controlplane_token
+            .as_ref()
+            .unwrap()
+            .current()
+            .expose(),
     ));
     secrets.extend(needles(CANARY));
     let Some(admission_token) = admission_token_file() else {
@@ -239,6 +263,30 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     )
     .await;
     let scraped_b = scrape(&metrics_b).await;
+
+    // A rotated token is read again by a running agent. The file moves to a
+    // token the broker refuses and then to another valid one, with every
+    // log level on, and the logs are scanned for all of them. The file lives
+    // outside the scanned directory because it holds the secret.
+    let rotating_dir =
+        std::env::temp_dir().join(format!("felixd-rotating-{}", t.settings.namespace));
+    std::fs::create_dir_all(&rotating_dir).unwrap();
+    let rotating = token_file(
+        &rotating_dir,
+        "broker.jwt",
+        t.settings.token.current().expose(),
+    );
+    let mut c = logs.agent_on_token(&t, "secrets-c", &rotating);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    std::fs::write(&rotating, CANARY).unwrap();
+    t.publish_all(INPUT, (20..30).map(count)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    std::fs::copy(&admission_token, &rotating).unwrap();
+    t.publish_all(INPUT, (30..40).map(count)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(c.alive(), "the agent exited after its token file rotated");
+    c.kill();
+    std::fs::remove_dir_all(&rotating_dir).unwrap();
 
     assert!(logs.run("ps.log", t.felixd(&["ps"])));
     assert!(logs.run("check.log", t.felixd(&["check", "--id", common::ID])));

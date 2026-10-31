@@ -156,7 +156,7 @@ fn require_tenant_view(settings: &Settings) -> Result<()> {
         .controlplane_token
         .as_ref()
         .context("a control plane token is needed to create streams, caches and grants")?;
-    if view_is_tenant_wide(token.expose(), &settings.tenant) {
+    if view_is_tenant_wide(token.current().expose(), &settings.tenant) {
         return Ok(());
     }
     bail!(
@@ -206,8 +206,9 @@ async fn call(
 ) -> Result<(u16, String)> {
     let token = settings
         .controlplane_token
-        .clone()
-        .context("a control plane token is needed to create streams, caches and grants")?;
+        .as_ref()
+        .context("a control plane token is needed to create streams, caches and grants")?
+        .current();
     let authorization = format!("Bearer {}", token.expose());
     let url = format!(
         "{}/v1/tenants/{}/{}",
