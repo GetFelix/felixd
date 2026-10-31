@@ -69,7 +69,7 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
             ("stream.subscribe", stream(namespace, "*")),
             ("stream.publish", stream(namespace, "*")),
             ("stream.subscribe", stream(&sys, "*")),
-            ("stream.publish", stream(&sys, names::FACTS)),
+            ("stream.publish", stream(&sys, "*")),
             ("cache.read", cache("*")),
             ("cache.write", cache(names::LEASES)),
             ("cache.write", cache(names::EPOCHS)),
