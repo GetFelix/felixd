@@ -9,6 +9,7 @@ use felixd_core::names;
 use felixd_core::output::{self, Record};
 use felixd_core::spec::{SpecRecord, WorkloadSpec, moves_forward};
 
+use crate::admission::{self, Gate};
 use crate::felix::Felix;
 use crate::runner::NeedsOperator;
 
@@ -47,6 +48,11 @@ impl std::error::Error for PastTail {}
 /// unreadable or another workload's is [`NeedsOperator`], one past the tail
 /// is [`PastTail`].
 pub(crate) async fn read(felix: &Felix, id: &str, offset: u64) -> Result<WorkloadSpec> {
+    Ok(read_record(felix, id, offset).await?.spec)
+}
+
+/// As [`read`], the whole record.
+pub(crate) async fn read_record(felix: &Felix, id: &str, offset: u64) -> Result<SpecRecord> {
     let at = format!("{}:{offset}", names::SPECS);
     let found = felix
         .read_range(names::SPECS, offset, offset + 1)
@@ -68,23 +74,33 @@ pub(crate) async fn read(felix: &Felix, id: &str, offset: u64) -> Result<Workloa
         ))
         .into());
     }
-    Ok(record.spec)
+    if record.skipped {
+        return Err(unrecorded(format!("the record at {at} is a skip record, not a spec")).into());
+    }
+    Ok(record)
 }
 
 /// Checks that `spec`, a `workloads` value, is what its spec record says, so
-/// an agent runs only specs in the history. A mismatch is [`NeedsOperator`].
-pub(crate) async fn check_record(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Result<()> {
+/// an agent runs only specs in the history, and that admission accepted the
+/// record ([`admission::check_admitted`]). A mismatch is [`NeedsOperator`].
+pub(crate) async fn check_record(
+    felix: &Felix,
+    gate: &Gate,
+    id: &str,
+    spec: &WorkloadSpec,
+) -> Result<()> {
     let Some(offset) = spec.record else {
         return Err(unrecorded("its workloads entry names no spec record; submit it again").into());
     };
-    if !spec.matches_record(&read(felix, id, offset).await?) {
+    let record = read_record(felix, id, offset).await?;
+    if !spec.matches_record(&record.spec) {
         return Err(unrecorded(format!(
             "its workloads entry differs from its spec record at {}:{offset}",
             names::SPECS
         ))
         .into());
     }
-    Ok(())
+    admission::check_admitted(felix, gate, id, offset, &record).await
 }
 
 fn unrecorded(detail: impl Into<String>) -> NeedsOperator {

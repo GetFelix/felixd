@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check a module in specs/ under each configuration registered for it
 # below, and hold each to its outcome. `TLA_MODULE` picks the module:
-# Felixd (the default), FelixdSpecs or FelixdMerge.
+# Felixd (the default), FelixdSpecs, FelixdMerge or FelixdAdmission.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -10,8 +10,8 @@
 #
 # `scripts/check_tla.sh Felixd FelixdNoMarker` checks only those; a name not
 # registered below must pass. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
-# checks the spec history model, and `TLA_MODULE=FelixdMerge` the merge log
-# model. `TLC_WORKERS=4` caps TLC's worker threads.
+# checks the spec history model, `TLA_MODULE=FelixdMerge` the merge log
+# model and `TLA_MODULE=FelixdAdmission` the admission model. `TLC_WORKERS=4` caps TLC's worker threads.
 #
 # `TLC_SIMULATE=N` walks N random behaviours of up to `TLC_DEPTH` (default
 # 100) steps instead of checking every state. The nightly job runs
@@ -80,11 +80,26 @@ felixd_merge_expectations=(
   "FelixdMerge pass"
 )
 
+felixd_admission_expectations=(
+  "FelixdAdmission pass"
+  "FelixdAdmissionSkip pass"
+  "FelixdAdmissionForge pass"
+  "FelixdAdmissionLive pass"
+  "FelixdAdmissionBeforeAt violates OnlyAdmittedRuns"
+  "FelixdAdmissionForgedCount violates OnlyAdmittedRuns"
+  "FelixdAdmissionOldRecord violates NoRollback"
+  "FelixdAdmissionRetrySkipped violates SkippedStaysSkipped"
+  "FelixdAdmissionReservedIntake violates ReservedNeverViaIntake"
+  "FelixdAdmissionNoCondWrite violates ProjectedAtMostOnce"
+  "FelixdAdmissionFoldMemo violates NoRollback"
+)
+
 MODULE="${TLA_MODULE:-Felixd}"
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
   FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
+  FelixdAdmission) expectations=("${felixd_admission_expectations[@]}") ;;
   *) echo "unknown TLA_MODULE: $MODULE" >&2; exit 1 ;;
 esac
 

@@ -13,6 +13,9 @@
 //!   as if they were deleted. One that reaches the run aborts the process.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
+//! - `crash-after-projection-sent=N`: abort once admission's projector has
+//!   sent its Nth spec record to `sys.specs`, before its answer is acted on
+//!   and before `workloads` names it. The record may have landed.
 //! - `crash-after-append-sent=N`: abort once the Nth output append has been
 //!   sent, before its answer is acted on. The write may have landed.
 //! - `append-prefix=N`: send only the first half (at least one record) of the
@@ -101,6 +104,7 @@ static FAILURE_RECORDS: AtomicU64 = AtomicU64::new(0);
 static MERGES: AtomicU64 = AtomicU64::new(0);
 static MERGE_CLAIMS: AtomicU64 = AtomicU64::new(0);
 static TRIMS: AtomicU64 = AtomicU64::new(0);
+static PROJECTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// A conditional write the answer faults count.
 #[derive(Clone, Copy, Debug)]
@@ -234,6 +238,13 @@ pub(crate) fn before_trim() {
     let n = TRIMS.fetch_add(1, Ordering::Relaxed) + 1;
     if fault("freeze-before-trim") == Some(n) {
         freeze();
+    }
+}
+
+pub(crate) fn after_projection_sent() {
+    let n = PROJECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+    if fault("crash-after-projection-sent") == Some(n) {
+        crash("crash-after-projection-sent");
     }
 }
 

@@ -1,6 +1,7 @@
 //! Record formats, key and stream names, lease rules and the resume fold.
 //! Does no I/O.
 //!
+//! - [`admission`]: requests on `sys.intake` and admission's decisions.
 //! - [`names`]: the caches and streams felixd uses, and how a workload id maps
 //!   to its streams.
 //! - [`output`] and [`snapshot`]: the records on output and snapshot streams.
@@ -17,6 +18,7 @@
 //! - [`status`]: what `felixd ps` says about a workload, from its records.
 //! - [`trim`]: where history may be trimmed, by the last snapshots kept.
 
+pub mod admission;
 pub mod check;
 pub mod class;
 pub mod lease;

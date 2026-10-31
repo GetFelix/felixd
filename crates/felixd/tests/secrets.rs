@@ -222,15 +222,38 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     run.env("FELIX_CONTROLPLANE_TOKEN_FILE", &bad_broker)
         .arg(&wasm);
     assert!(!logs.run("run-refused.log", run));
-    // The scan reads only logs, so the token files and module go first.
+
+    // Admission, so a request on sys.intake, its decision and the projected
+    // spec record are scanned too.
+    let replicas = common::replication_factor().to_string();
+    let admission = logs.dir.join("admission.wasm.bin");
+    std::fs::write(&admission, felixd_testkit::workload("admission")).unwrap();
+    let mut init = t.felixd(&["init", "--replication-factor", &replicas]);
+    init.arg(&admission);
+    assert!(logs.run("init.log", init));
+    let mut via = t.felixd(&["run", "--id", "via-intake", "--input", INPUT]);
+    via.args(["--replication-factor", &replicas]).arg(&wasm);
+    assert!(logs.run("run-intake.log", via));
+
+    // The scan reads only logs, so the token files and modules go first.
     std::fs::remove_file(&bad_broker).unwrap();
     std::fs::remove_file(&wasm).unwrap();
+    std::fs::remove_file(&admission).unwrap();
 
     // Every stream and cache in the namespace, as the control plane lists
     // them, so one added later is scanned without changing this test.
     let streams = listed(&t, "streams", "stream").await;
     let caches = listed(&t, "caches", "cache").await;
-    for want in [INPUT, OUTPUT, SNAPSHOTS, names::SPECS, names::FACTS] {
+    let decisions = names::output_stream(names::ADMISSION);
+    for want in [
+        INPUT,
+        OUTPUT,
+        SNAPSHOTS,
+        names::SPECS,
+        names::FACTS,
+        names::INTAKE,
+        decisions.as_str(),
+    ] {
         assert!(
             streams.iter().any(|s| s == want),
             "{want} not in {streams:?}"

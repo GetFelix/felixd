@@ -18,8 +18,8 @@ COPY . .
 RUN cargo build --release --locked -p felixd --bin felixd \
     && strip target/release/felixd
 RUN cd workloads \
-    && cargo build --release --locked --target wasm32-unknown-unknown --package counter --package window --package scheduler \
-    && for w in counter window scheduler; do \
+    && cargo build --release --locked --target wasm32-unknown-unknown --package counter --package window --package scheduler --package admission \
+    && for w in counter window scheduler admission; do \
          wasm-tools component new target/wasm32-unknown-unknown/release/$w.wasm -o /$w.wasm; \
        done
 
@@ -27,7 +27,7 @@ FROM ${BASE_REGISTRY}/debian:bookworm-slim AS runtime
 RUN groupadd --gid 65532 felixd \
     && useradd --uid 65532 --gid 65532 --home-dir /home/felixd --create-home felixd
 COPY --from=build /felixd/target/release/felixd /usr/local/bin/felixd
-COPY --from=build /counter.wasm /window.wasm /scheduler.wasm /usr/local/share/felixd/
+COPY --from=build /counter.wasm /window.wasm /scheduler.wasm /admission.wasm /usr/local/share/felixd/
 USER 65532:65532
 WORKDIR /home/felixd
 ENTRYPOINT ["felixd"]

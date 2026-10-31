@@ -37,7 +37,7 @@ scrape_configs:
 | `felixd_leases_held` | gauge | workloads the node holds the lease of and runs |
 | `felixd_lease_claims_total{result}` | counter | `won`, `contended` (another node's lease was there) or `error` |
 | `felixd_lease_handoffs_total{reason}` | counter | leases the node let go of for another to take: `drained`, or `lost` when it was not renewed in time or was taken |
-| `felixd_needs_operator_total{reason}` | counter | workloads the node stopped for an operator, by the reason code `ps` shows, as `module_refused`, `module_missing`, `spec_unrecorded`, `spec_conflict`, `spec_stale`, `restore_fuel`, `input_unreadable`, `input_behind`, `history_trimmed` |
+| `felixd_needs_operator_total{reason}` | counter | workloads the node stopped for an operator, by the reason code `ps` shows, as `module_refused`, `module_missing`, `spec_unrecorded`, `spec_conflict`, `spec_stale`, `restore_fuel`, `input_unreadable`, `input_behind`, `history_trimmed`, `spec_unadmitted` |
 | `felixd_workload_failures_total` | counter | workloads the node marked failed |
 | `felixd_snapshots_total{result}` | counter | `written`, or `skipped` when a snapshot ran out of `snapshot_fuel` |
 | `felixd_snapshot_duration_seconds` | histogram | taking and writing a snapshot, all workloads |

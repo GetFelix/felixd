@@ -20,7 +20,8 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 
 | Command | What it does |
 |---|---|
-| `felixd run [flags] <module>` | Stores the module, creates the workload's streams and starts it. `--id` and `--input` are required; repeat `--input` for several, merged through a merge log. |
+| `felixd init <module>` | Brings admission up: writes its spec directly with the control plane token. Running it again with the same module changes nothing. |
+| `felixd run [flags] <module>` | Where admission runs, uploads the module, publishes a request on `sys.intake` and prints admission's decision, exiting 1 on a rejection. Otherwise stores the module, creates the workload's streams and starts it. `--id` and `--input` are required; repeat `--input` for several, merged through a merge log. |
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
 | `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
 | `felixd replay` | Rebuilds a workload as of `--to` and prints what its `inspect` returns, or with `--diff` compares a replay with the recorded outputs. Writes nothing. |
@@ -29,7 +30,8 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 | `felixd undrain <node>` | Lifts the mark, so the node claims work again. |
 
 Flags of `run`: `--id`, `--input` (up to 64), `--snapshot-every` (1000), `--snapshot-every-ms`, `--fuel`,
-`--max-memory`, `--snapshot-fuel` and `--replication-factor` (3; use 1 against a single broker).
+`--max-memory`, `--snapshot-fuel`, `--replication-factor` (3; use 1 against a single broker) and
+`--wait-secs` (60), how long to wait for admission's decision and spec record.
 The limits are stored in the spec, so every node runs the workload under the same ones.
 
 Flags of `agent`: `--node-id` (`FELIXD_NODE_ID`; host name and process id by default),
@@ -48,6 +50,8 @@ Flags of `replay`: `--id`, `--to` (an input offset or an RFC 3339 time such as
 `2026-10-29T14:02:00Z`; for a workload with several inputs, a merge log offset or a time compared
 with when entries were merged), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
 the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a divergence.
+`--all`, with `--diff`, reports every divergence rather than the first; with `--module` on
+admission it lists each recorded request a policy change decides otherwise.
 
 Flags of `ps`: `--id` (repeat for several; every workload by default).
 
@@ -59,7 +63,8 @@ Connection flags, each also read from an environment variable: `--brokers` (`FEL
 `--server-name` (`FELIX_SERVER_NAME`), `--tenant` (`FELIX_AUTH_TENANT`), `--namespace`
 (`FELIX_NAMESPACE`), `--token-file` (`FELIX_AUTH_TOKEN_FILE`), `--ca-file` (`FELIX_CA_FILE`),
 `--controlplane-url` (`FELIX_CONTROLPLANE_URL`) and `--controlplane-token-file`
-(`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `run` and `drain`). A node needs read on the `drains`
+(`FELIX_CONTROLPLANE_TOKEN_FILE`, needed by `init`, by `run` where admission does not run, by
+`drain` and by a node that is to hold admission). A node needs read on the `drains`
 cache, or it claims nothing. `felixd <command> --help` lists them all.
 
 To place workloads with the scheduler, submit it as the workload `scheduler` reading `sys.specs`
@@ -72,6 +77,14 @@ felixd run --id scheduler --input sys.specs --input sys.facts scheduler.wasm
 Nodes then follow its assignments, with first claim wins as the fallback. Stopping it (removing
 its spec) puts every node back on first claim wins. A node needs publish on `sys.facts` and read
 on `wl.scheduler.out` for this.
+
+To admit work through admission, run `felixd init admission.wasm` (the container image has it at
+`/usr/local/share/felixd/admission.wasm`) once per namespace. From then on `felixd run` publishes
+a request on `sys.intake`, and a node runs a spec record written after admission's own only if it
+names an accepting decision on `wl.admission.out` for exactly that spec. Only nodes with a control
+plane token hold admission, since its holder creates the streams of what it accepts. A submitter
+needs put on `modules`, publish on `sys.intake` and read on `wl.admission.out` and `sys.specs`.
+Every node must run a build that knows admission before `init`: an older one ignores it.
 
 Submit a workload and start a node (set the variables as in the top-level
 [README](../../README.md#try-it) first):

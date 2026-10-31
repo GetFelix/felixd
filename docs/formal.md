@@ -8,6 +8,8 @@ and holds each to its registered outcome; the `tla` job in CI runs the script.
 it ([Spec history](#spec-history)).
 `specs/FelixdMerge.tla` models the merge log of a workload with several inputs, and the
 `tla-merge` job checks it ([Several inputs](#several-inputs)).
+`specs/FelixdAdmission.tla` models admission's projection and the gate a spec record passes
+before it runs, and the `tla-admission` job checks it ([Admission](#admission)).
 
 ```bash
 scripts/check_tla.sh                 # every configuration (needs Java 11+)
@@ -15,6 +17,7 @@ scripts/check_tla.sh FelixdNoMarker  # one
 TLC_SIMULATE=100000 scripts/check_tla.sh FelixdFull  # random behaviours, not every state
 TLA_MODULE=FelixdSpecs scripts/check_tla.sh          # the spec history model
 TLA_MODULE=FelixdMerge scripts/check_tla.sh          # the merge log model
+TLA_MODULE=FelixdAdmission scripts/check_tla.sh      # the admission model
 ```
 
 ## What it checks
@@ -327,6 +330,81 @@ Not in this model: snapshots, failure and needs-operator records, generation-sta
 records a step passes over (every entry has one output here), and the gap read-back, which the
 model covers by letting a holder merge any input's next record.
 
+## Admission
+
+`specs/FelixdAdmission.tla` models admission (#114): the decisions on `wl.admission.out`, the
+projector that copies the accepted ones to `sys.specs`, and the gate a node passes a spec record
+through before it runs it. Admission's decisions are outputs of an ordinary workload, so their
+exactly-once and fencing are `Felixd.tla`'s; here a decision lands in one step.
+
+The rule it checks. Once `felixd init`'s marker exists, a spec record for a workload runs only
+if the decision it names is on `wl.admission.out`, accepted that workload and exactly that spec,
+and no verified record of the workload in the part of `sys.specs` the node read names a later
+decision. A record is verified when its decision is all of those things. A request for a
+reserved id (`admission`, `scheduler`) is rejected. The projector copies each accepted decision
+with a conditional append at the tail it read, or appends a skip record for one whose module is
+missing, and takes its progress from the latest decision any verified record names, so it keeps
+nothing of its own across a restart or a failover.
+
+The model starts after `felixd init`, with a record written before admission still on
+`sys.specs` and `workloads` pointing at it. The marker is read fresh. An adversary can append
+any spec record (any spec, no decision, any decision including one past the tail, or a copy of
+an older record) and point `workloads` at any record. Projectors crash, and a stale one keeps
+running beside a new one. Nodes crash, and read a prefix of `sys.specs` that only grows; a node
+that read less after a restart is refused by the claim floor, which `FelixdSpecs.tla` checks.
+
+| Invariant | Says |
+|---|---|
+| `OnlyAdmittedRuns` | After a check, a node runs the record `workloads` pointed at if it names the latest decision any verified record of the workload names in what the node read, and that decision is not a stop; otherwise it runs nothing. |
+| `NoRollback` | A node never acts on a decision older than one it acted on, so a stop or a newer version is never undone. |
+| `SkippedStaysSkipped` | No projector records a decision a projector passed over. |
+| `ProjectedAtMostOnce` | Projectors record each decision at most once, in decision order. |
+| `ReservedNeverViaIntake` | No request for a reserved id is accepted. |
+| `LiveRuns` | With no adversary, every accepted request whose module is there is eventually acted on by a node, which runs it or something later (`FelixdAdmissionLive`). |
+
+| Configuration | Expected | Model | Distinct states | Time |
+|---|---|---|---|---|
+| `FelixdAdmission` | pass | two projectors that crash and race, two decisions that may be rejected or stops, a forged record, two repoints | 6,827,780 | 1 min 26 s |
+| `FelixdAdmissionSkip` | pass | missing modules uploaded late, a request for a reserved id, three decisions, two projectors that crash and race, a repoint | 4,277,794 | 55 s |
+| `FelixdAdmissionForge` | pass | two forged records over three specs, a repoint, one projector, two decisions | 5,346,950 | 1 min 1 s |
+| `FelixdAdmissionLive` | pass | `LiveRuns` with no adversary: two projectors, a crash, three decisions | 323,964 | 1 min 51 s |
+| `FelixdAdmissionBeforeAt` | `OnlyAdmittedRuns` | the gate reads only the records before the one it checks, and is on only if admission's record is among them: the record written before admission runs | about 20 | under 3 s |
+| `FelixdAdmissionForgedCount` | `OnlyAdmittedRuns` | every record naming a decision counts, verified or not: a forged record past the tail blocks the latest admitted record | about 650 | under 3 s |
+| `FelixdAdmissionOldRecord` | `NoRollback` | a record is superseded by a later record, not a later decision: a record of an older decision that lands after a newer one runs after it | about 95,000 | under 3 s |
+| `FelixdAdmissionRetrySkipped` | `SkippedStaysSkipped` | no skip records, and a projector walks the decisions from the first: a new projector records a decision an earlier one passed over, once its module is uploaded | about 150 | under 3 s |
+| `FelixdAdmissionReservedIntake` | `ReservedNeverViaIntake` | admission accepts a reserved id | about 20 | under 3 s |
+| `FelixdAdmissionNoCondWrite` | `ProjectedAtMostOnce` | projections are plain appends: two projectors record the same decision | about 70 | under 3 s |
+| `FelixdAdmissionFoldMemo` | `NoRollback` | a node keeps its verdict on a record it read: a forged record naming a decision past the tail stays unverified after that decision lands, so after running it the node runs an older record | about 75,000 | under 3 s |
+
+Every configuration has one node: nodes do not interact here, and each invariant is about one
+node's checks. Counts and times are from the `tla-admission` job on the CI runner, where the whole script takes about six minutes.
+
+`OnlyAdmittedRuns` restates the rule over the records and decisions the node read, so in the
+passing configurations it checks that the gate is the rule and nothing else; what makes it hold
+is the twins. The other invariants are about the projector and about time, which the rule alone
+does not say.
+
+The rule lets a copy of an accepted decision through wherever it lands, including one the
+projector passed over: whoever can write `sys.specs` can record a decision whose module was
+missing. It runs only if the module has since been uploaded under its hash, since nodes load
+modules by hash.
+
+| Action | Code |
+|---|---|
+| `Decide`, `DecideReserved` | `admission::decide`: `crates/core/src/admission.rs` |
+| `Upload` | a module put in `modules` after its request was decided |
+| `Start` | `Projector::start`: `crates/agent/src/admission.rs` |
+| `Step` | `Projector::catch_up` and `record`, with `module_matches` |
+| `Point` | `specs::project`, which only moves `workloads` forward: `crates/agent/src/specs.rs` |
+| `CrashProjector`, `CrashNode` | a crash, a lost lease, or the `crash-after-projection-sent` fault |
+| `Forge`, `Repoint` | a principal that can write `sys.specs` and `workloads` |
+| `Check` | `check_admitted`, `Gate::fold` and `Gate::newest`: `crates/agent/src/admission.rs` |
+
+Not in this model: the scheduler and other system workloads, which the gate lets through by id
+alone; forged skip records, which only make the projector pass over decisions, a delay rather
+than a safety problem; a writer of `wl.admission.out` other than admission (#74); trimmed
+decisions; and the module check, reduced to whether the module is there.
+
 ## Pipelines
 
 A pipeline needs no new model. `Felixd.tla` takes the input as a fixed sequence of records, each
@@ -356,6 +434,8 @@ composition.
   ([Spec history](#spec-history)).
 - Several inputs and the merge log in `Felixd.tla`. `FelixdMerge.tla` models them
   ([Several inputs](#several-inputs)).
+- Admission in `Felixd.tla` and `FelixdSpecs.tla`, which take spec records as given.
+  `FelixdAdmission.tla` models it ([Admission](#admission)).
 - `felixd check` beyond which spec each input ran under.
 - Drain as an action of its own. A drained holder stops and then deletes its lease, which the model
   already covers as `Crash` followed at once by `Expire`, with the holder's requests still in flight.

@@ -882,8 +882,8 @@ needs only read on its inputs.
 |---|---|
 | Node | Read `workloads`, `sys.specs`, `modules`, `epochs` and `drains`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out`, `wl.*.snap` and `wl.*.merge` |
 | Operator (`felixd run`) | Read and write `workloads`; read `sys.specs` and append to it (a conditional write); write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
-| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `sys.specs`. Nothing else |
-| Admission | Read `sys.intake` and `modules`; write `sys.specs`; hold the stream-creation credential |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out` and `sys.specs`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
+| Admission | Read `sys.intake` and `modules`; write `sys.specs` and `workloads`; hold the stream-creation credential. Today its holder's node token and control plane token, so any node with both can write `sys.specs` |
 | Operator (`felixd init`) | Write admission's own spec directly. The one direct write left |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane |
@@ -1485,8 +1485,8 @@ now:
 1. **Spec history is records first** (#72). Versioned spec records take effect
    at a stated input offset ([Names and incarnations](#names-and-incarnations)).
    Agents act on spec records, not on the latest `workloads` value. Built:
-   `felixd run` appends to `sys.specs` and agents run only what a record
-   says; `workloads` is still how they learn of a change.
+   agents run only what a record says; `workloads` is still how they learn of
+   a change.
 2. **Requests go to an intake stream, `sys.intake`.** A request carries the
    module hash, the spec and the requester, taken from the authenticated
    publisher and never from the payload. Changes, stops and removals of
@@ -1510,6 +1510,63 @@ now:
    operator credentials. That is the only direct write left and it is the
    [bootstrap boundary](#native-programs-and-the-bootstrap-boundary) for
    workload submission.
+
+Built (#114): `sys.intake`, the admission workload and `felixd init`, and
+`felixd run` submitting through intake wherever admission runs. Admission
+outputs one decision per request on `wl.admission.out`, written once under
+its lease and fence; the node holding its lease records each accepted one on
+`sys.specs` as a spec record naming the decision, after checking the module's
+hash and length in `modules` and creating the streams. Rejections stay on
+`wl.admission.out` rather than `sys.specs`, so every reader of the spec
+history, the scheduler included, reads only specs. Once admission's own
+record is on `sys.specs`, a node runs a record of any other workload, one
+written before admission's included, only if the decision it names accepted
+that workload and exactly that spec, so a record written around
+admission, by a stale tool or a submitter with direct write rights, never
+runs or claims, and a record runs only if no record of the workload anywhere
+on `sys.specs` names a later decision that verifies, so an old acceptance
+cannot run again over a later change or stop, whether it is appended again
+or `workloads` is pointed back at it. Nodes read each workload's decisions
+newest first and stop at the first that verifies, so a check reads about one
+decision however long the history. An accepted decision whose module does
+not match gets a skip record on `sys.specs` instead (`skipped`), which no
+reader treats as a spec, and a projector resumes after the newest decision any
+verified record names, so an acceptance passed over stays passed over. A record whose decision Felix no longer
+holds needs an operator; no admitted workload may read admission's streams,
+so no trim record marks a decision trimmable, and `felixd init` sets no
+`keep_snapshots` on admission. System workloads (`admission`, `scheduler`)
+are refused through intake: an operator writes their specs directly, and the
+gate lets those through by id alone, so whoever can write `sys.specs` can run
+any module with any inputs as the scheduler, as before admission. Only records
+whose decision accepted exactly their spec count as later decisions, so a
+forged record naming a huge or absent decision blocks nothing. The gate and
+the projector read `sys.specs` from its first record, so it must never be
+trimmed. The scheduler reads every spec record, admitted or
+not, so it can assign one admission did not accept; the assignee refuses it
+at the gate, and the assignment only delays others until the bound.
+`felixd replay --id admission --diff --all --module <hash>` lists the recorded
+requests a new policy decides otherwise.
+
+`specs/FelixdAdmission.tla` models the gate and the projector against a writer
+that can append any record to `sys.specs` and point `workloads` anywhere
+([formal.md](formal.md#admission)), and the code follows it: the gate is on
+once `felixd init`'s marker, admission's own record, is anywhere on
+`sys.specs`, so a record written before it needs a decision too; it reads
+every record up to the tail it read; it reads a record naming a decision past
+the tail again on each check rather than keeping it unverified; and the
+projector appends a skip record for an accepted decision whose module does not
+match, and takes its progress from the latest decision any verified record,
+skip records included, names.
+
+Not built: the requester. Felix records a record's publisher only when the
+broker is configured to and a reader asks, and the workload contract has no
+field for it, so admission decides from the payload alone and policy cannot
+depend on who asked. Grants (#117) are not configured by felixd: until they
+are, a principal that can write `sys.specs` can still write admission's own
+spec, and any node can write `wl.admission.out`, as it can any output, until
+per-lease tokens (#74, GetFelix/felix#1625). The stream-creation credential is
+the holder's control plane token rather than one bound in admission's spec
+(#97), so only nodes with one hold admission.
 
 Open: the quota model (per tenant, per submitter, or per namespace, and what
 it counts: workloads, module bytes, fuel and memory limits).

@@ -9,14 +9,18 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use connection::Connection;
+use felixd_agent::admission;
 use felixd_agent::agent::AgentConfig;
 use felixd_agent::check::check;
 use felixd_agent::drain;
+use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
-use felixd_runtime::Limits;
+use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_core::{module, names};
+use felixd_runtime::{Limits, Runtime};
 
 /// Runs deterministic WebAssembly workloads on a Felix log.
 #[derive(Parser)]
@@ -126,6 +130,12 @@ enum Command {
         /// one.
         #[arg(long)]
         diff: bool,
+        /// With `--diff`, report every divergence, not only the first. For a
+        /// workload whose outputs depend on their input alone, such as
+        /// admission, with `--module` this lists every recorded request a
+        /// policy change decides otherwise.
+        #[arg(long, requires = "diff")]
+        all: bool,
         /// The first input a diff compares.
         #[arg(long, default_value_t = 0, requires = "diff")]
         from: u64,
@@ -173,7 +183,27 @@ enum Command {
         /// The node, by the id it runs with.
         node: String,
     },
-    /// Submit a workload: store its module, create its streams and start it.
+    /// Bring admission up: write its spec directly, the one spec not
+    /// submitted through it, with the control plane token. Once it runs,
+    /// `felixd run` submits through `sys.intake` and nodes run only what
+    /// admission accepted. Running it again with the same module changes
+    /// nothing.
+    Init {
+        #[command(flatten)]
+        connection: Connection,
+        /// Replicas of felixd's caches and system streams. Use 1 against a
+        /// single broker.
+        #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
+        replication_factor: u32,
+        /// The admission workload, a WebAssembly component.
+        module: PathBuf,
+    },
+    /// Submit a workload. Where admission runs, this uploads the module,
+    /// publishes a request on `sys.intake` and waits for admission's
+    /// decision, exiting with 1 if it rejects the request. Otherwise, and for
+    /// a system workload (`admission`, `scheduler`) whose spec only an
+    /// operator writes, it stores the module, creates the streams and writes
+    /// the spec itself with the control plane token.
     Run {
         #[command(flatten)]
         connection: Connection,
@@ -212,6 +242,10 @@ enum Command {
         /// broker. Caches that already exist keep their replicas.
         #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
         replication_factor: u32,
+        /// How long to wait for admission's decision and the spec record,
+        /// in seconds, where admission runs.
+        #[arg(long, default_value_t = 60)]
+        wait_secs: u64,
         /// The workload, a WebAssembly component.
         module: PathBuf,
     },
@@ -387,11 +421,16 @@ async fn main() -> Result<()> {
             to,
             from,
             module,
+            all,
             ..
         } => {
-            let diffed = diff(&connection.settings()?, &id, from, to, module.as_deref()).await?;
+            let settings = connection.settings()?;
+            let diffed = diff(&settings, &id, from, to, module.as_deref(), all).await?;
             if let Some(divergence) = diffed.divergence {
                 println!("first divergence at {divergence}");
+                for divergence in diffed.more {
+                    println!("divergence at {divergence}");
+                }
                 std::process::exit(1);
             }
             println!(
@@ -411,23 +450,76 @@ async fn main() -> Result<()> {
             max_memory,
             snapshot_fuel,
             replication_factor,
+            wait_secs,
             module,
         } => {
             let bytes =
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
+            let settings = connection.settings()?;
+            let limits = Limits {
+                fuel_per_call: fuel,
+                max_memory_bytes: max_memory,
+                snapshot_fuel,
+            };
+            if !names::is_system(&id) {
+                let felix = Felix::connect(&settings).await?;
+                if admission::runs(&felix).await? {
+                    Runtime::new()
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                        .compile(&bytes)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let mut spec = admission::running(&id, &module::hash(&bytes), inputs);
+                    spec.snapshot_every = snapshot_every;
+                    spec.snapshot_every_ms = snapshot_every_ms;
+                    spec.keep_snapshots = keep_snapshots;
+                    spec.limits = limits;
+                    let within = Duration::from_secs(wait_secs);
+                    let submitted =
+                        admission::request(&felix, &id, bytes, spec, replication_factor, within)
+                            .await?;
+                    println!("workload {id}: {submitted}");
+                    if matches!(submitted, admission::Submitted::Rejected { .. }) {
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
+            }
             let mut submission = Submission::new(&id, bytes, &inputs[0]);
             submission.inputs = inputs;
             submission.snapshot_every = snapshot_every;
             submission.snapshot_every_ms = snapshot_every_ms;
             submission.keep_snapshots = keep_snapshots;
-            submission.limits = Limits {
-                fuel_per_call: fuel,
-                max_memory_bytes: max_memory,
-                snapshot_fuel,
-            };
+            submission.limits = limits;
             submission.replication_factor = replication_factor;
-            let hash = submit(&connection.settings()?, submission).await?;
+            let hash = submit(&settings, submission).await?;
             println!("workload {id} running module {hash}");
+            Ok(())
+        }
+        Command::Init {
+            connection,
+            replication_factor,
+            module,
+        } => {
+            let bytes =
+                std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
+            let settings = connection.settings()?;
+            let hash = module::hash(&bytes);
+            let felix = Felix::connect(&settings).await?;
+            if let Lookup::Value(Some(found)) = felix
+                .cache_lookup(names::WORKLOADS, names::ADMISSION)
+                .await?
+                && let Ok(current) = WorkloadSpec::decode(&found)
+                && current.module == hash
+                && current.inputs == [names::INTAKE]
+                && current.state == WorkloadState::Running
+            {
+                println!("admission already runs module {hash}");
+                return Ok(());
+            }
+            let mut submission = Submission::new(names::ADMISSION, bytes, names::INTAKE);
+            submission.replication_factor = replication_factor;
+            submit(&settings, submission).await?;
+            println!("admission running module {hash}; felixd run now submits through it");
             Ok(())
         }
     }

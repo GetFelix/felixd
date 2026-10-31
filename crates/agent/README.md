@@ -12,6 +12,7 @@ binary depends on it.
 | Module | Does |
 |---|---|
 | `agent` | `run` watches the `workloads` and `leases` caches, writes this node to `nodes`, and runs each workload it manages to claim while the lease holds. `AgentConfig` sets the node id, lease timing, placement and the assignment bound. |
+| `admission` | The gate a spec record passes before a node runs it once admission is bootstrapped, the projector that records admission's accepted decisions on `sys.specs` while this node holds its lease, and `request`, which `felixd run` submits through. |
 | `assignments` | While a scheduler runs: follows its output on `wl.scheduler.out` a page at a time from the latest table, and appends this node's facts to `sys.facts`. `read` returns the assignments in force and how far the scheduler has read `sys.specs`, for `ps`. |
 | `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, and `wl.<id>.merge` for several inputs, appends the spec record to `sys.specs` and points `workloads` at it. |
 | `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ, and checks a merge log against its inputs. |

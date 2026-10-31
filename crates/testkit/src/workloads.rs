@@ -33,7 +33,8 @@ pub fn workload(name: &str) -> Vec<u8> {
     assert!(status.success(), "building workload {name} failed");
     let module = target
         .join("wasm32-unknown-unknown/release")
-        .join(format!("{name}.wasm"));
+        // Cargo names the artifact after the crate, `-` turned to `_`.
+        .join(format!("{}.wasm", name.replace('-', "_")));
     let core = std::fs::read(&module).unwrap_or_else(|e| panic!("read {}: {e}", module.display()));
     ComponentEncoder::default()
         .module(&core)

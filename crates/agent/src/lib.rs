@@ -19,11 +19,14 @@
 //! - [`input`]: what a step is given and what it produced, the same for every
 //!   caller.
 //! - [`snapshots`]: reads snapshots and their chunks back.
+//! - [`admission`]: the gate a spec record passes before it runs, the
+//!   projector of admission's decisions, and requests on `sys.intake`.
 //! - [`specs`]: spec records on `sys.specs` and their projection into
 //!   `workloads`.
 //! - [`faults`]: crashes and dropped inputs the integration tests inject.
 
 pub mod admin;
+pub mod admission;
 pub mod agent;
 pub mod assignments;
 pub mod check;

@@ -356,3 +356,14 @@ fn a_max_workloads_whose_facts_cannot_fit_is_refused() {
     assert!(check_fact_fits("n", fits * 2).is_err());
     assert!(check_fact_fits("n", usize::MAX).is_err());
 }
+
+#[test]
+fn a_skip_record_assigns_nothing() {
+    let mut f = Feed::hearing(&["a"]);
+    let mut skip = SpecRecord::decode(&spec_record("w1", WorkloadState::Running)).unwrap();
+    skip.admitted = Some(3);
+    skip.skipped = true;
+    f.specs += 1;
+    let out = f.s.step(names::SPECS, 0, 1, &skip.encode()).unwrap();
+    assert_eq!(out, vec![f.progress()]);
+}

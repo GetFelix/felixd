@@ -220,6 +220,13 @@ delays work and nothing else. `ps` then shows each workload's assignment, and
 a drained node's workloads go where the scheduler moves them. See
 [Placement](docs/design.md#placement).
 
+`felixd init admission.wasm` brings up admission, itself a felixd workload.
+From then on `felixd run` publishes a request on `sys.intake` and prints
+admission's decision, accepted or rejected with a reason code, and nodes run
+only specs admission accepted. Its decisions replay, so `felixd replay --id
+admission --diff --all --module <hash>` shows which past requests a new policy
+would decide otherwise. See [Submitting work](docs/design.md#submitting-work).
+
 `felixd agent --metrics-bind 127.0.0.1:9464` serves Prometheus metrics at
 `/metrics` (plain HTTP, no authentication, off unless given). Each node
 reports its own leases, claims, handoffs, steps and step latency, input lag,
