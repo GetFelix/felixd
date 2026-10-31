@@ -69,6 +69,13 @@ Connection flags, each also read from an environment variable: `--brokers` (`FEL
 `drain` and by a node that is to hold admission). A node needs read on the `drains`
 cache, or it claims nothing. `felixd <command> --help` lists them all.
 
+`--brokers` takes `ip:port` or `host:port` (an IPv6 address in brackets), comma separated. A name is
+resolved when the agent connects and again whenever no known broker answers, so brokers that move
+to new addresses are found again. The broker, control plane and admission token files are read again each time the token is used, so
+a token rotated in place is picked up before the old one expires. A file that is missing, empty or
+half written keeps the previous token until a good one appears; a file unreadable at startup is an
+error. `--admission-token-file` behaves the same way.
+
 To place workloads with the scheduler, submit it as the workload `scheduler` reading `sys.specs`
 and `sys.facts` (the container image has it at `/usr/local/share/felixd/scheduler.wasm`):
 

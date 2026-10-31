@@ -14,6 +14,7 @@ clap = { workspace = true }
 felixd-core = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+felix-client = { workspace = true }
 felixd-agent = { workspace = true }
 felixd-runtime = { workspace = true }
 time = { workspace = true }
@@ -23,7 +24,6 @@ time = { workspace = true }
 felixd-agent = { workspace = true, features = ["faults"] }
 bytes = { workspace = true }
 felixd-testkit = { workspace = true }
-felix-client = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true }
 time = { workspace = true, features = ["formatting"] }

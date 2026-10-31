@@ -60,10 +60,10 @@ fn settings_at(url: String) -> Settings {
         server_name: "localhost".into(),
         tenant: "dev".into(),
         namespace: "ns".into(),
-        token: crate::settings::Secret::new("t"),
+        token: crate::settings::Secret::new("t").into(),
         ca_file: None,
         controlplane_url: url,
-        controlplane_token: Some(crate::settings::Secret::new("c")),
+        controlplane_token: Some(crate::settings::Secret::new("c").into()),
     }
 }
 

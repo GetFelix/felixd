@@ -55,3 +55,42 @@ fn metrics_are_off_unless_an_address_is_given() {
     // A limit with no endpoint is a mistake worth saying so.
     assert!(parse(&["--metrics-max-workloads", "5"]).is_err());
 }
+
+fn brokers(list: &str) -> Result<Vec<felix_client::Seed>, clap::Error> {
+    Cli::try_parse_from([
+        "felixd",
+        "agent",
+        "--tenant=t",
+        "--token-file=t.jwt",
+        "--controlplane-url=http://127.0.0.1",
+        &format!("--brokers={list}"),
+    ])
+    .map(|cli| match cli.command {
+        super::Command::Agent { connection, .. } => connection.brokers().to_vec(),
+        _ => unreachable!(),
+    })
+}
+
+#[test]
+fn brokers_may_be_names_or_addresses() {
+    use felix_client::Seed;
+    let parsed = brokers("felix-0.felix:5000,10.0.0.4:5000,[::1]:5000,localhost:5100").unwrap();
+    assert!(matches!(&parsed[0], Seed::Name(n) if n == "felix-0.felix:5000"));
+    assert!(matches!(&parsed[1], Seed::Addr(a) if a.to_string() == "10.0.0.4:5000"));
+    assert!(matches!(&parsed[2], Seed::Addr(a) if a.to_string() == "[::1]:5000"));
+    assert!(matches!(&parsed[3], Seed::Name(n) if n == "localhost:5100"));
+}
+
+#[test]
+fn a_broker_without_a_usable_port_is_refused() {
+    for bad in [
+        "felix",
+        "felix:",
+        "felix:notaport",
+        ":5000",
+        "felix:70000",
+        "[::1]",
+    ] {
+        assert!(brokers(bad).is_err(), "{bad} was accepted");
+    }
+}

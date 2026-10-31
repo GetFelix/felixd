@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Broker host names and token rotation (#160, #159). `--brokers` takes
+  `host:port` as well as `ip:port`; names are resolved on connect and again
+  when no known broker answers. `--token-file` and
+  `--controlplane-token-file` are read again each time the token is used, so a
+  token rotated in place keeps the agent's leases; a missing or half-written
+  file keeps the last token. `felixd_agent::settings::Settings` holds
+  `Seed` brokers and `TokenSource` tokens (breaking for library users).
 - Grants (#117). `felixd init` writes Felix RBAC policies for three roles
   per namespace, `role:felixd.<namespace>.node`, `.admission` and
   `.submitter`, and writes nothing it finds already there; the operator

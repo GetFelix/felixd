@@ -1,16 +1,17 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
-use felixd_agent::settings::{Secret, Settings};
+use felix_client::Seed;
+use felixd_agent::settings::{Settings, TokenSource};
 
 /// How to reach Felix. The environment variables are the ones `felixctl` reads.
 #[derive(Args)]
 pub(crate) struct Connection {
-    /// Broker addresses, `host:port`. One is enough; the rest are discovered.
+    /// Broker addresses, `host:port` or `ip:port`. One is enough; the rest are
+    /// discovered. A name is resolved again when no known broker answers.
     #[arg(long, env = "FELIX_BROKERS", value_delimiter = ',', required = true)]
-    brokers: Vec<SocketAddr>,
+    brokers: Vec<Seed>,
     /// The name on the brokers' certificate.
     #[arg(long, env = "FELIX_SERVER_NAME", default_value = "localhost")]
     server_name: String,
@@ -18,7 +19,8 @@ pub(crate) struct Connection {
     tenant: String,
     #[arg(long, env = "FELIX_NAMESPACE", default_value = "default")]
     namespace: String,
-    /// File holding the token for the brokers.
+    /// File holding the token for the brokers. Read again as it is used, so a
+    /// rotated token is picked up without a restart.
     #[arg(long, env = "FELIX_AUTH_TOKEN_FILE")]
     token_file: PathBuf,
     /// Trust the brokers' certificate from this PEM file.
@@ -26,31 +28,32 @@ pub(crate) struct Connection {
     ca_file: Option<PathBuf>,
     #[arg(long, env = "FELIX_CONTROLPLANE_URL")]
     controlplane_url: String,
-    /// File holding the token for the control plane. Needed by `run`.
+    /// File holding the token for the control plane. Needed by `run`. Read
+    /// again on each call.
     #[arg(long, env = "FELIX_CONTROLPLANE_TOKEN_FILE")]
     controlplane_token_file: Option<PathBuf>,
 }
 
 impl Connection {
+    #[cfg(test)]
+    pub(crate) fn brokers(&self) -> &[Seed] {
+        &self.brokers
+    }
+
     pub(crate) fn settings(&self) -> Result<Settings> {
-        let read = |path: &PathBuf| {
-            std::fs::read_to_string(path)
-                .map(|t| Secret::new(t.trim()))
-                .with_context(|| format!("read {}", path.display()))
-        };
         felixd_core::names::validate_namespace(&self.namespace)?;
         Ok(Settings {
             brokers: self.brokers.clone(),
             server_name: self.server_name.clone(),
             tenant: self.tenant.clone(),
             namespace: self.namespace.clone(),
-            token: read(&self.token_file)?,
+            token: TokenSource::from_file(&self.token_file)?,
             ca_file: self.ca_file.clone(),
             controlplane_url: self.controlplane_url.clone(),
             controlplane_token: self
                 .controlplane_token_file
                 .as_ref()
-                .map(read)
+                .map(TokenSource::from_file)
                 .transpose()?,
         })
     }

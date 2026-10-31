@@ -15,7 +15,7 @@ use felixd_agent::check::check;
 use felixd_agent::drain;
 use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
-use felixd_agent::settings::Secret;
+use felixd_agent::settings::TokenSource;
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
@@ -282,11 +282,7 @@ async fn main() -> Result<()> {
             admission_token_file,
         } => {
             let admission_token = admission_token_file
-                .map(|path| {
-                    std::fs::read_to_string(&path)
-                        .map(|t| Secret::new(t.trim()))
-                        .with_context(|| format!("read {}", path.display()))
-                })
+                .map(TokenSource::from_file)
                 .transpose()?;
             let node_id = node_id.unwrap_or_else(default_node_id);
             if let Some(bind) = metrics_bind {
