@@ -22,6 +22,20 @@ const LOGS: &str = "trace,cranelift_codegen=info,cranelift_frontend=info,wasmtim
 /// A token that looks like a real one, for the runs that must be refused.
 const CANARY: &str = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.ZmVsaXhkLWxlYWstY2FuYXJ5LWNsYWltcw.ZmVsaXhkLWxlYWstY2FuYXJ5LXNpZ25hdHVyZQ";
 
+/// A second token for the operator's principal, for admission's projector.
+fn admission_token_file() -> Option<PathBuf> {
+    match std::env::var("FELIXD_SECRETS_ADMISSION_TOKEN_FILE") {
+        Ok(path) => Some(PathBuf::from(path)),
+        Err(_) if std::env::var_os("FELIXD_REQUIRE_FELIX").is_some() => {
+            panic!("FELIXD_REQUIRE_FELIX is set but FELIXD_SECRETS_ADMISSION_TOKEN_FILE is not")
+        }
+        Err(_) => {
+            eprintln!("skipping: FELIXD_SECRETS_ADMISSION_TOKEN_FILE is not set");
+            None
+        }
+    }
+}
+
 fn count(i: u64) -> Vec<u8> {
     i.to_be_bytes().to_vec()
 }
@@ -81,12 +95,15 @@ impl Logs {
             .success()
     }
 
-    fn agent(&self, t: &TestFelix, node_id: &str, metrics: &str) -> Agent {
+    fn agent(&self, t: &TestFelix, node_id: &str, metrics: &str, admission: &Path) -> Agent {
         let (_, out, err) = self.file(&format!("{node_id}.log"));
         let ttl = LEASE_TTL.as_millis().to_string();
         let child = t
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
             .args(["--metrics-bind", metrics])
+            // Admission's projector connects with its own credential, so
+            // that connection's logs are scanned for it too.
+            .env("FELIXD_ADMISSION_TOKEN_FILE", admission)
             .env("RUST_LOG", LOGS)
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err))
@@ -110,15 +127,14 @@ fn token_file(dir: &Path, name: &str, token: &str) -> PathBuf {
     path
 }
 
-/// The names of every `kind` (`streams` or `caches`) in the test's
-/// namespace, from the control plane, every page.
-async fn listed(t: &TestFelix, kind: &str, field: &str) -> Vec<String> {
+/// The names of every `kind` (`streams` or `caches`) in `namespace`, from
+/// the control plane, every page.
+async fn listed(t: &TestFelix, namespace: &str, kind: &str, field: &str) -> Vec<String> {
     let s = &t.settings;
     let base = format!(
-        "{}/v1/tenants/{}/namespaces/{}/{kind}",
+        "{}/v1/tenants/{}/namespaces/{namespace}/{kind}",
         s.controlplane_url.trim_end_matches('/'),
         s.tenant,
-        s.namespace
     );
     let authorization = format!("Bearer {}", s.controlplane_token.as_ref().unwrap().expose());
     let field = field.to_owned();
@@ -166,6 +182,20 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
         t.settings.controlplane_token.as_ref().unwrap().expose(),
     ));
     secrets.extend(needles(CANARY));
+    let Some(admission_token) = admission_token_file() else {
+        return;
+    };
+    secrets.extend(needles(
+        std::fs::read_to_string(&admission_token).unwrap().trim(),
+    ));
+    assert!(
+        secrets
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == secrets.len(),
+        "the admission token must differ from every other credential scanned for"
+    );
     let logs = Logs::new(&t);
 
     // Submit through the command line, so its own output is scanned too.
@@ -189,7 +219,7 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     assert!(logs.run("run.log", run));
 
     let metrics_a = free_addr();
-    let mut a = logs.agent(&t, "secrets-a", &metrics_a);
+    let mut a = logs.agent(&t, "secrets-a", &metrics_a, &admission_token);
     t.publish_all(INPUT, (0..10).map(count)).await;
     eventually("the first outputs", Duration::from_secs(60), || async {
         (t.outputs(OUTPUT).await.len() >= 10).then_some(())
@@ -200,7 +230,7 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     // A failover: the second node claims, resumes from a snapshot and writes on.
     a.kill();
     let metrics_b = free_addr();
-    let _b = logs.agent(&t, "secrets-b", &metrics_b);
+    let _b = logs.agent(&t, "secrets-b", &metrics_b, &admission_token);
     t.publish_all(INPUT, (10..20).map(count)).await;
     eventually(
         "the outputs after failover",
@@ -240,10 +270,19 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     std::fs::remove_file(&wasm).unwrap();
     std::fs::remove_file(&admission).unwrap();
 
-    // Every stream and cache in the namespace, as the control plane lists
-    // them, so one added later is scanned without changing this test.
-    let streams = listed(&t, "streams", "stream").await;
-    let caches = listed(&t, "caches", "cache").await;
+    // Every stream and cache in the namespace and its system namespace, as
+    // the control plane lists them, so one added later is scanned without
+    // changing this test.
+    let namespace = &t.settings.namespace;
+    let mut streams = listed(&t, namespace, "streams", "stream").await;
+    streams.extend(listed(&t, &names::system_namespace(namespace), "streams", "stream").await);
+    let caches = listed(&t, namespace, "caches", "cache").await;
+    assert!(
+        listed(&t, &names::system_namespace(namespace), "caches", "cache")
+            .await
+            .is_empty(),
+        "a cache in the system namespace"
+    );
     let decisions = names::output_stream(names::ADMISSION);
     for want in [
         INPUT,

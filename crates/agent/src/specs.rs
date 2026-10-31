@@ -60,7 +60,8 @@ pub(crate) async fn read_record(felix: &Felix, id: &str, offset: u64) -> Result<
         .into_iter()
         .find(|r| r.offset == offset);
     let Some(found) = found else {
-        if offset >= felix.tail(names::SPECS).await? {
+        // A read, so a node needs no publish grant on sys.specs.
+        if offset >= felix.read_tail(names::SPECS).await? {
             return Err(PastTail(format!("no spec record at {at}, past the tail")).into());
         }
         bail!("no spec record at {at}");

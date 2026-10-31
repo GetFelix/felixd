@@ -99,7 +99,9 @@ services:
             "policies":[
               {"subject":"role:broker","object":"cluster:*","action":"node.view"},
               {"subject":"role:broker","object":"cluster:*","action":"node.manage"},
-              {"subject":"role:dev","object":"namespace:dev/*","action":"ns.manage"}],
+              {"subject":"role:dev","object":"namespace:dev/*","action":"ns.manage"},
+              {"subject":"role:dev","object":"tenant:dev","action":"rbac.view"},
+              {"subject":"role:dev","object":"tenant:dev","action":"rbac.policy.manage"}],
             "groupings":[{"user":"p:broker","role":"role:broker"},{"user":"p:dev","role":"role:dev"}]}' \
             "X-Felix-Bootstrap-Token: $$BT"
           [ -n "$$status" ] && break
@@ -136,7 +138,7 @@ services:
         mint '{"principal":"p:broker","audience":"felix-controlplane"}'
         field felix_token > "$$OUT/operator.jwt"
         umask 022
-        mint '{"principal":"p:dev","audience":"felix-controlplane","requested":["ns.manage","stream.manage","cache.manage"]}'
+        mint '{"principal":"p:dev","audience":"felix-controlplane","requested":["ns.manage","stream.manage","cache.manage","rbac.view","rbac.policy.manage"]}'
         field felix_token > "$$OUT/controlplane.jwt"
         # A broker refuses a token carrying actions it does not know.
         # stream.manage is what lets felixctl create and seek consumer groups.

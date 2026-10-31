@@ -15,6 +15,7 @@ use felixd_agent::check::check;
 use felixd_agent::drain;
 use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
+use felixd_agent::settings::Secret;
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
@@ -89,6 +90,11 @@ enum Command {
             requires = "metrics_bind"
         )]
         metrics_max_workloads: usize,
+        /// File holding the broker token of admission's credential, the only
+        /// one granted to write sys.specs. With the control plane token, this
+        /// node may run admission. The node's own token when left out.
+        #[arg(long, env = "FELIXD_ADMISSION_TOKEN_FILE")]
+        admission_token_file: Option<PathBuf>,
     },
     /// Check output streams: replay each workload's module over its input and
     /// report gaps, duplicates, records out of order, epoch regressions and
@@ -183,7 +189,9 @@ enum Command {
         /// The node, by the id it runs with.
         node: String,
     },
-    /// Bring admission up: write its spec directly, the one spec not
+    /// Bring admission up: create the namespace and its system namespace,
+    /// write the grants of felixd's roles there (see docs/design.md,
+    /// "Grants"), and write admission's spec directly, the one spec not
     /// submitted through it, with the control plane token. Once it runs,
     /// `felixd run` submits through `sys.intake` and nodes run only what
     /// admission accepted. Running it again with the same module changes
@@ -271,7 +279,15 @@ async fn main() -> Result<()> {
             facts_every_ms,
             metrics_bind,
             metrics_max_workloads,
+            admission_token_file,
         } => {
+            let admission_token = admission_token_file
+                .map(|path| {
+                    std::fs::read_to_string(&path)
+                        .map(|t| Secret::new(t.trim()))
+                        .with_context(|| format!("read {}", path.display()))
+                })
+                .transpose()?;
             let node_id = node_id.unwrap_or_else(default_node_id);
             if let Some(bind) = metrics_bind {
                 felixd_agent::metrics::start(bind, &node_id, metrics_max_workloads).await?;
@@ -294,6 +310,7 @@ async fn main() -> Result<()> {
                     3 * Duration::from_millis(lease_ttl_ms),
                     Duration::from_millis,
                 ),
+                admission_token,
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
         }
@@ -504,7 +521,10 @@ async fn main() -> Result<()> {
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
             let settings = connection.settings()?;
             let hash = module::hash(&bytes);
+            felixd_agent::admin::refuse_legacy_streams(&settings).await?;
             let felix = Felix::connect(&settings).await?;
+            felixd_agent::admin::ensure_namespace(&settings).await?;
+            felixd_agent::admin::ensure_grants(&settings).await?;
             if let Lookup::Value(Some(found)) = felix
                 .cache_lookup(names::WORKLOADS, names::ADMISSION)
                 .await?

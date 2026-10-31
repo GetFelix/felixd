@@ -12,6 +12,7 @@ It depends on no other felixd crate. `felixd-runtime` takes its `Limits` from it
 | Module | Holds |
 |---|---|
 | `names` | The caches (`workloads`, `leases`, `epochs`, `nodes`, `drains`, `modules`), the `sys.specs`, `sys.facts` and `sys.intake` streams, the `scheduler` and `admission` workload ids, and how a workload id maps to its `wl.<id>.out`, `wl.<id>.snap` and `wl.<id>.merge` streams |
+| `grants` | The Felix grants of felixd's node, admission and submitter roles, which `felixd init` writes |
 | `output` | Output stream records: outputs, claims, failures and rejections, with the name and key of each output |
 | `merge` | Merge log records of a workload with several inputs: entries, claims, the cursor and `reconcile` |
 | `snapshot` | Snapshot chunk and manifest records, `plan` (which chunks a new snapshot writes) and `read_chunk` (checks a chunk against its hash) |

@@ -29,3 +29,25 @@ fn ids_are_checked() {
         assert_eq!(validate_id(bad), Err(InvalidId), "{bad:?}");
     }
 }
+
+#[test]
+fn system_streams_live_in_their_own_namespace() {
+    for stream in [SPECS, INTAKE, FACTS] {
+        assert_eq!(namespace_of("prod", stream), "prod.sys", "{stream}");
+    }
+    for stream in ["in", "wl.admission.out", "wl.scheduler.out", "system"] {
+        assert_eq!(namespace_of("prod", stream), "prod", "{stream}");
+    }
+}
+
+#[test]
+fn a_system_namespace_is_not_a_workload_namespace() {
+    assert!(validate_namespace("prod").is_ok());
+    assert!(validate_namespace("a.b").is_ok());
+    assert!(validate_namespace("sysx").is_ok());
+    for bad in ["", "prod.sys", ".sys", "a.sys.sys"] {
+        assert!(validate_namespace(bad).is_err(), "{bad:?}");
+    }
+    // The system namespace of any workload namespace is itself refused.
+    assert!(validate_namespace(&system_namespace("prod")).is_err());
+}

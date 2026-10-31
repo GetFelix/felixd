@@ -71,13 +71,22 @@ services:
             "policies":[
               {"subject":"role:broker","object":"cluster:*","action":"node.view"},
               {"subject":"role:dev","object":"namespace:dev/*","action":"ns.manage"},
+              {"subject":"role:dev","object":"tenant:dev","action":"rbac.view"},
+              {"subject":"role:dev","object":"tenant:dev","action":"rbac.policy.manage"},
               {"subject":"role:node","object":"stream:dev/restricted/*","action":"stream.subscribe"},
+              {"subject":"role:node","object":"stream:dev/restricted.sys/*","action":"stream.subscribe"},
               {"subject":"role:node","object":"stream:dev/restricted/wl.wl.out","action":"stream.publish"},
               {"subject":"role:node","object":"stream:dev/restricted/wl.wl.snap","action":"stream.publish"},
               {"subject":"role:node","object":"cache:dev/restricted/*","action":"cache.read"},
-              {"subject":"role:node","object":"cache:dev/restricted/*","action":"cache.write"}],
+              {"subject":"role:node","object":"cache:dev/restricted/*","action":"cache.write"},
+              {"subject":"p:felixd-node","object":"stream:dev/none/none","action":"stream.subscribe"},
+              {"subject":"p:felixd-admission","object":"stream:dev/none/none","action":"stream.subscribe"},
+              {"subject":"p:felixd-submitter","object":"stream:dev/none/none","action":"stream.subscribe"}],
             "groupings":[{"user":"p:broker","role":"role:broker"},{"user":"p:dev","role":"role:dev"},
-              {"user":"p:node","role":"role:node"}]}' \
+              {"user":"p:node","role":"role:node"},
+              {"user":"p:felixd-node","role":"role:felixd.granted.node"},
+              {"user":"p:felixd-admission","role":"role:felixd.granted.admission"},
+              {"user":"p:felixd-submitter","role":"role:felixd.granted.submitter"}]}' \
             "X-Felix-Bootstrap-Token: $$BT"
           [ -n "$$status" ] && break
           sleep 1
@@ -93,16 +102,29 @@ services:
         field felix_token > "$$OUT/node.jwt"
         field refresh_token > "$$OUT/node-refresh.jwt"
         umask 022
-        mint '{"principal":"p:dev","audience":"felix-controlplane","requested":["ns.manage","stream.manage","cache.manage"]}'
+        mint '{"principal":"p:dev","audience":"felix-controlplane","requested":["ns.manage","stream.manage","cache.manage","rbac.view","rbac.policy.manage"]}'
         field felix_token > "$$OUT/controlplane.jwt"
         # A broker refuses a token carrying actions it does not know.
         # stream.manage is what lets felixctl create and seek consumer groups.
         mint '{"principal":"p:dev","audience":"felix-broker","requested":["stream.publish","stream.subscribe","stream.manage","cache.read","cache.write"]}'
         field felix_token > "$$OUT/client.jwt"
+        # The same grants as client.jwt, as a different token: the leak scan
+        # in tests/secrets.rs looks for it apart from the operator's.
+        mint '{"principal":"p:dev","audience":"felix-broker","requested":["stream.publish","stream.subscribe","stream.manage","cache.read","cache.write"]}'
+        field felix_token > "$$OUT/admission-client.jwt"
         # A felixd node with only the grants docs/design.md gives one, in
         # namespace `restricted`: no publish on the workload's input.
         mint '{"principal":"p:node","audience":"felix-broker","requested":["stream.publish","stream.subscribe","cache.read","cache.write"]}'
         field felix_token > "$$OUT/restricted-node.jwt"
+        # felixd's roles in namespace `granted`. `felixd init` writes their
+        # grants, so until then each holds only a grant on a stream that does
+        # not exist, and the tests refresh these after init.
+        for role in node admission submitter; do
+          mint "{\"principal\":\"p:felixd-$$role\",\"audience\":\"felix-broker\",\"requested\":[\"stream.publish\",\"stream.subscribe\",\"cache.read\",\"cache.write\"]}"
+          field refresh_token > "$$OUT/felixd-$$role-refresh.jwt"
+          mint "{\"principal\":\"p:felixd-$$role\",\"audience\":\"felix-controlplane\"}"
+          field refresh_token > "$$OUT/felixd-$$role-cp-refresh.jwt"
+        done
 
         admin="Authorization: Bearer $$(cat "$$OUT/controlplane.jwt")"
         post "$$CP/namespaces" '{"namespace":"default","display_name":"default"}' "$$admin"

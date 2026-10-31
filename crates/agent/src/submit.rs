@@ -67,6 +67,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let kind = StreamKind {
         replication_factor: submission.replication_factor,
     };
+    admin::ensure_namespace(settings).await?;
     for cache in [
         names::WORKLOADS,
         names::MODULES,

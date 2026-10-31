@@ -15,6 +15,12 @@ pub const MODULES: &str = "modules";
 /// operator lifts it.
 pub const DRAINS: &str = "drains";
 
+/// Streams named with this prefix live in the system namespace
+/// ([`system_namespace`]), apart from workload streams, so a grant on every
+/// stream of the workload namespace, which every node needs, reaches none of
+/// them. Felix grants a stream by name or by whole namespace only.
+pub const SYSTEM_PREFIX: &str = "sys.";
+
 /// Stream of spec records: every version of every workload's spec.
 pub const SPECS: &str = "sys.specs";
 /// Stream of node facts: what each node says about itself while a scheduler
@@ -24,6 +30,10 @@ pub const FACTS: &str = "sys.facts";
 /// Stream of requests to run, change or stop workloads, which admission
 /// decides ([`crate::admission`]).
 pub const INTAKE: &str = "sys.intake";
+
+/// The system streams as they were named before they moved to the system
+/// namespace, where `felixd init` and the agent look for leftovers.
+pub const LEGACY_SYSTEM_STREAMS: [&str; 3] = [SPECS, INTAKE, FACTS];
 
 /// The id of the admission workload, which reads [`INTAKE`]. Its spec is the
 /// only one written directly, by `felixd init`.
@@ -40,6 +50,40 @@ pub const SYSTEM: [&str; 2] = [ADMISSION, SCHEDULER];
 /// Whether `id` is a system workload's.
 pub fn is_system(id: &str) -> bool {
     SYSTEM.contains(&id)
+}
+
+/// The namespace holding the system streams of workload namespace
+/// `namespace`.
+pub fn system_namespace(namespace: &str) -> String {
+    format!("{namespace}{SYSTEM_SUFFIX}")
+}
+
+/// The suffix of a system namespace.
+const SYSTEM_SUFFIX: &str = ".sys";
+
+/// Checks that `namespace` can be a workload namespace: not empty, and not
+/// ending in `.sys`. A namespace named `x.sys` is the system namespace of `x`
+/// ([`system_namespace`]), so as a workload namespace it would give nodes
+/// their workload-stream grant over `x`'s system streams.
+pub fn validate_namespace(namespace: &str) -> Result<(), InvalidNamespace> {
+    if namespace.is_empty() || namespace.ends_with(SYSTEM_SUFFIX) {
+        Err(InvalidNamespace(namespace.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("namespace {0:?} is empty or ends in \".sys\", which names a system namespace")]
+pub struct InvalidNamespace(String);
+
+/// The namespace `stream` lives in, for workload namespace `namespace`.
+pub fn namespace_of(namespace: &str, stream: &str) -> String {
+    if stream.starts_with(SYSTEM_PREFIX) {
+        system_namespace(namespace)
+    } else {
+        namespace.to_owned()
+    }
 }
 
 /// The longest workload id.

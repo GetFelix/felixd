@@ -38,6 +38,7 @@ impl Connection {
                 .map(|t| Secret::new(t.trim()))
                 .with_context(|| format!("read {}", path.display()))
         };
+        felixd_core::names::validate_namespace(&self.namespace)?;
         Ok(Settings {
             brokers: self.brokers.clone(),
             server_name: self.server_name.clone(),
