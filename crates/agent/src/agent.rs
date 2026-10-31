@@ -37,7 +37,7 @@ use crate::lease::{self, Confirmer, Fence, Held};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
 use crate::runner::{LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload};
-use crate::settings::{Secret, Settings};
+use crate::settings::{Settings, TokenSource};
 use crate::specs;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -86,7 +86,7 @@ pub struct AgentConfig {
     /// The broker token of admission's credential, which admission's
     /// projector writes `sys.specs` with. The node's own token when left
     /// out. A node runs admission only with a control plane token too.
-    pub admission_token: Option<Secret>,
+    pub admission_token: Option<TokenSource>,
 }
 
 /// Admission's credential on a node that holds it: what admission's
@@ -198,7 +198,7 @@ pub async fn run(
         Some(_) => {
             let mut settings = settings.clone();
             if let Some(token) = config.admission_token {
-                settings.token = token.into();
+                settings.token = token;
             }
             let felix = Felix::connect(&settings).await?;
             Some(Arc::new(AdmissionCredential { settings, felix }))

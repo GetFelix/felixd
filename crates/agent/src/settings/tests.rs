@@ -95,3 +95,12 @@ async fn the_client_is_given_the_current_token() {
     std::fs::write(&path, CP_TOKEN).unwrap();
     assert_eq!(source.token().await.unwrap(), CP_TOKEN);
 }
+
+// Every token file felixd reads, the admission one included, is a
+// `TokenSource`: `from_file` is the only way the binary builds one.
+#[test]
+fn an_empty_file_at_startup_is_refused() {
+    let path = scratch("empty");
+    std::fs::write(&path, "").unwrap();
+    assert!(TokenSource::from_file(&path).is_err());
+}
