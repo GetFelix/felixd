@@ -478,9 +478,6 @@ impl Projector {
         if let Some((decision, _)) = newest_of(felix, &mut recorded.all).await? {
             projector.next = decision.saturating_add(1);
         }
-        for named in recorded.specs.values_mut() {
-            point_at_newest(felix, named).await?;
-        }
         Ok(projector)
     }
 
@@ -577,12 +574,6 @@ impl Projector {
                         && newest >= at
                     {
                         self.next = self.next.max(newest.saturating_add(1));
-                        // The projector that landed it may have died before
-                        // pointing `workloads`, which would leave the
-                        // workload superseded for good.
-                        if let Some(named) = recorded.specs.get_mut(&id) {
-                            point_at_newest(felix, named).await?;
-                        }
                         return Ok(());
                     }
                 }
