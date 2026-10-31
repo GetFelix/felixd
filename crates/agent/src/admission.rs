@@ -405,8 +405,8 @@ struct Recorded {
     /// Every record, skip records included: the newest verified one is the
     /// projector's progress.
     all: Named,
-    /// Spec records alone, for pointing `workloads` again.
-    specs: Named,
+    /// Spec records alone, per workload, for pointing `workloads` again.
+    specs: HashMap<String, Named>,
 }
 
 impl Recorded {
@@ -414,7 +414,10 @@ impl Recorded {
         if let Some(decision) = record.admitted {
             self.all.note(offset, decision);
             if !record.skipped {
-                self.specs.note(offset, decision);
+                self.specs
+                    .entry(record.id.clone())
+                    .or_default()
+                    .note(offset, decision);
             }
         }
     }
@@ -428,6 +431,25 @@ async fn newest_of(felix: &Felix, named: &mut Named) -> Result<Option<(u64, u64)
         |record, decision| verifies(felix, None, record, decision),
     )
     .await
+}
+
+/// Points `workloads` at the newest verified spec record in `named`, all of
+/// one workload. It only moves forward, so it is safe to repeat.
+async fn point_at_newest(felix: &Felix, named: &mut Named) -> Result<()> {
+    let Some((_, at)) = newest_of(felix, named).await? else {
+        return Ok(());
+    };
+    let found = felix
+        .read_range(names::SPECS, at, at.saturating_add(1))
+        .await?
+        .into_iter()
+        .find(|r| r.offset == at)
+        .with_context(|| format!("the spec record at {}:{at} is gone", names::SPECS))?;
+    let record = SpecRecord::decode(&found.payload)?;
+    let mut spec = record.spec;
+    spec.record = Some(at);
+    specs::project(felix, &record.id, &spec).await?;
+    Ok(())
 }
 
 /// What the projector knows of `sys.specs` and `wl.admission.out`.
@@ -444,8 +466,8 @@ struct Projector {
 
 impl Projector {
     /// Resumes after the newest recorded decision and points `workloads` at
-    /// the newest spec record again, in case a projector stopped between the
-    /// two.
+    /// each workload's newest spec record again, in case a projector stopped
+    /// between the two.
     async fn start(felix: &Felix) -> Result<Projector> {
         let specs_tail = felix.tail(names::SPECS).await?;
         let mut projector = Projector {
@@ -456,17 +478,8 @@ impl Projector {
         if let Some((decision, _)) = newest_of(felix, &mut recorded.all).await? {
             projector.next = decision.saturating_add(1);
         }
-        if let Some((_, at)) = newest_of(felix, &mut recorded.specs).await? {
-            let found = felix
-                .read_range(names::SPECS, at, at.saturating_add(1))
-                .await?
-                .into_iter()
-                .find(|r| r.offset == at)
-                .with_context(|| format!("the spec record at {}:{at} is gone", names::SPECS))?;
-            let record = SpecRecord::decode(&found.payload)?;
-            let mut spec = record.spec;
-            spec.record = Some(at);
-            specs::project(felix, &record.id, &spec).await?;
+        for named in recorded.specs.values_mut() {
+            point_at_newest(felix, named).await?;
         }
         Ok(projector)
     }
@@ -564,6 +577,12 @@ impl Projector {
                         && newest >= at
                     {
                         self.next = self.next.max(newest.saturating_add(1));
+                        // The projector that landed it may have died before
+                        // pointing `workloads`, which would leave the
+                        // workload superseded for good.
+                        if let Some(named) = recorded.specs.get_mut(&id) {
+                            point_at_newest(felix, named).await?;
+                        }
                         return Ok(());
                     }
                 }

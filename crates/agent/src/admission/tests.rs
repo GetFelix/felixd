@@ -103,7 +103,9 @@ async fn a_skip_record_moves_progress_and_is_no_spec() {
     recorded.note(6, &skip);
     let all = verified_among(&[5, 6]);
     assert_eq!(resolve(&mut recorded.all, &all).await.0, Some((4, 6)));
-    assert_eq!(resolve(&mut recorded.specs, &all).await.0, Some((1, 5)));
+    let x = recorded.specs.get_mut("x").unwrap();
+    assert_eq!(resolve(x, &all).await.0, Some((1, 5)));
+    assert!(!recorded.specs.contains_key("y"));
 }
 
 /// The first check on a node, and a projector starting, read one decision

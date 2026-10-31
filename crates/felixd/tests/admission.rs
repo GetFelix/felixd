@@ -623,3 +623,62 @@ async fn a_skipped_acceptance_stays_skipped_after_the_projector_restarts() {
         "a restarted projector recorded an acceptance its predecessor skipped: {skipped:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projector_that_starts_points_every_workload_at_its_newest_record() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let a = t.start_agent();
+    admission_held_by(&t, &a.node_id).await;
+    let counter = felixd_testkit::workload("counter");
+    assert!(t.run(ID, &counter, INPUT, &[]).success());
+    let (running_at, running) = records(&t)
+        .await
+        .into_iter()
+        .rfind(|(_, r)| r.id == ID)
+        .unwrap();
+    let mut stopped = running.spec.clone();
+    stopped.state = WorkloadState::Stopped;
+    let submitted = admission::request(
+        &t.felix,
+        ID,
+        counter.clone(),
+        stopped,
+        replication_factor(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(submitted, Submitted::Accepted { .. }),
+        "{submitted}"
+    );
+    // Another workload's record is the newest on sys.specs.
+    assert!(t.run("other", &counter, INPUT, &[]).success());
+    let (stop_at, _) = records(&t)
+        .await
+        .into_iter()
+        .rfind(|(_, r)| r.id == ID)
+        .unwrap();
+    assert!(stop_at > running_at);
+
+    // A projector that died after appending the stop but before pointing
+    // `workloads` at it leaves the older record there.
+    let mut spec = running.spec;
+    spec.record = Some(running_at);
+    t.put_cache_spec(&spec).await;
+
+    let b = t.start_agent();
+    drop(a);
+    admission_held_by(&t, &b.node_id).await;
+    eventually(
+        "workloads to name the newest record",
+        Duration::from_secs(60),
+        || async {
+            let found = t.felix.cache_get(names::WORKLOADS, ID).await.unwrap()?;
+            let current = WorkloadSpec::decode(&found).unwrap();
+            (current.record == Some(stop_at)).then_some(())
+        },
+    )
+    .await;
+}
