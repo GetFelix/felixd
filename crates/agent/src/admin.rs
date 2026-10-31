@@ -99,6 +99,45 @@ pub async fn ensure_grants(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// The system streams that exist in the workload namespace itself, where they
+/// lived before they moved to the system namespace. Asks the control plane,
+/// not a broker: a broker answers "unassigned" for a stream it has never
+/// heard of and "not found" for one it has not synced yet, so it can neither
+/// confirm nor rule one out. A reply that is neither found nor not found
+/// is an error, never "absent".
+pub async fn legacy_system_streams(settings: &Settings) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    for stream in names::LEGACY_SYSTEM_STREAMS {
+        let path = format!("namespaces/{}/streams/{stream}", settings.namespace);
+        let (status, text) = call(settings, "GET", &path, None).await?;
+        match status {
+            200 => found.push(format!("{}/{stream}", settings.namespace)),
+            404 => {}
+            _ => bail!("looking for {path} failed with HTTP {status}: {text}"),
+        }
+    }
+    Ok(found)
+}
+
+/// Fails when [`legacy_system_streams`] finds any. A node's publish grant on
+/// every workload stream still reaches the old ones, so nothing may start
+/// while one exists.
+pub async fn refuse_legacy_streams(settings: &Settings) -> Result<()> {
+    let found = legacy_system_streams(settings).await?;
+    if found.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{} still exist in namespace {}: the sys.* streams moved to {}, and a node's \
+         publish grant on every stream of {} still reaches the old ones. Migrate first: \
+         see docs/design.md, Migrating the system streams",
+        found.join(", "),
+        settings.namespace,
+        names::system_namespace(&settings.namespace),
+        settings.namespace
+    )
+}
+
 /// Lists a control plane collection, unpaged.
 async fn list<T: serde::de::DeserializeOwned>(settings: &Settings, path: &str) -> Result<Vec<T>> {
     let (status, text) = call(settings, "GET", path, None).await?;

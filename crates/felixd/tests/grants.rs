@@ -394,6 +394,7 @@ async fn init_and_an_agent_refuse_old_system_streams_in_the_namespace() {
             &replication_factor().to_string(),
         ])
         .arg(&module)
+        .stderr(std::process::Stdio::piped())
         .output()
         .unwrap();
     assert!(!init.status.success(), "init went on past an old sys.specs");

@@ -205,8 +205,8 @@ pub async fn run(
         }
         None => None,
     };
+    crate::admin::refuse_legacy_streams(settings).await?;
     let felix = Felix::connect(settings).await?;
-    felix.refuse_legacy_streams().await?;
     let node = Arc::new(Node {
         felix,
         gate: Gate::default(),

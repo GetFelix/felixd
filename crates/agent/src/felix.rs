@@ -253,37 +253,6 @@ impl Felix {
         }
     }
 
-    /// The system streams that exist in the workload namespace itself, where
-    /// they lived before they moved to the system namespace. A node's grant on
-    /// every workload stream still reaches them, so nothing may start while
-    /// one exists. A stream that cannot be probed counts as existing.
-    pub async fn legacy_system_streams(&self) -> Result<Vec<String>> {
-        let mut found = Vec::new();
-        for stream in names::LEGACY_SYSTEM_STREAMS {
-            if self.tail_in(&self.namespace, stream).await?.is_some() {
-                found.push(format!("{}/{stream}", self.namespace));
-            }
-        }
-        Ok(found)
-    }
-
-    /// Fails when [`Self::legacy_system_streams`] finds any.
-    pub async fn refuse_legacy_streams(&self) -> Result<()> {
-        let found = self.legacy_system_streams().await?;
-        if found.is_empty() {
-            return Ok(());
-        }
-        bail!(
-            "{} still exist in namespace {}: the sys.* streams moved to {}, and a node's \
-             publish grant on every stream of {} still reaches the old ones. Migrate first: \
-             see docs/design.md, Migrating the system streams",
-            found.join(", "),
-            self.namespace,
-            names::system_namespace(&self.namespace),
-            self.namespace
-        )
-    }
-
     async fn read_tail_while(
         &self,
         retry: fn(&anyhow::Error) -> bool,

@@ -521,8 +521,8 @@ async fn main() -> Result<()> {
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
             let settings = connection.settings()?;
             let hash = module::hash(&bytes);
+            felixd_agent::admin::refuse_legacy_streams(&settings).await?;
             let felix = Felix::connect(&settings).await?;
-            felix.refuse_legacy_streams().await?;
             felixd_agent::admin::ensure_namespace(&settings).await?;
             felixd_agent::admin::ensure_grants(&settings).await?;
             if let Lookup::Value(Some(found)) = felix
