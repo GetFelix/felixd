@@ -4,6 +4,7 @@
 //! - [`admission`]: requests on `sys.intake` and admission's decisions.
 //! - [`names`]: the caches and streams felixd uses, and how a workload id maps
 //!   to its streams.
+//! - [`grants`]: the Felix grants each felixd role holds.
 //! - [`output`] and [`snapshot`]: the records on output and snapshot streams.
 //! - [`spec`], [`lease`] and [`node`]: the values in the `workloads`, `leases`,
 //!   `nodes` and `drains` caches.
@@ -21,6 +22,7 @@
 pub mod admission;
 pub mod check;
 pub mod class;
+pub mod grants;
 pub mod lease;
 pub mod merge;
 pub mod module;

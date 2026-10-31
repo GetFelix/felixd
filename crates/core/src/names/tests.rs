@@ -29,3 +29,13 @@ fn ids_are_checked() {
         assert_eq!(validate_id(bad), Err(InvalidId), "{bad:?}");
     }
 }
+
+#[test]
+fn system_streams_live_in_their_own_namespace() {
+    for stream in [SPECS, INTAKE, FACTS] {
+        assert_eq!(namespace_of("prod", stream), "prod.sys", "{stream}");
+    }
+    for stream in ["in", "wl.admission.out", "wl.scheduler.out", "system"] {
+        assert_eq!(namespace_of("prod", stream), "prod", "{stream}");
+    }
+}

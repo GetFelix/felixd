@@ -37,7 +37,7 @@ use crate::lease::{self, Confirmer, Fence, Held};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
 use crate::runner::{LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload};
-use crate::settings::Settings;
+use crate::settings::{Secret, Settings};
 use crate::specs;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -83,16 +83,26 @@ pub struct AgentConfig {
     /// How often this node appends its facts for the scheduler when they
     /// have not changed.
     pub facts_every: Duration,
+    /// The broker token of admission's credential, which admission's
+    /// projector writes `sys.specs` with. The node's own token when left
+    /// out. A node runs admission only with a control plane token too.
+    pub admission_token: Option<Secret>,
+}
+
+/// Admission's credential on a node that holds it: what admission's
+/// projector writes `sys.specs` and `workloads` and creates streams with.
+struct AdmissionCredential {
+    settings: Settings,
+    felix: Felix,
 }
 
 struct Node {
     felix: Felix,
     /// Where admission was bootstrapped on `sys.specs`, as found.
     gate: Gate,
-    /// The settings admission's projector creates streams with, on a node
-    /// that has a control plane token. A node without one leaves admission
-    /// to the others.
-    projector: Option<Settings>,
+    /// Admission's credential, on a node that has a control plane token. A
+    /// node without one leaves admission to the others.
+    projector: Option<Arc<AdmissionCredential>>,
     modules: Modules,
     node_id: String,
     timing: LeaseTiming,
@@ -184,13 +194,21 @@ pub async fn run(
         .unwrap_or_default()
         .as_nanos() as u64
         ^ (u64::from(std::process::id()) << 32);
+    let projector = match &settings.controlplane_token {
+        Some(_) => {
+            let mut settings = settings.clone();
+            if let Some(token) = config.admission_token {
+                settings.token = token;
+            }
+            let felix = Felix::connect(&settings).await?;
+            Some(Arc::new(AdmissionCredential { settings, felix }))
+        }
+        None => None,
+    };
     let node = Arc::new(Node {
         felix: Felix::connect(settings).await?,
         gate: Gate::default(),
-        projector: settings
-            .controlplane_token
-            .is_some()
-            .then(|| settings.clone()),
+        projector,
         modules: Modules::new(Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?),
         node_id: config.node_id,
         timing: config.lease,
@@ -721,11 +739,11 @@ async fn own(
                 let projecting = (id == names::ADMISSION)
                     .then(|| node.projector.clone())
                     .flatten()
-                    .map(|settings| {
+                    .map(|credential| {
                         let (stop_projecting, stopped) = watch::channel(false);
-                        let node = node.clone();
                         let task = tokio::spawn(async move {
-                            admission::project(&node.felix, &settings, stopped).await;
+                            let AdmissionCredential { settings, felix } = &*credential;
+                            admission::project(felix, settings, stopped).await;
                         });
                         (stop_projecting, task)
                     });

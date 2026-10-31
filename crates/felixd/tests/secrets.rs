@@ -87,6 +87,12 @@ impl Logs {
         let child = t
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
             .args(["--metrics-bind", metrics])
+            // Admission's projector connects with its own credential, here
+            // the same token, so that connection's logs are scanned too.
+            .env(
+                "FELIXD_ADMISSION_TOKEN_FILE",
+                std::env::var("FELIX_AUTH_TOKEN_FILE").unwrap(),
+            )
             .env("RUST_LOG", LOGS)
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err))
@@ -110,15 +116,14 @@ fn token_file(dir: &Path, name: &str, token: &str) -> PathBuf {
     path
 }
 
-/// The names of every `kind` (`streams` or `caches`) in the test's
-/// namespace, from the control plane, every page.
-async fn listed(t: &TestFelix, kind: &str, field: &str) -> Vec<String> {
+/// The names of every `kind` (`streams` or `caches`) in `namespace`, from
+/// the control plane, every page.
+async fn listed(t: &TestFelix, namespace: &str, kind: &str, field: &str) -> Vec<String> {
     let s = &t.settings;
     let base = format!(
-        "{}/v1/tenants/{}/namespaces/{}/{kind}",
+        "{}/v1/tenants/{}/namespaces/{namespace}/{kind}",
         s.controlplane_url.trim_end_matches('/'),
         s.tenant,
-        s.namespace
     );
     let authorization = format!("Bearer {}", s.controlplane_token.as_ref().unwrap().expose());
     let field = field.to_owned();
@@ -240,10 +245,19 @@ async fn no_credential_reaches_a_record_a_metric_an_error_or_a_log() {
     std::fs::remove_file(&wasm).unwrap();
     std::fs::remove_file(&admission).unwrap();
 
-    // Every stream and cache in the namespace, as the control plane lists
-    // them, so one added later is scanned without changing this test.
-    let streams = listed(&t, "streams", "stream").await;
-    let caches = listed(&t, "caches", "cache").await;
+    // Every stream and cache in the namespace and its system namespace, as
+    // the control plane lists them, so one added later is scanned without
+    // changing this test.
+    let namespace = &t.settings.namespace;
+    let mut streams = listed(&t, namespace, "streams", "stream").await;
+    streams.extend(listed(&t, &names::system_namespace(namespace), "streams", "stream").await);
+    let caches = listed(&t, namespace, "caches", "cache").await;
+    assert!(
+        listed(&t, &names::system_namespace(namespace), "caches", "cache")
+            .await
+            .is_empty(),
+        "a cache in the system namespace"
+    );
     let decisions = names::output_stream(names::ADMISSION);
     for want in [
         INPUT,

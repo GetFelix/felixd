@@ -12,6 +12,8 @@ use felix_client::{
     SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
 
+use felixd_core::names;
+
 use crate::settings::Settings;
 
 /// Reads of a stream page by page stay this small so one reply stays small.
@@ -21,8 +23,9 @@ const PAGE_RECORDS: u32 = 256;
 /// served by the broker.
 const READY_WITHIN: Duration = Duration::from_secs(20);
 
-/// A connection to Felix, scoped to one tenant and namespace. All streams here
-/// have a single shard.
+/// A connection to Felix, scoped to one tenant and namespace, and that
+/// namespace's system namespace for system streams. All streams here have a
+/// single shard.
 pub struct Felix {
     client: Arc<ClusterClient>,
     tenant: String,
@@ -168,12 +171,19 @@ impl Felix {
             .await
     }
 
+    /// The namespace `stream` lives in: system streams are apart from the
+    /// workload streams ([`names::namespace_of`]).
+    fn namespace_of(&self, stream: &str) -> String {
+        names::namespace_of(&self.namespace, stream)
+    }
+
     /// Publishes one record and waits until it is acknowledged.
     pub async fn publish(&self, stream: &str, payload: Vec<u8>) -> Result<()> {
+        let namespace = self.namespace_of(stream);
         until_ready(|| {
             self.client.publish(
                 &self.tenant,
-                &self.namespace,
+                &namespace,
                 stream,
                 payload.clone(),
                 AckMode::PerMessage,
@@ -193,7 +203,7 @@ impl Felix {
         self.client
             .publish_if(
                 &self.tenant,
-                &self.namespace,
+                &self.namespace_of(stream),
                 stream,
                 None,
                 payloads,
@@ -241,9 +251,10 @@ impl Felix {
         retry: fn(&anyhow::Error) -> bool,
         stream: &str,
     ) -> Result<u64> {
+        let namespace = self.namespace_of(stream);
         let read = until(retry, || {
             self.client
-                .read(&self.tenant, &self.namespace, stream, 0, u64::MAX, None, 1)
+                .read(&self.tenant, &namespace, stream, 0, u64::MAX, None, 1)
         })
         .await;
         match read {
@@ -302,7 +313,7 @@ impl Felix {
             .client
             .read(
                 &self.tenant,
-                &self.namespace,
+                &self.namespace_of(stream),
                 stream,
                 0,
                 from,
@@ -356,9 +367,10 @@ impl Felix {
     /// the Unix epoch), by the clock of the broker that led the shard. `None`
     /// when no record is that recent.
     pub async fn offset_for_time(&self, stream: &str, at_micros: u64) -> Result<Option<u64>> {
+        let namespace = self.namespace_of(stream);
         until_ready(|| {
             self.client
-                .offset_for_time(&self.tenant, &self.namespace, stream, 0, at_micros)
+                .offset_for_time(&self.tenant, &namespace, stream, 0, at_micros)
         })
         .await
     }
@@ -376,7 +388,7 @@ impl Felix {
         self.client
             .subscribe_from(
                 &self.tenant,
-                &self.namespace,
+                &self.namespace_of(stream),
                 stream,
                 Some(StartPosition::Offset(from)),
             )

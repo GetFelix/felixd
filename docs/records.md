@@ -4,6 +4,9 @@ The formats live in `felixd-core`, which does no I/O. Binary records start with 
 reader refuses a version it does not know, so an older felixd fails a workload whose stream holds a
 newer record instead of misreading it. Integers are big endian.
 
+The `sys.*` streams (`sys.specs`, `sys.intake`, `sys.facts`) live in the namespace
+`<namespace>.sys`; every other stream and every cache in the workload namespace.
+
 ## Output stream records
 
 On `wl.<id>.out`. The version is 4, followed by a kind byte.

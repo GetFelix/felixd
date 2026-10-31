@@ -878,15 +878,23 @@ needs only read on its inputs.
 
 ## Grants
 
+`felixd init` writes these as Felix RBAC policies for three roles per
+namespace, `role:felixd.<namespace>.node`, `.admission` and `.submitter`
+(`felixd_core::grants`), and writing them again is a no-op. An operator
+assigns principals to the roles. Felix grants a stream by name or a whole
+namespace's streams, and allows only, so the `sys.*` streams live in their own
+namespace, `<namespace>.sys`: a node's grant on every workload stream then
+reaches none of them.
+
 | Principal | May |
 |---|---|
-| Node | Read `workloads`, `sys.specs`, `modules`, `epochs` and `drains`; write `leases`, `epochs` and `nodes`; write `workloads` to mark a workload failed; read every input; publish to `wl.*.out`, `wl.*.snap` and `wl.*.merge` |
-| Operator (`felixd run`) | Read and write `workloads`; read `sys.specs` and append to it (a conditional write); write `modules`; read the tails of the output and snapshot streams (a conditional write, so publish) to refuse a spec change once records exist; create the caches and streams through the control plane. Today's grant, replaced by the submitter and admission rows below |
-| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out` and `sys.specs`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
-| Admission | Read `sys.intake` and `modules`; write `sys.specs` and `workloads`; hold the stream-creation credential. Today its holder's node token and control plane token, so any node with both can write `sys.specs` |
-| Operator (`felixd init`) | Write admission's own spec directly. The one direct write left |
-| Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing |
-| Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane |
+| Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
+| Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams, and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
+| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. The one direct write left. Not written by `init` |
+| Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
+| Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
+| Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
 but a compromised node could write garbage. Per-lease tokens close that
@@ -1501,6 +1509,8 @@ now:
    checked against past requests.
 4. **Admission holds the stream-creation credential**, bound in its spec
    ([Credentials](#credentials), #97). Agents never hold control-plane rights.
+   Built: a separate credential a node is given, granted as in
+   [Grants](#grants); binding it by name in the spec is #97.
 5. **Modules stay in the `modules` cache**, uploaded by hash. The store is
    content-addressed, so a submitter cannot overwrite another's module, and
    binaries stay off the log. Admission verifies presence and size.
@@ -1558,15 +1568,28 @@ projector appends a skip record for an accepted decision whose module does not
 match, and takes its progress from the latest decision any verified record,
 skip records included, names.
 
+Built (#117): the [grants](#grants). `felixd init` writes the roles'
+policies, and the system streams live in `<namespace>.sys`, apart from the
+workload streams every node may publish to. Only admission's credential may
+publish to `sys.specs`; a submitter or a node is refused there and on creating
+streams. That closes most of what the gate had to tolerate from #114: no
+submitter or node can append a forged record, an old acceptance again, or a
+system workload's spec. Admission's credential and the operator still can, and
+the gate lets a system workload's record through by id alone, so admission's
+credential is as strong as the operator's for `admission` and `scheduler`.
+Nodes can still point `workloads` at an old record, which the gate refuses as
+before, and it still checks every record, so a deployment that grants more
+than this table is no less safe than before.
+
 Not built: the requester. Felix records a record's publisher only when the
 broker is configured to and a reader asks, and the workload contract has no
 field for it, so admission decides from the payload alone and policy cannot
-depend on who asked. Grants (#117) are not configured by felixd: until they
-are, a principal that can write `sys.specs` can still write admission's own
-spec, and any node can write `wl.admission.out`, as it can any output, until
-per-lease tokens (#74, GetFelix/felix#1625). The stream-creation credential is
-the holder's control plane token rather than one bound in admission's spec
-(#97), so only nodes with one hold admission.
+depend on who asked. Any node can write `wl.admission.out`, as it can any
+output, until per-lease tokens (#74, GetFelix/felix#1625), and admission's
+projector records what it finds there. Admission's credential is node
+configuration (`--admission-token-file` and the control plane token) rather
+than a name bound in admission's spec (#97), so a node given it holds it
+whether or not it holds admission's lease.
 
 Open: the quota model (per tenant, per submitter, or per namespace, and what
 it counts: workloads, module bytes, fuel and memory limits).

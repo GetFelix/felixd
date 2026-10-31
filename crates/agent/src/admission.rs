@@ -501,7 +501,8 @@ impl Projector {
 
     async fn catch_up(&mut self, felix: &Felix, settings: &Settings) -> Result<()> {
         let stream = names::output_stream(names::ADMISSION);
-        let tail = felix.tail(&stream).await?;
+        // Admission's credential reads the decisions and does not write them.
+        let tail = felix.read_tail(&stream).await?;
         while self.next < tail {
             let (page, after) = felix.read_page(&stream, self.next, tail).await?;
             for found in page {

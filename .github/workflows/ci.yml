@@ -39,6 +39,7 @@ jobs:
       FELIX_CONTROLPLANE_URL: http://127.0.0.1:8443
       FELIX_CONTROLPLANE_TOKEN_FILE: /tmp/felix/controlplane.jwt
       FELIXD_RESTRICTED_TOKEN_FILE: /tmp/felix/restricted-node.jwt
+      FELIXD_GRANTS_DIR: /tmp/felix
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2

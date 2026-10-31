@@ -20,7 +20,7 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 
 | Command | What it does |
 |---|---|
-| `felixd init <module>` | Brings admission up: writes its spec directly with the control plane token. Running it again with the same module changes nothing. |
+| `felixd init <module>` | Brings admission up: creates the namespace and its system namespace, writes the grants of felixd's roles there, and writes admission's spec directly with the control plane token. Running it again with the same module changes nothing. |
 | `felixd run [flags] <module>` | Where admission runs, uploads the module, publishes a request on `sys.intake` and prints admission's decision, exiting 1 on a rejection. Otherwise stores the module, creates the workload's streams and starts it. `--id` and `--input` are required; repeat `--input` for several, merged through a merge log. |
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
 | `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
@@ -40,7 +40,9 @@ refused above about 125,000, where a node's facts would not fit in one record),
 `--claim-delay-ms` (1000), `--assignment-bound-ms` (15000), the longest a free workload is left to
 another node it is assigned to that can take it, `--assignment-grace-ms` (2000), the longest an
 unassigned one waits for a healthy scheduler to read its spec, and `--facts-every-ms` (three lease
-TTLs), how often the node appends its facts for the scheduler when they have not changed.
+TTLs), how often the node appends its facts for the scheduler when they have not changed, and
+`--admission-token-file` (`FELIXD_ADMISSION_TOKEN_FILE`), the broker token of admission's
+credential, which the node's own token stands in for when left out.
 
 Flags of `check`: `--id` (repeat for several; every workload by default), `--complete`, which
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every
@@ -82,9 +84,16 @@ To admit work through admission, run `felixd init admission.wasm` (the container
 `/usr/local/share/felixd/admission.wasm`) once per namespace. From then on `felixd run` publishes
 a request on `sys.intake`, and a node runs a spec record written after admission's own only if it
 names an accepting decision on `wl.admission.out` for exactly that spec. Only nodes with a control
-plane token hold admission, since its holder creates the streams of what it accepts. A submitter
-needs put on `modules`, publish on `sys.intake` and read on `wl.admission.out` and `sys.specs`.
+plane token hold admission, since its holder creates the streams of what it accepts.
 Every node must run a build that knows admission before `init`: an older one ignores it.
+
+`init` also writes the grants of three roles, `role:felixd.<namespace>.node`, `.admission` and
+`.submitter` (the table is in [docs/design.md](../../docs/design.md#grants)); assign principals to
+them with `felixctl rbac grouping add`. The operator running `init` needs `rbac.view` and
+`rbac.policy.manage`. A node holding admission runs with the admission principal's broker token in
+`--admission-token-file` and its control plane token in `--controlplane-token-file`; only that
+credential may write `sys.specs`. The `sys.*` streams live in the namespace `<namespace>.sys`, so a
+node's grant on every stream of the namespace does not reach them.
 
 Submit a workload and start a node (set the variables as in the top-level
 [README](../../README.md#try-it) first):

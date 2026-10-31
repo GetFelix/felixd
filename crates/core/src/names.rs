@@ -15,6 +15,12 @@ pub const MODULES: &str = "modules";
 /// operator lifts it.
 pub const DRAINS: &str = "drains";
 
+/// Streams named with this prefix live in the system namespace
+/// ([`system_namespace`]), apart from workload streams, so a grant on every
+/// stream of the workload namespace, which every node needs, reaches none of
+/// them. Felix grants a stream by name or by whole namespace only.
+pub const SYSTEM_PREFIX: &str = "sys.";
+
 /// Stream of spec records: every version of every workload's spec.
 pub const SPECS: &str = "sys.specs";
 /// Stream of node facts: what each node says about itself while a scheduler
@@ -40,6 +46,21 @@ pub const SYSTEM: [&str; 2] = [ADMISSION, SCHEDULER];
 /// Whether `id` is a system workload's.
 pub fn is_system(id: &str) -> bool {
     SYSTEM.contains(&id)
+}
+
+/// The namespace holding the system streams of workload namespace
+/// `namespace`.
+pub fn system_namespace(namespace: &str) -> String {
+    format!("{namespace}.sys")
+}
+
+/// The namespace `stream` lives in, for workload namespace `namespace`.
+pub fn namespace_of(namespace: &str, stream: &str) -> String {
+    if stream.starts_with(SYSTEM_PREFIX) {
+        system_namespace(namespace)
+    } else {
+        namespace.to_owned()
+    }
 }
 
 /// The longest workload id.
