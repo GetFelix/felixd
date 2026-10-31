@@ -205,8 +205,10 @@ pub async fn run(
         }
         None => None,
     };
+    let felix = Felix::connect(settings).await?;
+    felix.refuse_legacy_streams().await?;
     let node = Arc::new(Node {
-        felix: Felix::connect(settings).await?,
+        felix,
         gate: Gate::default(),
         projector,
         modules: Modules::new(Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?),

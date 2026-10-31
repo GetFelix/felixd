@@ -84,7 +84,8 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
             ("cache.read", cache(names::MODULES)),
             ("cache.read", cache(names::WORKLOADS)),
             ("cache.write", cache(names::WORKLOADS)),
-            // Creating an accepted workload's streams, never a system one.
+            // Creating an accepted workload's streams, never a system one. Felix has
+            // no create-only action, so it also covers deleting them.
             ("stream.manage", stream(namespace, "*")),
         ],
         Role::Submitter => vec![
@@ -105,6 +106,74 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
             action: action.to_owned(),
         })
         .collect()
+}
+
+/// One role assignment, as the control plane's grouping API has it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grouping {
+    pub user: String,
+    pub role: String,
+}
+
+/// Whether `subject` is a felixd role of `namespace`, a known one or not.
+/// Role names have no dot, so `role:felixd.a.b.node` is a role of namespace
+/// `a.b`, not an unknown role of `a`.
+fn is_felixd_subject(namespace: &str, subject: &str) -> bool {
+    subject
+        .strip_prefix(&format!("role:felixd.{namespace}."))
+        .is_some_and(|name| !name.contains('.'))
+}
+
+/// Checks what the control plane holds for `namespace` against
+/// [`policies`] and returns the rules still missing. Any rule under a felixd
+/// role that is not in [`policies`] (a wider one, or another role) is an
+/// error, and so is any grouping that makes a felixd role inherit another
+/// role, or gives one principal two of the roles: the roles' separation
+/// holds only if nothing else adds to them.
+pub fn audit(
+    tenant: &str,
+    namespace: &str,
+    held: &[Policy],
+    groupings: &[Grouping],
+) -> Result<Vec<Policy>, String> {
+    let wanted = policies(tenant, namespace);
+    for policy in held {
+        if is_felixd_subject(namespace, &policy.subject) && !wanted.contains(policy) {
+            return Err(format!(
+                "{} holds {} on {}, which felixd does not grant it",
+                policy.subject, policy.action, policy.object
+            ));
+        }
+    }
+    let roles: Vec<String> = Role::ALL.iter().map(|r| r.subject(namespace)).collect();
+    for grouping in groupings {
+        if is_felixd_subject(namespace, &grouping.user) {
+            return Err(format!(
+                "{} is assigned to {}; a felixd role must not inherit another",
+                grouping.user, grouping.role
+            ));
+        }
+        if is_felixd_subject(namespace, &grouping.role) && !roles.contains(&grouping.role) {
+            return Err(format!(
+                "{} is assigned to {}, which is not a felixd role",
+                grouping.user, grouping.role
+            ));
+        }
+    }
+    for (i, grouping) in groupings.iter().enumerate() {
+        let felixd = |g: &Grouping| roles.contains(&g.role);
+        if felixd(grouping)
+            && groupings[..i]
+                .iter()
+                .any(|other| other.user == grouping.user && felixd(other) && other != grouping)
+        {
+            return Err(format!(
+                "{} holds more than one felixd role in {namespace}; node and admission must be different principals",
+                grouping.user
+            ));
+        }
+    }
+    Ok(wanted.into_iter().filter(|p| !held.contains(p)).collect())
 }
 
 #[cfg(test)]

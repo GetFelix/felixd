@@ -744,11 +744,13 @@ name = "felixd-agent"
 version = "0.1.0-preview.1"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "felix-client",
  "felixd-core",
  "felixd-runtime",
  "libc",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

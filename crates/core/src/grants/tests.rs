@@ -57,3 +57,75 @@ fn roles_are_per_namespace() {
         );
     }
 }
+
+fn held(role: Role) -> Vec<Policy> {
+    role_policies(role, "t", "prod")
+}
+
+fn all() -> Vec<Policy> {
+    policies("t", "prod")
+}
+
+fn group(user: &str, role: Role) -> Grouping {
+    Grouping {
+        user: user.to_owned(),
+        role: role.subject("prod"),
+    }
+}
+
+#[test]
+fn an_audit_returns_only_the_missing_rules() {
+    assert_eq!(audit("t", "prod", &[], &[]).unwrap(), all());
+    assert!(audit("t", "prod", &all(), &[]).unwrap().is_empty());
+    let missing = audit("t", "prod", &held(Role::Node), &[]).unwrap();
+    assert_eq!(missing.len(), all().len() - held(Role::Node).len());
+}
+
+#[test]
+fn a_wider_rule_under_a_felixd_role_is_refused() {
+    let mut rules = all();
+    rules.push(Policy {
+        subject: Role::Node.subject("prod"),
+        object: "stream:t/prod.sys/*".to_owned(),
+        action: "stream.publish".to_owned(),
+    });
+    assert!(audit("t", "prod", &rules, &[]).is_err());
+    // Rules of other subjects and of another namespace's roles are not ours.
+    let mut other = all();
+    other.push(Policy {
+        subject: "role:ops".to_owned(),
+        object: "stream:t/*".to_owned(),
+        action: "stream.publish".to_owned(),
+    });
+    other.push(Policy {
+        subject: Role::Node.subject("prod.x"),
+        object: "stream:t/prod.x/*".to_owned(),
+        action: "stream.publish".to_owned(),
+    });
+    assert!(audit("t", "prod", &other, &[]).unwrap().is_empty());
+    let mut unknown = all();
+    unknown.push(Policy {
+        subject: "role:felixd.prod.extra".to_owned(),
+        object: "stream:t/prod/*".to_owned(),
+        action: "stream.manage".to_owned(),
+    });
+    assert!(audit("t", "prod", &unknown, &[]).is_err());
+}
+
+#[test]
+fn a_principal_holding_two_roles_or_a_nested_role_is_refused() {
+    let one = [group("alice", Role::Node), group("bob", Role::Admission)];
+    assert!(audit("t", "prod", &all(), &one).is_ok());
+    let both = [group("alice", Role::Node), group("alice", Role::Admission)];
+    assert!(audit("t", "prod", &all(), &both).is_err());
+    let nested = [Grouping {
+        user: Role::Node.subject("prod"),
+        role: "role:admin".to_owned(),
+    }];
+    assert!(audit("t", "prod", &all(), &nested).is_err());
+    let unknown = [Grouping {
+        user: "alice".to_owned(),
+        role: "role:felixd.prod.extra".to_owned(),
+    }];
+    assert!(audit("t", "prod", &all(), &unknown).is_err());
+}

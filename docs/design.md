@@ -889,12 +889,43 @@ reaches none of them.
 | Principal | May |
 |---|---|
 | Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
-| Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams, and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
+| Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
 | Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
 | Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. The one direct write left. Not written by `init` |
 | Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
+
+Residuals of `stream.manage`: Felix has no create-only stream action, and
+`stream.manage` over `<namespace>/*` also covers deleting or patching a
+stream and operating its consumer groups (`group.manage`). Admission's
+credential can delete or patch any workload stream. Nothing in
+`<namespace>.sys` is in its reach.
+
+`felixd init` audits before it writes. It lists every rule and role
+assignment, needs `rbac.view` over the whole tenant because the control plane
+filters the listing to the caller's scope, and refuses, writing nothing, if a
+felixd role holds a rule `felixd_core::grants` does not give it, if a felixd
+role inherits another role, or if one principal holds two of the roles.
+Namespaces ending in `.sys` are refused everywhere, since `x.sys` is `x`'s
+system namespace.
+
+### Migrating the system streams
+
+Before the split `sys.specs`, `sys.intake` and `sys.facts` lived in the
+workload namespace, and a node's publish grant on every stream of it still
+reaches them. `felixd init` and `felixd agent` refuse to start while any
+exists. A fresh namespace is the simplest move. To keep the namespace:
+
+1. Stop every agent and every `felixd run`.
+2. Delete `sys.specs`, `sys.intake` and `sys.facts` from the workload
+   namespace through the control plane (`DELETE
+   /v1/tenants/<tenant>/namespaces/<namespace>/streams/<stream>`). Their
+   history goes with them: spec offsets restart, so a workload that ran
+   before must be resubmitted under a new id.
+3. Delete the `workloads` entries of the workloads you do not resubmit.
+4. Run `felixd init`, which creates `<namespace>.sys` and writes the grants,
+   then start agents and resubmit.
 
 In v0 any node may write any workload's output. Fencing keeps that correct,
 but a compromised node could write garbage. Per-lease tokens close that
@@ -1574,7 +1605,9 @@ workload streams every node may publish to. Only admission's credential may
 publish to `sys.specs`; a submitter or a node is refused there and on creating
 streams. That closes most of what the gate had to tolerate from #114: no
 submitter or node can append a forged record, an old acceptance again, or a
-system workload's spec. Admission's credential and the operator still can, and
+system workload's spec directly. A node can still forge a decision on
+`wl.admission.out`, which the projector then records on `sys.specs`; that
+stays open until per-lease tokens (#74). Admission's credential and the operator still can, and
 the gate lets a system workload's record through by id alone, so admission's
 credential is as strong as the operator's for `admission` and `scheduler`.
 Nodes can still point `workloads` at an old record, which the gate refuses as

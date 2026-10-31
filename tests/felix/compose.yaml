@@ -108,6 +108,10 @@ services:
         # stream.manage is what lets felixctl create and seek consumer groups.
         mint '{"principal":"p:dev","audience":"felix-broker","requested":["stream.publish","stream.subscribe","stream.manage","cache.read","cache.write"]}'
         field felix_token > "$$OUT/client.jwt"
+        # The same grants as client.jwt, as a different token: the leak scan
+        # in tests/secrets.rs looks for it apart from the operator's.
+        mint '{"principal":"p:dev","audience":"felix-broker","requested":["stream.publish","stream.subscribe","stream.manage","cache.read","cache.write"]}'
+        field felix_token > "$$OUT/admission-client.jwt"
         # A felixd node with only the grants docs/design.md gives one, in
         # namespace `restricted`: no publish on the workload's input.
         mint '{"principal":"p:node","audience":"felix-broker","requested":["stream.publish","stream.subscribe","cache.read","cache.write"]}'

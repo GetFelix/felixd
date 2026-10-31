@@ -39,3 +39,15 @@ fn system_streams_live_in_their_own_namespace() {
         assert_eq!(namespace_of("prod", stream), "prod", "{stream}");
     }
 }
+
+#[test]
+fn a_system_namespace_is_not_a_workload_namespace() {
+    assert!(validate_namespace("prod").is_ok());
+    assert!(validate_namespace("a.b").is_ok());
+    assert!(validate_namespace("sysx").is_ok());
+    for bad in ["", "prod.sys", ".sys", "a.sys.sys"] {
+        assert!(validate_namespace(bad).is_err(), "{bad:?}");
+    }
+    // The system namespace of any workload namespace is itself refused.
+    assert!(validate_namespace(&system_namespace("prod")).is_err());
+}

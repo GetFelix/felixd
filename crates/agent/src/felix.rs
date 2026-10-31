@@ -49,6 +49,7 @@ impl Felix {
             Some(path) => Some(Arc::new(root_store_from_pem_file(path)?)),
             None => None,
         };
+        names::validate_namespace(&settings.namespace)?;
         let quinn = felix_client::quic_client_config(roots, true)?;
         let config = ClientConfig {
             auth_tenant_id: Some(settings.tenant.clone()),
@@ -232,29 +233,66 @@ impl Felix {
     /// tail, which counts every committed record, so it is never below what
     /// a reader has already been given.
     pub async fn read_tail(&self, stream: &str) -> Result<u64> {
-        self.read_tail_while(not_ready, stream).await
+        let namespace = self.namespace_of(stream);
+        self.read_tail_while(not_ready, &namespace, stream).await
     }
 
     /// As [`Self::read_tail`], `None` for a stream the broker does not know.
     /// That is not waited out: a caller asking this expects the stream may
     /// never exist.
     pub(crate) async fn read_tail_if_exists(&self, stream: &str) -> Result<Option<u64>> {
-        match self.read_tail_while(unavailable, stream).await {
+        let namespace = self.namespace_of(stream);
+        self.tail_in(&namespace, stream).await
+    }
+
+    async fn tail_in(&self, namespace: &str, stream: &str) -> Result<Option<u64>> {
+        match self.read_tail_while(unavailable, namespace, stream).await {
             Ok(tail) => Ok(Some(tail)),
             Err(error) if not_found(&error) => Ok(None),
             Err(error) => Err(error),
         }
     }
 
+    /// The system streams that exist in the workload namespace itself, where
+    /// they lived before they moved to the system namespace. A node's grant on
+    /// every workload stream still reaches them, so nothing may start while
+    /// one exists. A stream that cannot be probed counts as existing.
+    pub async fn legacy_system_streams(&self) -> Result<Vec<String>> {
+        let mut found = Vec::new();
+        for stream in names::LEGACY_SYSTEM_STREAMS {
+            if self.tail_in(&self.namespace, stream).await?.is_some() {
+                found.push(format!("{}/{stream}", self.namespace));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Fails when [`Self::legacy_system_streams`] finds any.
+    pub async fn refuse_legacy_streams(&self) -> Result<()> {
+        let found = self.legacy_system_streams().await?;
+        if found.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "{} still exist in namespace {}: the sys.* streams moved to {}, and a node's \
+             publish grant on every stream of {} still reaches the old ones. Migrate first: \
+             see docs/design.md, Migrating the system streams",
+            found.join(", "),
+            self.namespace,
+            names::system_namespace(&self.namespace),
+            self.namespace
+        )
+    }
+
     async fn read_tail_while(
         &self,
         retry: fn(&anyhow::Error) -> bool,
+        namespace: &str,
         stream: &str,
     ) -> Result<u64> {
-        let namespace = self.namespace_of(stream);
         let read = until(retry, || {
             self.client
-                .read(&self.tenant, &namespace, stream, 0, u64::MAX, None, 1)
+                .read(&self.tenant, namespace, stream, 0, u64::MAX, None, 1)
         })
         .await;
         match read {

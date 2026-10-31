@@ -3,7 +3,7 @@
 //! streams.
 
 use anyhow::{Context, Result, bail};
-use felixd_core::grants::{self, Policy};
+use felixd_core::grants::{self, Grouping, Policy};
 use felixd_core::names;
 use serde_json::{Value, json};
 
@@ -29,6 +29,7 @@ impl StreamKind {
 
 /// Creates the namespace and its system namespace, if they do not exist.
 pub async fn ensure_namespace(settings: &Settings) -> Result<()> {
+    names::validate_namespace(&settings.namespace)?;
     for namespace in [
         settings.namespace.clone(),
         names::system_namespace(&settings.namespace),
@@ -68,22 +69,22 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
     post(settings, &format!("namespaces/{namespace}/caches"), body).await
 }
 
-/// Writes every rule of [`grants::policies`] for the namespace that the
-/// control plane does not already hold, so running it again writes nothing.
-/// Needs `rbac.view` and `rbac.policy.manage` over the namespace and its
-/// system namespace. Assigning principals to the roles is left to an
-/// operator.
+/// Writes every rule of [`grants::policies`] the control plane does not hold,
+/// so running it again writes nothing. It first lists every rule and role
+/// assignment and refuses, writing nothing, when a felixd role holds more than
+/// [`grants::policies`] gives it or one principal holds two roles
+/// ([`grants::audit`]). Needs `rbac.view` over the whole tenant, because a
+/// scope-filtered listing could hide the rule that breaks the roles apart; a
+/// token with less is refused. Also needs `rbac.policy.manage`. Assigning
+/// principals to the roles is left to an operator.
 pub async fn ensure_grants(settings: &Settings) -> Result<()> {
-    let (status, text) = call(settings, "GET", "rbac/policies", None).await?;
-    if status != 200 {
-        bail!("listing RBAC policies failed with HTTP {status}: {text}");
-    }
-    let held: Vec<Policy> =
-        serde_json::from_str(&text).context("the control plane's RBAC policy listing")?;
-    for policy in grants::policies(&settings.tenant, &settings.namespace) {
-        if held.contains(&policy) {
-            continue;
-        }
+    names::validate_namespace(&settings.namespace)?;
+    require_tenant_view(settings)?;
+    let held: Vec<Policy> = list(settings, "rbac/policies").await?;
+    let groupings: Vec<Grouping> = list(settings, "rbac/groupings").await?;
+    let missing = grants::audit(&settings.tenant, &settings.namespace, &held, &groupings)
+        .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
+    for policy in missing {
         let body = serde_json::to_value(&policy)?;
         let (status, text) = call(settings, "POST", "rbac/policies", Some(body)).await?;
         if !(200..=299).contains(&status) {
@@ -96,6 +97,55 @@ pub async fn ensure_grants(settings: &Settings) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Lists a control plane collection, unpaged.
+async fn list<T: serde::de::DeserializeOwned>(settings: &Settings, path: &str) -> Result<Vec<T>> {
+    let (status, text) = call(settings, "GET", path, None).await?;
+    if status != 200 {
+        bail!("listing {path} failed with HTTP {status}: {text}");
+    }
+    serde_json::from_str(&text).with_context(|| format!("the control plane's {path} listing"))
+}
+
+/// Refuses a control plane token that does not carry `rbac.view` over the
+/// whole tenant. The control plane filters its policy listing to the caller's
+/// scope, so with a narrower token the audit would be reading a partial list.
+/// A token that cannot be read is refused too.
+fn require_tenant_view(settings: &Settings) -> Result<()> {
+    let token = settings
+        .controlplane_token
+        .as_ref()
+        .context("a control plane token is needed to create streams, caches and grants")?;
+    if view_is_tenant_wide(token.expose(), &settings.tenant) {
+        return Ok(());
+    }
+    bail!(
+        "the control plane token must carry rbac.view over tenant:{}, not a narrower scope: \
+         the policy listing is filtered to the caller's scope, and a partial listing cannot \
+         show whether a felixd role holds more than it should",
+        settings.tenant
+    )
+}
+
+/// Whether the JWT's `perms` claim holds `rbac.view` over `tenant:{tenant}`.
+/// The signature is not checked: the control plane does that, and a forged
+/// claim only makes the audit read a listing it would filter anyway.
+fn view_is_tenant_wide(token: &str, tenant: &str) -> bool {
+    use base64::Engine as _;
+    let Some(payload) = token.split('.').nth(1) else {
+        return false;
+    };
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return false;
+    };
+    let Ok(claims) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    let wanted = format!("rbac.view:tenant:{tenant}");
+    claims["perms"]
+        .as_array()
+        .is_some_and(|perms| perms.iter().any(|p| p.as_str() == Some(wanted.as_str())))
 }
 
 /// POSTs to `/v1/tenants/{tenant}/{path}`. A 409 means it already exists.
@@ -147,3 +197,6 @@ async fn call(
     })
     .await?
 }
+
+#[cfg(test)]
+mod tests;

@@ -3,7 +3,9 @@
 //! the roles' grants, once however often it runs; a submitter and a node are
 //! refused on `sys.specs` and on creating streams; and with each principal
 //! holding only its role, admission records an accepted spec and the
-//! workload runs.
+//! workload runs. `felixd init` refuses, granting nothing, when a felixd role
+//! already holds more than it should or an old `sys.*` stream is in the
+//! workload namespace, and so does an agent for the old streams.
 //!
 //! Needs a Felix broker; see `common`. The restricted node's token comes from
 //! `FELIXD_RESTRICTED_TOKEN_FILE`, which `tests/felix/compose.yaml` mints for
@@ -294,4 +296,153 @@ async fn with_only_its_role_each_principal_runs_a_submitted_workload() {
     })
     .await;
     assert!(agent.alive());
+}
+
+/// POSTs `body` to the control plane as the operator.
+fn operator_post(settings: &Settings, path: &str, body: serde_json::Value) {
+    let url = format!(
+        "{}/v1/tenants/{}/{path}",
+        settings.controlplane_url.trim_end_matches('/'),
+        settings.tenant
+    );
+    let token = settings.controlplane_token.as_ref().unwrap().expose();
+    let sent = ureq::post(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json(&body)
+        .unwrap();
+    let status = sent.status().as_u16();
+    assert!(
+        (200..300).contains(&status) || status == 409,
+        "POST {path}: HTTP {status}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_refuses_a_felixd_role_that_holds_more_than_its_grants() {
+    let Some(t) = test_felix_in(Some("seeded")).await else {
+        return;
+    };
+    let wider = Policy {
+        subject: grants::Role::Node.subject("seeded"),
+        object: format!("stream:{}/seeded.sys/*", t.settings.tenant),
+        action: "stream.publish".to_owned(),
+    };
+    operator_post(
+        &t.settings,
+        "rbac/policies",
+        serde_json::to_value(&wider).unwrap(),
+    );
+    let dir = std::env::temp_dir().join(format!("felixd-seeded-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("admission.wasm");
+    std::fs::write(&module, felixd_testkit::workload("admission")).unwrap();
+    let status = t
+        .felixd(&[
+            "init",
+            "--replication-factor",
+            &replication_factor().to_string(),
+        ])
+        .arg(&module)
+        .status()
+        .unwrap();
+    assert!(!status.success(), "init went on past a wider rule");
+    let ours: Vec<Policy> = list_policies(&t.settings)
+        .into_iter()
+        .filter(|p| p.subject.starts_with("role:felixd.seeded."))
+        .collect();
+    assert_eq!(
+        ours,
+        [wider],
+        "init granted something beside the wider rule"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_and_an_agent_refuse_old_system_streams_in_the_namespace() {
+    let Some(t) = test_felix_in(Some("legacy")).await else {
+        return;
+    };
+    operator_post(
+        &t.settings,
+        "namespaces",
+        serde_json::json!({"namespace": "legacy", "display_name": "legacy"}),
+    );
+    operator_post(
+        &t.settings,
+        "namespaces/legacy/streams",
+        serde_json::json!({
+            "stream": "sys.specs", "kind": "Stream", "shards": 1,
+            "replication_factor": replication_factor(),
+            "retention": {"max_age_seconds": null, "max_size_bytes": null},
+            "consistency": if replication_factor() > 1 { "Quorum" } else { "Leader" },
+            "delivery": "AtLeastOnce", "durable": true,
+        }),
+    );
+    let dir = std::env::temp_dir().join(format!("felixd-legacy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("admission.wasm");
+    std::fs::write(&module, felixd_testkit::workload("admission")).unwrap();
+    let before = list_policies(&t.settings).len();
+    let init = t
+        .felixd(&[
+            "init",
+            "--replication-factor",
+            &replication_factor().to_string(),
+        ])
+        .arg(&module)
+        .output()
+        .unwrap();
+    assert!(!init.status.success(), "init went on past an old sys.specs");
+    assert!(
+        String::from_utf8_lossy(&init.stderr).contains("legacy/sys.specs"),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert_eq!(
+        list_policies(&t.settings).len(),
+        before,
+        "init granted something"
+    );
+
+    let mut agent = t
+        .felixd(&["agent", "--node-id", "legacy-node"])
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let exited = loop {
+        if let Some(status) = agent.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let _ = agent.kill();
+    let status = exited.expect("the agent started with an old sys.specs in its namespace");
+    assert!(!status.success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admission_is_refused_in_the_system_namespace() {
+    let Some((t, roles)) = roles().await else {
+        return;
+    };
+    let admission = roles.settings(&t, "admission");
+    let created = ensure_stream(&admission, "sys.forged", kind()).await;
+    let error = created.expect_err("admission created a stream in the system namespace");
+    assert!(format!("{error:#}").contains("HTTP 403"), "{error:#}");
+    let felix = Felix::connect(&admission).await.unwrap();
+    for stream in [names::INTAKE, names::FACTS] {
+        let error = felix
+            .publish(stream, vec![0])
+            .await
+            .expect_err(&format!("admission published to {stream}"));
+        assert!(forbidden(&error), "{stream}: {error:#}");
+    }
 }
