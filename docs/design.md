@@ -914,8 +914,10 @@ system namespace.
 
 Before the split `sys.specs`, `sys.intake` and `sys.facts` lived in the
 workload namespace, and a node's publish grant on every stream of it still
-reaches them. `felixd init` and `felixd agent` refuse to start while any
-exists. A fresh namespace is the simplest move. To keep the namespace:
+reaches them. `felixd init` is what grants nodes publish on
+`<namespace>/*`, and it refuses, writing nothing, while any of them exists;
+that check is what protects an upgrade. Agents hold no control plane rights
+and do not check. A fresh namespace is the simplest move. To keep the namespace:
 
 1. Stop every agent and every `felixd run`.
 2. Delete `sys.specs`, `sys.intake` and `sys.facts` from the workload

@@ -362,7 +362,7 @@ async fn init_refuses_a_felixd_role_that_holds_more_than_its_grants() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn init_and_an_agent_refuse_old_system_streams_in_the_namespace() {
+async fn init_refuses_old_system_streams_in_the_namespace() {
     let Some(t) = test_felix_in(Some("legacy")).await else {
         return;
     };
@@ -409,23 +409,6 @@ async fn init_and_an_agent_refuse_old_system_streams_in_the_namespace() {
         "init granted something"
     );
 
-    let mut agent = t
-        .felixd(&["agent", "--node-id", "legacy-node"])
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let exited = loop {
-        if let Some(status) = agent.try_wait().unwrap() {
-            break Some(status);
-        }
-        if std::time::Instant::now() > deadline {
-            break None;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
-    let _ = agent.kill();
-    let status = exited.expect("the agent started with an old sys.specs in its namespace");
-    assert!(!status.success());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

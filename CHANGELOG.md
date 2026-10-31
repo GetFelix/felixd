@@ -10,9 +10,10 @@
   publishes requests and puts modules; a node holds no control plane rights.
   Breaking: the `sys.*` streams move to the namespace `<namespace>.sys`, so a
   node's grant on every workload stream does not reach them; `felixd run` and
-  `felixd init` create it. `felixd init` and `felixd agent` refuse to start
-  while an old `sys.*` stream is in the workload namespace; the migration
-  steps are in docs/design.md ("Migrating the system streams"). `init` also
+  `felixd init` create it. `felixd init`, which grants nodes publish on
+  `<namespace>/*`, refuses while an old `sys.*` stream is in the workload
+  namespace, so that check is what protects an upgrade; agents do not check.
+  The migration steps are in docs/design.md ("Migrating the system streams"). `init` also
   refuses, writing nothing, when a felixd role holds a rule beyond its
   grants or one principal holds two roles, and needs `rbac.view` over the
   whole tenant. Namespaces ending in `.sys` are refused. New `felixd agent --admission-token-file`
