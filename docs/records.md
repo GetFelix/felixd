@@ -75,7 +75,9 @@ with no claim record before it. A reason this build does not know is refused whe
 record in full, but a node checking whether to run still reads the spec record from the header and
 leaves the workload alone, so an older build never runs what a newer one parked. It passes over the
 record the same way when it looks for what the stream was written under, so `felixd run` from an
-older build can still submit the spec that clears it. Any node whose spec
+older build can still submit the spec that clears it. A node of that build does not claim the
+workload while such a record is last on the stream, since reading past it would fail the new spec
+as poison; a node that reads the record takes it. Any node whose spec
 names that record and that finds it last on the stream, before it claims or while claiming, leaves
 the workload alone, so it is written once per workload, spec record and reason. It is not a failure
 and the spec stays `running`. A new spec record, which `felixd run` writes for any change, or

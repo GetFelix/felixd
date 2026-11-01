@@ -351,6 +351,22 @@ async fn a_record_with_an_unknown_reason_does_not_stop_a_new_spec() {
 
     assert!(t.run(ID, &module, INPUT, &[]).success());
     assert!(t.spec().await.record.unwrap() > parked);
+
+    // A node of this build cannot read the record, and claiming past it would
+    // fail the new spec as poison. It leaves the workload for a newer node.
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    let _agent = t.start_agent();
+    tokio::time::sleep(LEASE_TTL * 3).await;
+    assert!(t.outputs(OUTPUT).await.is_empty(), "it ran");
+    assert!(
+        t.felix
+            .cache_get(names::EPOCHS, ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "a node claimed it"
+    );
+    assert_eq!(t.spec().await.failure, None);
 }
 
 fn header(input_offset: u64) -> output::OutputHeader {

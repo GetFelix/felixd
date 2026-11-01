@@ -191,6 +191,12 @@ fn ran_something(record: &[u8]) -> bool {
     output::needs_operator_spec_of(record).is_none()
 }
 
+/// Whether `record` is a needs-operator record that this build cannot read,
+/// as a newer build writes one with a reason this build has no name for.
+fn unreadable_park(record: &[u8]) -> bool {
+    output::decode(record).is_err() && output::needs_operator_spec_of(record).is_some()
+}
+
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
 /// was written under another module or input, which `spec` would not
 /// reproduce, or when the floor ([`claim_floor`]) is above `spec`'s record,
@@ -219,6 +225,16 @@ pub(crate) async fn refuse_stale_or_foreign(
     let ours = spec.record.context("the spec names no spec record")?;
     let stream = names::output_stream(id);
     let tail = felix.tail(&stream).await?;
+    // The claim would take this record for poison and fail the spec, which
+    // never ran. A node of the build that wrote it takes the workload instead.
+    if let Some(last) = felix.last_record(&stream, tail).await?
+        && unreadable_park(&last.payload)
+    {
+        bail!(
+            "{stream}:{}: a needs-operator record with a reason this build cannot read",
+            last.offset
+        );
+    }
     if let Some(floor) = claim_floor(felix, &stream, tail)
         .await?
         .filter(|&floor| floor > ours)
