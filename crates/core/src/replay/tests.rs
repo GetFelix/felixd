@@ -196,7 +196,7 @@ fn a_degraded_record_is_passed_over_when_reading_the_recorded_outputs() {
     let stream = [
         encode_claim(1, "a"),
         out(0, 0, 1, b"x"),
-        crate::output::encode_degraded(1, 0, crate::class::ErrorClass::Transient, "gone"),
+        crate::output::encode_degraded(1, 0, crate::class::ErrorClass::Transient, "node-a", "gone"),
         encode_claim(2, "b"),
         out(1, 0, 2, b"y"),
     ];

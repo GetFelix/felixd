@@ -106,7 +106,7 @@ fn the_next_step_is_past_the_later_of_the_last_output_and_the_snapshot() {
 #[test]
 fn a_degraded_record_for_this_spec_record_shows_until_the_next_claim() {
     let running = spec(WorkloadState::Running, Some(3));
-    let ours = output::encode_degraded(2, 3, ErrorClass::Transient, "the broker is gone");
+    let ours = output::encode_degraded(2, 3, ErrorClass::Transient, "node-a", "the broker is gone");
     let (claimed, held) = (Lease::claim("b"), Lease::held("b", 3));
     let found = |lease, last| Found {
         spec: &running,
@@ -115,12 +115,13 @@ fn a_degraded_record_for_this_spec_record_shows_until_the_next_claim() {
     };
     let degraded = State::Degraded(Degraded {
         class: "transient".into(),
+        node: "node-a".into(),
         detail: "the broker is gone".into(),
     });
     assert_eq!(state(found(None, Some(&ours))), degraded);
     assert_eq!(
         state(found(None, Some(&ours))).to_string(),
-        "degraded (transient): the broker is gone"
+        "degraded (transient) on node-a: the broker is gone"
     );
     // A node that holds the lease but has written nothing yet changes nothing.
     assert_eq!(state(found(Some(&claimed), Some(&ours))), degraded);
@@ -129,13 +130,13 @@ fn a_degraded_record_for_this_spec_record_shows_until_the_next_claim() {
     let claim = output::encode_claim_under(3, 3, 3, "b");
     assert_eq!(state(found(Some(&held), Some(&claim))), State::Running);
     // A record for an earlier spec record was cleared by the new one.
-    let older = output::encode_degraded(2, 1, ErrorClass::Transient, "x");
+    let older = output::encode_degraded(2, 1, ErrorClass::Transient, "node-a", "x");
     assert_eq!(state(found(None, Some(&older))), State::Waiting);
 }
 
 #[test]
 fn a_class_this_build_cannot_read_still_shows_as_degraded() {
-    let mut newer = output::encode_degraded(1, 7, ErrorClass::Transient, "x");
+    let mut newer = output::encode_degraded(1, 7, ErrorClass::Transient, "node-a", "x");
     newer[18] = 99;
     assert!(degraded(&newer, 7).is_some());
     assert_eq!(degraded(&newer, 8), None);
@@ -144,7 +145,7 @@ fn a_class_this_build_cannot_read_still_shows_as_degraded() {
 
 #[test]
 fn degraded_comes_after_the_spec_state_and_a_needs_operator_record() {
-    let degraded_record = output::encode_degraded(2, 3, ErrorClass::Transient, "x");
+    let degraded_record = output::encode_degraded(2, 3, ErrorClass::Transient, "node-a", "x");
     let mut failed = spec(WorkloadState::Failed, Some(3));
     failed.failure = Some(Failure {
         class: ErrorClass::Poison,

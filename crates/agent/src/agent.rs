@@ -43,8 +43,8 @@ use crate::stuck::{self, Progress};
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// How long a workload may keep failing on a transient error, with nothing
-/// written in between, before its holder lets it go.
+/// How long a workload may keep failing on a transient error, with no
+/// progress in between, before its holder lets it go.
 pub const DEFAULT_STUCK_AFTER: Duration = Duration::from_secs(60);
 
 /// How long a node that let a workload go for being stuck waits before it
@@ -97,8 +97,8 @@ pub struct AgentConfig {
     /// have not changed.
     pub facts_every: Duration,
     /// How long a held workload may keep failing on a transient error, with
-    /// nothing written in between, before the node records it as degraded and
-    /// releases the lease. At least the lease TTL.
+    /// no progress in between, before the node records it as degraded and
+    /// releases the lease. At least the lease TTL, or zero for never.
     pub stuck_after: Duration,
     /// How long the node leaves a workload it released that way to other
     /// nodes before it claims it again.
@@ -208,10 +208,10 @@ fn check(config: &AgentConfig) -> Result<()> {
         MIN_TTL.as_millis()
     );
     // A workload failing for less than a lease TTL may only be waiting out
-    // a broker that is changing leader.
+    // a broker that is changing leader. Zero turns the bound off.
     anyhow::ensure!(
-        config.stuck_after >= config.lease.ttl,
-        "--stuck-after-ms ({}) must be at least the lease TTL ({} ms)",
+        config.stuck_after.is_zero() || config.stuck_after >= config.lease.ttl,
+        "--stuck-after-ms ({} ms) must be 0 or at least the lease TTL ({} ms)",
         config.stuck_after.as_millis(),
         config.lease.ttl.as_millis()
     );
@@ -826,6 +826,7 @@ async fn own(
                     }
                     Ended::Degraded { class } => {
                         metrics::degraded(class);
+                        metrics::handoff(Handoff::Degraded);
                         lease::release(&node.felix, &held).await;
                         tracing::warn!(workload = %id, %class, backoff = ?node.degraded_backoff, "released after being stuck, leaving it to other nodes");
                         backoff = Some(tokio::time::Instant::now() + node.degraded_backoff);
@@ -1478,7 +1479,8 @@ async fn record_degraded(
     let class = ErrorClass::Transient;
     let detail = format!("{error:#}");
     let detail = detail.lines().next().unwrap_or_default();
-    tracing::warn!(workload = %id, %class, %detail, "stuck, recording it and releasing the lease");
+    let (epoch, node_id) = (fence.epoch(), fence.node());
+    tracing::warn!(workload = %id, epoch, node = node_id, %class, %detail, "stuck, recording it and releasing the lease");
     let released = Ended::Degraded { class };
     let Some(record) = spec.record else {
         tracing::warn!(workload = %id, "the spec names no spec record, not recording that it is stuck");

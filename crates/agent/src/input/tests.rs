@@ -50,7 +50,7 @@ fn a_downstream_steps_only_outputs_addressed_to_out() {
         output::encode_failure(2, 9, ErrorClass::Poison, "trap"),
         output::encode_failure(2, 9, ErrorClass::Transient, "lost"),
         output::encode_needs_operator(2, 5, OperatorReason::SpecConflict, "input"),
-        output::encode_degraded(2, 5, ErrorClass::Transient, "the broker is gone"),
+        output::encode_degraded(2, 5, ErrorClass::Transient, "node-a", "the broker is gone"),
         output::encode_rejection(2, 2, rejected),
         named(2, header(3, 0), "alerts", None, b"side"),
     ];
@@ -105,7 +105,7 @@ fn a_marker_with_a_code_this_build_does_not_know_is_passed_over() {
     failure[18] = 99;
     let mut needs = output::encode_needs_operator(2, 5, OperatorReason::SpecConflict, "input");
     needs[18..20].copy_from_slice(&99u16.to_be_bytes());
-    let mut degraded = output::encode_degraded(2, 5, ErrorClass::Transient, "gone");
+    let mut degraded = output::encode_degraded(2, 5, ErrorClass::Transient, "node-a", "gone");
     degraded[18] = 99;
     for record in [failure, needs, degraded] {
         assert!(output::decode(&record).is_err());

@@ -83,11 +83,13 @@ fn a_stuck_bound_below_the_lease_ttl_is_refused() {
     let ttl = Duration::from_secs(10);
     assert!(check(&config(ttl, ttl)).is_ok());
     assert!(check(&config(ttl, DEFAULT_STUCK_AFTER)).is_ok());
+    // Zero turns the bound off.
+    assert!(check(&config(ttl, Duration::ZERO)).is_ok());
     let error = check(&config(ttl, ttl - Duration::from_millis(1))).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("--stuck-after-ms (9999) must be at least the lease TTL (10000 ms)"),
+            .contains("--stuck-after-ms (9999 ms) must be 0 or at least the lease TTL (10000 ms)"),
         "{error}"
     );
 }

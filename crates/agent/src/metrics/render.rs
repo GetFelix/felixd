@@ -60,9 +60,9 @@ impl Metrics {
             &mut out,
             "felixd_lease_handoffs_total",
             "counter",
-            "Leases this node let go of for another node to take, by reason: drained or lost.",
+            "Leases this node let go of for another node to take, by reason: drained, lost or degraded.",
         );
-        for (reason, count) in ["drained", "lost"].iter().zip(&self.handoffs) {
+        for (reason, count) in ["drained", "lost", "degraded"].iter().zip(&self.handoffs) {
             let _ = writeln!(
                 out,
                 "felixd_lease_handoffs_total{{reason=\"{reason}\"}} {}",

@@ -130,7 +130,8 @@ felixd check --id second --upstream --complete
 ```
 
 A downstream gets only the records its upstream addresses to `out`, with
-their keys. Claims, failures, rejections and other names are passed over, so
+their keys. Claims, failures, needs-operator, trim and degraded records,
+rejections and other names are passed over, so
 a stage can fail over, even in the middle of a batch, without the next stage
 seeing anything but the same outputs in the same order.
 
@@ -195,33 +196,52 @@ and it writes nothing. A workload's position comes from its last output or
 snapshot, so one that writes nothing for a while shows behind where it is.
 
 A workload shows `degraded` when the node holding it gave up on it. While a
-node holds a workload it retries errors from Felix, such as a broker it cannot
-reach. If the retries keep failing for `--stuck-after-ms` (60 s by default,
-and never less than the lease TTL) and the node has written no output or
-snapshot in that time, it writes a `degraded` record with the error, deletes
-its lease and leaves the workload alone for `--degraded-backoff-ms` (120 s by
-default). Any other node can then claim the workload at once. The spec stays
-`running`, so nothing has to be done for the workload to carry on. `ps` shows
-`degraded` and the error until a node claims it:
+node holds a workload it retries errors from Felix, such as a stream it cannot
+read or write. If the retries keep failing for `--stuck-after-ms` (60 s by
+default, never less than the lease TTL) and no attempt got further, meaning it
+stepped no new input and appended no output, the node writes a `degraded`
+record with the error, deletes its lease and leaves the workload alone for
+`--degraded-backoff-ms` (120 s by default). Another node can then claim the
+workload, after its usual random `--claim-delay-ms`. While a scheduler runs and
+the workload is assigned to the node that gave up, the others first wait for
+that node for up to `--assignment-bound-ms` (15 s). The spec stays `running`,
+so nothing has to be done for the workload to carry on. `ps` shows `degraded`,
+the node and the error until the next holder's claim record is written:
 
 ```
 WORKLOAD  STATE     HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG
 counter   degraded  -       (7)    120      in     120   140   20
-counter: degraded (transient): the input stream closed
+counter: degraded (transient) on node-2: the input stream closed
 ```
 
-If a workload keeps coming back as `degraded`, the fault is usually in the
-node that gave up, such as its network path to Felix. The record names the
-epoch (7 above), not the node, so look for the log line `stuck, recording it
-and releasing the lease` on your nodes, or for `felixd_degraded_total` in
-their metrics. Then fix that node or take it out of service with `felixd
-drain`. The limits belong to each node. To change them:
+If a workload keeps coming back as `degraded`:
+
+1. Read the line under the table. It names the node that gave up and the error.
+2. On that node, search its log for `stuck, recording it and releasing the
+   lease`. The line has the workload, the epoch and the node, and the
+   `retrying` warnings just before it show each error.
+3. A node that cannot reach Felix at all loses its leases first, at two thirds
+   of the lease TTL, so `degraded` usually points at the workload's own
+   streams or module rather than at the node. If it comes back on every node,
+   look there; `felixd check --id counter` reads them. Draining the node only
+   moves the problem. `felixd_degraded_total` in a node's metrics counts how
+   often it gave up.
+
+The limits belong to each node. To change them:
 
 ```
 felixd agent --lease-ttl-ms 10000 --stuck-after-ms 30000 --degraded-backoff-ms 60000
 ```
 
-An agent refuses to start if `--stuck-after-ms` is below the lease TTL.
+An agent refuses to start if `--stuck-after-ms` is above 0 and below the lease
+TTL. `--stuck-after-ms 0` turns the bound off: the node retries for ever and
+writes no degraded record. Use it when upgrading from a build that predates
+the record, which cannot read it. An old node that claims a workload whose last
+record is a degraded one marks the workload `failed`. One that meets it as the
+first record of the stream never claims the workload and logs `could not read
+the output stream`. A workload reading that stream needs an operator. So start
+the new build with `--stuck-after-ms 0` on every node, and restart without it
+once no old node is left.
 
 `felixd drain node-1` takes a node out of service without waiting out lease
 TTLs: the node stops each workload it holds and deletes the lease, so another

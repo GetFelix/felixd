@@ -23,10 +23,10 @@
 //! - Needs operator: `spec (8) | reason code (2) | detail`. No node can run
 //!   the spec record at `spec` until an operator acts. It is the last record
 //!   of that run, and an owner of that spec record that finds it stops.
-//! - Degraded: `spec (8) | class (1) | detail`. The holder released the
-//!   workload after it stayed stuck on an error of that class while running
-//!   the spec record at `spec`. It is an observation: nothing stops, and
-//!   any node may claim after it.
+//! - Degraded: `spec (8) | class (1) | node length (1) | node | detail`. The
+//!   holder on `node` released the workload after it stayed stuck on an
+//!   error of that class while running the spec record at `spec`. It is an
+//!   observation: nothing stops, and any node may claim after it.
 //! - A rejection: `input_offset (8) | index (4, always 0) | code (4) |
 //!   detail`. It is that input's only output, and is matched, skipped and
 //!   compared like one.
@@ -140,13 +140,14 @@ pub enum Record<'a> {
     /// longer read ([`crate::trim`]). It holds no output. `body` decodes with
     /// [`Record::trim`].
     Trim { epoch: u64, body: &'a [u8] },
-    /// The owner at `epoch` released the workload because it stayed stuck on
-    /// an error of `class` while running spec record `spec`. It holds no
-    /// output, and no node is kept from claiming after it.
+    /// The owner at `epoch`, on node `node`, released the workload because it
+    /// stayed stuck on an error of `class` while running spec record `spec`.
+    /// It holds no output, and no node is kept from claiming after it.
     Degraded {
         epoch: u64,
         spec: u64,
         class: ErrorClass,
+        node: &'a [u8],
         detail: &'a [u8],
     },
 }
@@ -347,14 +348,28 @@ pub fn encode_needs_operator(
     out
 }
 
-/// Builds the record a holder at `epoch` appends when it releases the
-/// workload for being stuck on an error of `class` under spec record `spec`.
-pub fn encode_degraded(epoch: u64, spec: u64, class: ErrorClass, detail: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(19 + detail.len());
+/// Builds the record a holder at `epoch` on `node` appends when it releases
+/// the workload for being stuck on an error of `class` under spec record
+/// `spec`. A node id past 255 bytes is cut there, at a character boundary.
+pub fn encode_degraded(
+    epoch: u64,
+    spec: u64,
+    class: ErrorClass,
+    node: &str,
+    detail: &str,
+) -> Vec<u8> {
+    let mut end = node.len().min(usize::from(u8::MAX));
+    while !node.is_char_boundary(end) {
+        end -= 1;
+    }
+    let node = &node[..end];
+    let mut out = Vec::with_capacity(20 + node.len() + detail.len());
     out.extend([VERSION, DEGRADED]);
     out.extend(epoch.to_be_bytes());
     out.extend(spec.to_be_bytes());
     out.push(class.code());
+    out.push(node.len() as u8);
+    out.extend(node.as_bytes());
     out.extend(detail.as_bytes());
     out
 }
@@ -418,12 +433,19 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
             reason: OperatorReason::from_code(u16::from_be_bytes(r.array()?))?,
             detail: r.rest(),
         }),
-        DEGRADED => Ok(Record::Degraded {
-            epoch,
-            spec: r.u64()?,
-            class: ErrorClass::from_code(r.u8()?)?,
-            detail: r.rest(),
-        }),
+        DEGRADED => {
+            let spec = r.u64()?;
+            let class = ErrorClass::from_code(r.u8()?)?;
+            let node_len = r.u8()?;
+            let node = r.bytes(node_len.into())?;
+            Ok(Record::Degraded {
+                epoch,
+                spec,
+                class,
+                node,
+                detail: r.rest(),
+            })
+        }
         TRIM => {
             let body = r.rest();
             crate::trim::decode_body(body)?;

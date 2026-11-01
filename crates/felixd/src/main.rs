@@ -77,10 +77,12 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         facts_every_ms: Option<u64>,
         /// How long, in milliseconds, a workload this node holds may keep
-        /// failing on a transient error, with nothing written in between,
-        /// before the node records it as degraded and releases the lease so
-        /// another node can try. At least the lease TTL. 60000, or the lease
-        /// TTL if that is longer, when left out.
+        /// failing on a transient error, with no progress in between, before
+        /// the node records it as degraded and releases the lease so another
+        /// node can try. At least the lease TTL. 60000, or the lease TTL if
+        /// that is longer, when left out. 0 turns it off: the node retries
+        /// for ever and writes no degraded record, which a rolling upgrade
+        /// from a build that predates the record needs.
         #[arg(long)]
         stuck_after_ms: Option<u64>,
         /// How long, in milliseconds, this node leaves a workload alone after

@@ -321,7 +321,7 @@ fn read_error(error: ReadError) -> anyhow::Error {
 /// Nothing is written once `fence` stops holding.
 ///
 /// An `Err` is a problem with Felix. Calling this again resumes from what is on
-/// the streams. `progress` counts the outputs and snapshots it writes.
+/// the streams. `progress` notes each step it takes.
 pub(crate) async fn run_workload(
     felix: &Felix,
     runtime: &Modules,
@@ -925,8 +925,10 @@ impl Steps<'_> {
         }
         let wrote = !batch.is_empty();
         self.log.append(batch).await?;
-        if wrote {
-            self.progress.made();
+        self.progress
+            .stepped(offset, offset >= self.resume.stepped_to(), wrote);
+        if wrote && faults::fail_after_append() {
+            anyhow::bail!("injected: a transient failure after an append");
         }
 
         self.since_snapshot += 1;
@@ -981,7 +983,6 @@ impl Steps<'_> {
             m.snapshot_size(chunks.iter().map(|c| c.len() as u64).sum());
         }
         self.previous = Some(manifest);
-        self.progress.made();
         faults::after_snapshot();
         self.trim().await
     }

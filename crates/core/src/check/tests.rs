@@ -629,7 +629,7 @@ fn a_degraded_record_before_the_first_claim_is_passed_over() {
     };
     let claimed = HashMap::from([(1, spec("in"))]);
     let records = [
-        output::encode_degraded(0, 1, ErrorClass::Transient, "gone"),
+        output::encode_degraded(0, 1, ErrorClass::Transient, "node-a", "gone"),
         output::encode_claim_under(1, 1, 1, "x"),
         output::encode(header(0, 0), 1, b"x"),
     ];
@@ -648,7 +648,7 @@ fn a_degraded_record_does_not_raise_the_floor() {
     let records = [
         output::encode_claim_under(1, 10, 10, "a"),
         output::encode(header(0, 0), 1, b"x"),
-        output::encode_degraded(2, 13, ErrorClass::Transient, "gone"),
+        output::encode_degraded(2, 13, ErrorClass::Transient, "node-a", "gone"),
         output::encode_claim_under(3, 12, 12, "c"),
         output::encode(header(1, 0), 3, b"x"),
     ];
@@ -667,13 +667,14 @@ fn a_degraded_record_between_outputs_is_not_a_finding() {
         1,
         0,
         ErrorClass::Transient,
+        "node-a",
         "lost the broker",
     ));
     records.push(output::encode_claim(2, ""));
     records.extend(expected[3..].iter().map(|e| encode(e, 2)));
     assert_eq!(run(&expected, &records, true), []);
     // Its epoch is checked like any record's.
-    records[4] = output::encode_degraded(5, 0, ErrorClass::Transient, "x");
+    records[4] = output::encode_degraded(5, 0, ErrorClass::Transient, "node-a", "x");
     assert!(
         run(&expected, &records, true)
             .iter()

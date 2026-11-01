@@ -90,16 +90,23 @@ stuck on an error, and let go of its lease. It continues with:
 |---|---|
 | 8 | the `sys.specs` offset of the spec record the holder ran |
 | 1 | the error class, as in a failure: 0 transient, 1 needs operator, 2 poison |
+| 1 | the length of the node id |
+| node id length | the node that held the workload, UTF-8; an id past 255 bytes is cut there |
 | rest | the error, UTF-8, for people |
 
-It is an observation, not a stop. The spec stays `running`, any node may claim at once, and no node
-leaves the workload alone because of it. `felixd ps` shows `degraded` while it is the last record, so
-the next claim ends it. It does not raise the spec floor.
+It is an observation, not a stop. The spec stays `running` and no node leaves the workload alone
+because of it. `felixd ps` shows `degraded` while it is the last record, so it lasts until the next
+holder's claim record is written. It does not raise the spec floor, and kind 8 never blocks claims
+whatever its class; a record that did would need a kind of its own. Another node claims after its
+claim delay. While a scheduler runs and the workload is assigned to the node that gave up, the others
+wait for that node for up to `--assignment-bound-ms` first, since its `nodes` entry still says it
+takes work.
 
 When it is written:
 
 - This build writes it only with class 0. The run failed on transient errors for `--stuck-after-ms`
-  with no output or snapshot written in between ([design.md](design.md#leases-and-failure-detection)).
+  with no progress in between: no new input stepped and no record appended
+  ([design.md](design.md#leases-and-failure-detection)). `--stuck-after-ms 0` turns it off.
 - The holder appends it with `publish_if` at the tail, behind everything of earlier epochs, and then
   deletes its lease.
 - It is not written over a failure record under the same spec version or later, or a needs-operator
@@ -110,6 +117,10 @@ How readers treat it:
 
 - A holder whose claim never landed can write it with no claim before it, so the search for the first
   claim passes over it, as it does over needs-operator records.
+- A build from before kind 8 refuses it. A node of that build that claims a workload whose last
+  record is a degraded one fails the workload as poison. One that finds it as the stream's first
+  record never claims and retries. A workload reading the stream needs an operator. During a rolling
+  upgrade run the new build with `--stuck-after-ms 0` until no old node is left.
 - A reader that reads the record in full accepts any known class and refuses an unknown one. A node
   that only needs to pass over it, or to show the spec record it names, reads its version, kind and
   spec record alone.
@@ -134,7 +145,8 @@ degraded record with a class or reason this build does not know is still passed 
 version or kind it does not know is refused, never skipped: the reader cannot tell whether it holds
 an input, so the workload is recorded as needing an operator (reason 7), and upgrading the node
 fixes it. That includes kinds 5 and 6 read by a build from before them, and kind 8 read by a build from
-before it, so upgrade every node before a workload can write them. An output that does not decode is poison.
+before it, so upgrade every node before a workload can write them, or run the new build with
+`--stuck-after-ms 0`, which stops it writing kind 8. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
 ([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start

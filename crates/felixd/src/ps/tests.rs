@@ -132,6 +132,7 @@ fn a_parked_or_failed_workload_says_why() {
 fn a_degraded_workload_shows_its_class_and_detail() {
     let degraded = Degraded {
         class: "transient".into(),
+        node: "node-2".into(),
         detail: "the input stream closed".into(),
     };
     let report = Report {
@@ -144,7 +145,7 @@ fn a_degraded_workload_shows_its_class_and_detail() {
     let cells: Vec<&str> = row.split_whitespace().take(2).collect();
     assert_eq!(cells, ["a", "degraded"], "{printed}");
     assert!(
-        printed.contains("a: degraded (transient): the input stream closed"),
+        printed.contains("a: degraded (transient) on node-2: the input stream closed"),
         "{printed}"
     );
     // The spec stays running, so nothing says that no node will take it.
@@ -158,6 +159,7 @@ fn a_degraded_workload_prints_as_the_readme_shows() {
         "counter",
         State::Degraded(Degraded {
             class: "transient".into(),
+            node: "node-2".into(),
             detail: "the input stream closed".into(),
         }),
         None,
@@ -181,7 +183,7 @@ fn a_degraded_workload_prints_as_the_readme_shows() {
         [
             "WORKLOAD  STATE     HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG",
             "counter   degraded  -       (7)    120      in     120   140   20",
-            "counter: degraded (transient): the input stream closed",
+            "counter: degraded (transient) on node-2: the input stream closed",
         ]
     );
 }

@@ -169,7 +169,7 @@ pub(crate) async fn record_degraded(
     (spec_version, spec): (u64, u64),
     (class, detail): (class::ErrorClass, &str),
 ) -> Result<Recorded> {
-    let record = output::encode_degraded(epoch, spec, class, detail);
+    let record = output::encode_degraded(epoch, spec, class, fence.node(), detail);
     append_last(
         felix,
         stream,

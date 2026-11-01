@@ -119,6 +119,8 @@ pub(crate) enum Handoff {
     Drained,
     /// The lease was lost: not renewed in time, or taken.
     Lost,
+    /// The workload stayed stuck on an error, so the node let it go.
+    Degraded,
 }
 
 /// A histogram with fixed buckets.
@@ -287,7 +289,7 @@ pub(crate) struct Metrics {
     draining: AtomicBool,
     leases_held: AtomicI64,
     claims: [AtomicU64; 3],
-    handoffs: [AtomicU64; 2],
+    handoffs: [AtomicU64; 3],
     needs_operator: [AtomicU64; REASONS.len()],
     degraded: [AtomicU64; CLASSES.len()],
     failures: AtomicU64,

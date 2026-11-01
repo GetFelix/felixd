@@ -34,8 +34,8 @@ pub enum State {
     NeedsOperator(Parked),
     /// The last record on the output stream says the holder of the spec
     /// record the spec comes from released the workload for being stuck. It
-    /// is an observation: any node may claim, and the next one to do so
-    /// replaces this state.
+    /// is an observation: any node may claim, and the next holder's claim
+    /// record replaces this state.
     Degraded(Degraded),
     /// A node holds the lease and has taken its epoch.
     Running,
@@ -77,20 +77,25 @@ impl fmt::Display for Parked {
 }
 
 /// What a degraded record says: the class of the error the holder was stuck
-/// on, and its detail.
+/// on, the node that held the workload, and the error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Degraded {
     pub class: String,
+    /// Empty when the record does not say, or this build cannot read it.
+    pub node: String,
     pub detail: String,
 }
 
 impl fmt::Display for Degraded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.detail.is_empty() {
-            write!(f, "({})", self.class)
-        } else {
-            write!(f, "({}): {}", self.class, self.detail)
+        write!(f, "({})", self.class)?;
+        if !self.node.is_empty() {
+            write!(f, " on {}", self.node)?;
         }
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
     }
 }
 
@@ -152,15 +157,18 @@ pub fn degraded(last: &[u8], record: u64) -> Option<Degraded> {
         Ok(output::Record::Degraded {
             spec,
             class,
+            node,
             detail,
             ..
         }) if spec == record => Some(Degraded {
             class: class.to_string(),
+            node: String::from_utf8_lossy(node).into_owned(),
             detail: String::from_utf8_lossy(detail).into_owned(),
         }),
         Ok(_) => None,
         Err(error) => (output::degraded_spec_of(last) == Some(record)).then(|| Degraded {
             class: format!("a class this build cannot read: {error}"),
+            node: String::new(),
             detail: String::new(),
         }),
     }

@@ -36,7 +36,7 @@ scrape_configs:
 | `felixd_node_draining` | gauge | 1 while the node is marked draining and claims nothing |
 | `felixd_leases_held` | gauge | workloads the node holds the lease of and runs |
 | `felixd_lease_claims_total{result}` | counter | `won`, `contended` (another node's lease was there) or `error` |
-| `felixd_lease_handoffs_total{reason}` | counter | leases the node let go of for another to take: `drained`, or `lost` when it was not renewed in time or was taken |
+| `felixd_lease_handoffs_total{reason}` | counter | leases the node let go of for another to take: `drained`, `lost` when it was not renewed in time or was taken, or `degraded` when the workload stayed stuck on an error |
 | `felixd_needs_operator_total{reason}` | counter | workloads the node stopped for an operator, by the reason code `ps` shows, as `module_refused`, `module_missing`, `spec_unrecorded`, `spec_conflict`, `spec_stale`, `restore_fuel`, `input_unreadable`, `input_behind`, `history_trimmed`, `spec_unadmitted` |
 | `felixd_degraded_total{class}` | counter | workloads the node released after they stayed stuck on an error for `--stuck-after-ms`, by the error's class: `transient`, `needs_operator` or `poison`. Only `transient` is produced today |
 | `felixd_workload_failures_total` | counter | workloads the node marked failed |

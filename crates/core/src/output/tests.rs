@@ -213,7 +213,7 @@ fn every_cut_of_a_record_fails_without_panicking() {
             },
         ),
         encode_failure(1, 2, ErrorClass::Poison, ""),
-        encode_degraded(1, 2, ErrorClass::Transient, ""),
+        encode_degraded(1, 2, ErrorClass::Transient, "node-a", ""),
     ];
     for record in records {
         for cut in 0..record.len() {
@@ -331,7 +331,7 @@ fn a_reader_of_another_stream_gets_only_outputs_of_its_name() {
         ),
         encode_claim(1, "node"),
         encode_failure(1, 1, ErrorClass::Poison, "trap"),
-        encode_degraded(1, 4, ErrorClass::Transient, "lost the broker"),
+        encode_degraded(1, 4, ErrorClass::Transient, "node-a", "lost the broker"),
     ];
     for record in &others {
         assert_eq!(addressed_to(record, "out"), Ok(None), "{record:?}");
@@ -351,7 +351,7 @@ fn a_reader_of_another_stream_passes_over_a_marker_with_an_unknown_code() {
     failure[18] = 99;
     let mut needs = encode_needs_operator(1, 5, OperatorReason::SpecConflict, "input");
     needs[18..20].copy_from_slice(&99u16.to_be_bytes());
-    let mut degraded = encode_degraded(1, 5, ErrorClass::Transient, "lost the broker");
+    let mut degraded = encode_degraded(1, 5, ErrorClass::Transient, "node-a", "lost the broker");
     degraded[18] = 99;
     for record in [failure, needs, degraded] {
         assert!(decode(&record).is_err(), "{record:?}");
@@ -619,11 +619,18 @@ fn a_needs_operator_record_names_its_spec_even_with_an_unknown_reason() {
 
 #[test]
 fn a_degraded_record_round_trips_and_holds_no_output() {
-    let record = encode_degraded(3, 40, ErrorClass::Transient, "the input stream closed");
+    let record = encode_degraded(
+        3,
+        40,
+        ErrorClass::Transient,
+        "node-a",
+        "the input stream closed",
+    );
     let mut want = vec![4, 8];
     want.extend(3u64.to_be_bytes());
     want.extend(40u64.to_be_bytes());
-    want.push(0);
+    want.extend([0, 6]);
+    want.extend(b"node-a");
     want.extend(b"the input stream closed");
     assert_eq!(record, want);
     let decoded = decode(&record).unwrap();
@@ -633,6 +640,7 @@ fn a_degraded_record_round_trips_and_holds_no_output() {
             epoch: 3,
             spec: 40,
             class: ErrorClass::Transient,
+            node: b"node-a",
             detail: b"the input stream closed",
         }
     );
@@ -667,13 +675,13 @@ fn a_degraded_record_reads_every_known_class_and_refuses_an_unknown_one() {
         ErrorClass::NeedsOperator,
         ErrorClass::Poison,
     ] {
-        let record = encode_degraded(1, 2, class, "x");
+        let record = encode_degraded(1, 2, class, "node-a", "x");
         assert!(matches!(
             decode(&record),
             Ok(Record::Degraded { class: found, .. }) if found == class
         ));
     }
-    let mut record = encode_degraded(1, 2, ErrorClass::Transient, "x");
+    let mut record = encode_degraded(1, 2, ErrorClass::Transient, "node-a", "x");
     record[18] = 9;
     assert_eq!(decode(&record), Err(DecodeError::UnknownClass(9)));
     // Its spec record is still read from the header, so it can be shown.
@@ -683,7 +691,7 @@ fn a_degraded_record_reads_every_known_class_and_refuses_an_unknown_one() {
 #[test]
 fn a_degraded_record_is_passed_over_by_reconcile_unless_a_later_owner_wrote_it() {
     let ours = batch(7, &[10]);
-    let degraded = |epoch| encode_degraded(epoch, 3, ErrorClass::Transient, "x");
+    let degraded = |epoch| encode_degraded(epoch, 3, ErrorClass::Transient, "node-a", "x");
     let mut theirs = vec![encode_claim(3, ""), degraded(3)];
     theirs.extend(batch(3, &[10]));
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(1));
@@ -694,4 +702,26 @@ fn a_degraded_record_is_passed_over_by_reconcile_unless_a_later_owner_wrote_it()
         reconcile(7, &ours, &refs(&theirs)),
         Reconciled::Superseded { epoch: 8 }
     );
+}
+
+#[test]
+fn a_long_node_id_in_a_degraded_record_is_cut_at_a_character_boundary() {
+    let node = "é".repeat(200);
+    let record = encode_degraded(1, 2, ErrorClass::Transient, &node, "x");
+    let Ok(Record::Degraded {
+        node: found,
+        detail,
+        ..
+    }) = decode(&record)
+    else {
+        panic!("a degraded record");
+    };
+    assert_eq!(found.len(), 254);
+    assert!(std::str::from_utf8(found).is_ok());
+    assert_eq!(detail, b"x");
+    // A record cut inside the node id is truncated, not misread.
+    assert!(matches!(
+        decode(&record[..30]),
+        Err(DecodeError::Truncated { .. })
+    ));
 }

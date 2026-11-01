@@ -67,6 +67,9 @@
 //!   record is appended. It carries on at `SIGCONT`.
 //! - `fail-workload=1`: fail every workload this node claims, as a trap would,
 //!   but only on this node.
+//! - `fail-after-append=1`: every append of output records, once it has
+//!   landed, fails with an error that is retried. The workload gets one
+//!   step further on each attempt.
 //! - `fail-transient=1`: every attempt to run a workload on this node fails
 //!   with an error that is retried, as when Felix cannot be reached, so the
 //!   workload is stuck here and only here.
@@ -391,6 +394,10 @@ pub(crate) fn before_failure_append() {
 
 pub(crate) fn fail_workload() -> bool {
     fault("fail-workload") == Some(1)
+}
+
+pub(crate) fn fail_after_append() -> bool {
+    fault("fail-after-append") == Some(1)
 }
 
 pub(crate) fn fail_transient() -> bool {

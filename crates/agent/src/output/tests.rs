@@ -49,7 +49,7 @@ fn a_failure_under_this_spec_version_is_the_outcome() {
 
 #[test]
 fn a_degraded_record_is_written_once_per_spec_record() {
-    let degraded = output::encode_degraded(1, 7, ErrorClass::Transient, "gone");
+    let degraded = output::encode_degraded(1, 7, ErrorClass::Transient, "node-a", "gone");
     let found = decoded(&degraded);
     assert_eq!(degraded_found(&found, (3, 7)), Some(Recorded::Degraded));
     assert_eq!(

@@ -74,7 +74,7 @@ async fn a_needs_operator_record_counts_toward_the_floor() {
 #[tokio::test]
 async fn a_degraded_record_does_not_count_toward_the_floor() {
     use felixd_core::class::ErrorClass;
-    let degraded = output::encode_degraded(1, 9, ErrorClass::Transient, "x");
+    let degraded = output::encode_degraded(1, 9, ErrorClass::Transient, "node-a", "x");
     let claim = output::encode_claim_under(1, 2, 2, "a");
     assert_eq!(
         floor_of(vec![claim.clone(), degraded.clone()]).await,
