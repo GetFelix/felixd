@@ -982,3 +982,37 @@ fn a_merge_log_checked_after_a_step_finds_what_the_whole_log_does() {
             .any(|f| matches!(f, Finding::MergeUnclaimed { epoch: 7, .. }))
     );
 }
+
+/// The claims below a trim are gone, so its floor is what refuses a claim of
+/// an older spec that comes after it.
+#[test]
+fn a_trims_claimed_spec_refuses_an_older_spec_claimed_after_it() {
+    let records = [
+        a_trim(40, Some(3)),
+        // Refused by its owner, which stepped nothing: spec 2 is below 3.
+        output::encode_claim_under(2, 2, 2, "stale"),
+        output::encode(header(41, 0), 2, b"x"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        []
+    );
+}
+
+/// A record whose epoch is below one that came before the records checked is
+/// a regression, though the earlier record is not among them.
+#[test]
+fn an_epoch_below_the_one_before_the_records_checked_is_a_regression() {
+    let expected = replay(2);
+    let records = [record(0, 0, 3, &[0])];
+    let at = at(&records);
+    assert_eq!(check_after(&expected[..1], &at, false, None), []);
+    assert_eq!(
+        check_after(&expected[..1], &at, false, Some(5)),
+        [Finding::EpochRegression {
+            offset: 0,
+            epoch: 3,
+            previous: 5
+        }]
+    );
+}

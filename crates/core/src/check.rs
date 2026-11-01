@@ -219,6 +219,18 @@ pub enum Finding {
 /// order, against what a replay produced. `complete` says the stream should
 /// already hold every replayed output.
 pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) -> Vec<Finding> {
+    check_after(expected, records, complete, None)
+}
+
+/// As [`check`] for `records` that are the tail of the stream, after records
+/// whose highest epoch was `epoch_before`, so a regression at the first of
+/// them is found.
+pub fn check_after(
+    expected: &[Expected],
+    records: &[(u64, &[u8])],
+    complete: bool,
+    epoch_before: Option<u64>,
+) -> Vec<Finding> {
     let position: HashMap<OutputHeader, usize> = expected
         .iter()
         .enumerate()
@@ -228,7 +240,7 @@ pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) ->
     let mut findings = Vec::new();
     // The furthest replayed output found so far, and the last epoch.
     let mut furthest: Option<usize> = None;
-    let mut last_epoch: Option<u64> = None;
+    let mut last_epoch = epoch_before;
     for &(offset, record) in records {
         let decoded = match output::decode(record) {
             Ok(decoded) => decoded,
@@ -674,8 +686,11 @@ pub fn specs_applied<'a>(
                 }
                 // Every input up to the trim's step was stepped, outputs or
                 // not, which matters once the records that show it are gone.
+                // Its floor stands in for the claims it was written after, which
+                // may be gone: a later claim of an older spec was refused.
                 if let Some(trim) = found.trim() {
                     next_input = next_input.max(trim.step + 1);
+                    floor = floor.max(trim.claimed.unwrap_or(0));
                 }
             }
             Err(_) => {}

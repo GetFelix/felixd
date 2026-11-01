@@ -1032,11 +1032,16 @@ impl Steps<'_> {
             }
             Err(_) => return Ok(()),
         };
-        // What a head cut off `.out` would take with it.
+        // What a head cut off `.out` would take with it. The first spec is
+        // read once and copied from trim to trim after that.
         if planned.first_spec.is_none() {
             planned.first_spec =
                 specs::written_record(self.felix, self.spec.output.as_str()).await?;
         }
+        // Read from the stream, not carried from this owner's claim: a
+        // needs-operator record from a node without the lease can land after
+        // the claim and raise the floor. The walk ends at the last trim or
+        // claim, so it covers one snapshot interval.
         planned.claimed =
             specs::claim_floor(self.felix, &self.spec.output, self.log.tail()).await?;
         if self.last_trim.as_ref() == Some(&planned) {

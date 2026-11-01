@@ -520,15 +520,15 @@ async fn a_merged_workload_trims_by_the_merge_log() {
     }
     assert_merged(&t, &module, 30).await;
 
-    // A check starts after the snapshot the last trim names, from the merge
+    // A check can start after the snapshot the last trim names, from the merge
     // log entry at its step, and finds what a check from the start does.
-    let (ok, report) = t.check(&["--id", ID, "--complete"]);
+    let (ok, report) = t.check(&["--id", ID, "--complete", "--from-snapshot"]);
     assert!(ok, "{report}");
     assert!(
         report.contains("checked after the snapshot of input"),
         "{report}"
     );
-    let (ok, report) = t.check(&["--id", ID, "--complete", "--from-start"]);
+    let (ok, report) = t.check(&["--id", ID, "--complete"]);
     assert!(ok, "{report}");
     assert!(!report.contains("checked after"), "{report}");
 

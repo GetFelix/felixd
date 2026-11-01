@@ -804,9 +804,9 @@ on three brokers.
 
 `felixd check` runs each workload's module over its whole input stream, from
 its initial state, and lines the outputs it produces up with the records on
-the output stream by their headers. A workload that trims its history
-([Retention](#retention)) is checked from the oldest snapshot it keeps
-instead, unless `--from-start` is given. Each record should match the next
+the output stream by their headers. Once Felix has deleted the head of the
+output stream, it starts from the oldest snapshot the workload keeps instead
+([Retention](#checking-from-a-snapshot)). Each record should match the next
 replayed output. It reports:
 
 - a gap: a replayed output missing from the stream while a later one is there;
@@ -1012,16 +1012,28 @@ existed carry neither, and read as if they named no spec.
 
 ### Checking from a snapshot
 
-`felixd check` replays from the first input, unless the last trim record on
-`.out` names an oldest kept snapshot. Then it restores that snapshot, steps the
-inputs after it, and lines them up with the records on `.out` from the
-snapshot's output tail on. With several inputs it starts the merge log check at
-the entry for the snapshot's step, with each input's next offset from there.
-The snapshot's state is taken as given, and records below its output tail are
-not compared. For everything after the snapshot the verdict is the same as a
-check from the start. A record for an input the snapshot covers that was
-written after it is still found, as an output the replay did not produce.
-`felixd check --from-start` replays from the first input even so; it fails
+`felixd check` replays from the first input. That is the whole check, and it
+stays the default while Felix holds the head of `.out`.
+
+When the last trim record on `.out` names an oldest kept snapshot, the check
+can start there instead: it restores the snapshot, steps the inputs after it,
+and lines them up with the records on `.out` from the snapshot's output tail
+on. With several inputs it starts the merge log check at the entry for the
+snapshot's step, with each input's next offset from there. It does so by
+default only when Felix has deleted the head of `.out`, since the first input
+can no longer be replayed. `--from-snapshot` asks for it while the head is
+still there, and `--from-start` refuses it.
+
+A check from a snapshot verifies less. The snapshot's state is taken as given,
+so a snapshot that does not hold what replaying the inputs before it would
+give is not noticed. Records below its output tail are not compared, so a gap,
+a duplicate or a misplaced record down there is not reported; an epoch below
+the highest one below the tail is, at the first record compared. What follows
+the snapshot gets the same verdict as a check from the start, and a record for
+an input the snapshot covers that was written after it is found, as an output
+the replay did not produce. If Felix keeps nothing of `.out` below an offset
+above the snapshot's output tail, the check fails saying so, rather than
+reporting the missing outputs as findings. `--from-start` fails the same way
 once Felix has deleted history that replay needs, and says which stream and
 which offset it still holds.
 

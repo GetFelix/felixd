@@ -107,8 +107,8 @@ fixes it. That includes kinds 5 and 6 read by a build from before them, so upgra
 a workload can write them. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
-([design.md](design.md#retention)). `felixd check` starts after the snapshot the last one names, and
-`felixd replay` still reads from the start while the records are there. Its holder appends it after
+([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names, and
+`felixd replay` reads from the start while the records are there. Its holder appends it after
 a snapshot of its own when the spec sets `keep_snapshots`, with `publish_if` at the tail like an
 output. It continues with:
 
@@ -129,10 +129,9 @@ The body may end there, or continue with what a deleted head of `.out` would tak
 | 8 | the first spec: the `sys.specs` offset the stream's first claim names, copied unchanged from the trim before it. Present only with flag 1 |
 | 8 | the claimed spec: the highest spec record claimed on the stream up to this record, the floor a claim written here would carry. Present only with flag 2 |
 
-A body that ends at the floors, as the first trims did, carries neither. A holder writes the first spec
-once it can read the first claim, and the claimed spec whenever it knows one. A flags byte of 0 or
-above 3, and bytes past the fields the flags name, are refused, so a later layout is not misread as
-this one. Readers pass over a trim like a claim, and only its epoch is checked, apart from the two
+A body that ends at the floors carries neither. The first trim writes the first spec, read from the
+first claim, and every later trim copies it; the claimed spec is read from the stream at each trim.
+A flags byte of 0 or above 3, and bytes past the fields the flags name, are refused, so a later layout is not misread as this one. Readers pass over a trim like a claim, and only its epoch is checked, apart from the two
 uses of these fields:
 
 - The first spec says what module and input the stream was written under once the first claim is

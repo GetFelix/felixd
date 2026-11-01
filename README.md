@@ -118,9 +118,11 @@ whose output tail does not match their input offset, and exits with 1 if it
 finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
 should have caught up. `--upstream` also checks the workloads a checked one
-reads from, up the pipeline. A workload run with `--keep-snapshots` is checked
-from the oldest snapshot it keeps, which the output line says; `--from-start`
-replays from the first input instead. It writes nothing.
+reads from, up the pipeline. It replays from the first input; once Felix has
+deleted the head of an output stream it starts from the oldest snapshot the
+workload keeps (`--keep-snapshots`), which the output line says, and
+`--from-snapshot` asks for that earlier. A snapshot's state is taken as given.
+It writes nothing.
 
 A workload can read another's output stream. This pipeline counts the inputs
 on `in`, then counts the first stage's outputs:
@@ -157,7 +159,7 @@ inputs' append times on the broker, whichever comes first, so a slow input
 still gets snapshots and every node takes them at the same inputs. With
 `--keep-snapshots 3` the holder records, after each snapshot, what history
 before the oldest of the last three its resume no longer reads (a trim record
-on the output stream), and `felixd check` starts from that oldest snapshot.
+on the output stream), which `felixd check --from-snapshot` starts from.
 Nothing is deleted until Felix can trim a stream
 at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)

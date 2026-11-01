@@ -44,9 +44,9 @@ pub struct Trim {
     /// workload's resume reads nothing. Other readers of a shared input may
     /// need more.
     pub input_floors: Vec<u64>,
-    /// The `sys.specs` record the stream's first claim names, carried
-    /// forward unchanged from trim to trim. `None` when no claim names one,
-    /// and in records written before it was carried.
+    /// The `sys.specs` record the stream's first claim names. The first trim
+    /// that can read one writes it, and every trim after copies it. `None`
+    /// when no claim names one, and in records written before it was carried.
     pub first_spec: Option<u64>,
     /// The highest spec record claimed on the stream up to this record, the
     /// floor a claim written here would carry. `None` when none was, and in

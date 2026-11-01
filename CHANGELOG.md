@@ -9,9 +9,11 @@
   agent, `felixd run` and `felixd check` read what the stream was written under
   from the oldest record Felix keeps, and the stale-spec check stops at a trim
   record. Trim records without the new fields still read. `felixd check`
-  restores the oldest snapshot the last trim record keeps and checks what
-  follows it, the merge log from the entry at its step; `--from-start` replays
-  from the first input. Streams without trim records are checked as before.
+  still replays from the first input; once the head of the output stream is
+  deleted it restores the oldest snapshot the last trim record keeps and checks
+  what follows it, the merge log from the entry at its step. `--from-snapshot`
+  asks for that earlier and `--from-start` refuses it. A snapshot's state is
+  taken as given and outputs below its tail are not compared.
   Deleting `.out` and the floors downstream readers need remain (#150).
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again

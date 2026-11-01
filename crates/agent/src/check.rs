@@ -36,6 +36,21 @@ pub struct Report {
     pub findings: Vec<Finding>,
 }
 
+/// Where a check starts replaying.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// At the first input, unless Felix has deleted the head of the output
+    /// stream, when the oldest snapshot the last trim record keeps.
+    #[default]
+    Auto,
+    /// At the first input; fails once Felix has deleted history the replay
+    /// needs.
+    Start,
+    /// After the oldest snapshot the last trim record keeps. The snapshot's
+    /// state is taken as given, and outputs below its tail are not compared.
+    Snapshot,
+}
+
 /// Checks the workloads in `ids`, or every workload in the `workloads` cache
 /// when it is empty, a pipeline's stages upstream first
 /// ([`check::upstream_first`]). `complete` makes outputs missing from the end
@@ -46,7 +61,7 @@ pub async fn check(
     ids: &[String],
     complete: bool,
     upstream: bool,
-    from_start: bool,
+    origin: Origin,
 ) -> Result<Vec<Report>> {
     let felix = Felix::connect(settings).await?;
     let runtime = Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -76,7 +91,7 @@ pub async fn check(
     }
     let mut reports = Vec::new();
     for id in check::upstream_first(&inputs) {
-        let report = check_one(&felix, &runtime, &id, complete, from_start)
+        let report = check_one(&felix, &runtime, &id, complete, origin)
             .await
             .with_context(|| format!("check workload {id}"))?;
         reports.push(report);
@@ -89,7 +104,7 @@ async fn check_one(
     runtime: &Runtime,
     id: &str,
     complete: bool,
-    from_start: bool,
+    origin: Origin,
 ) -> Result<Report> {
     let spec = felix
         .cache_get(names::WORKLOADS, id)
@@ -106,21 +121,28 @@ async fn check_one(
     let snap_tail = felix.tail(&snap_stream).await?;
     let output_tail = felix.tail(&cached.output).await?;
     let held = read_held(felix, &cached.output, output_tail).await?;
-    // The last trim says which snapshot a check may start from. Without
-    // one, or with `from_start`, it starts at the first input.
-    let trim = held
+    // The last trim names the snapshot a check may start from. A snapshot is
+    // taken as given, so it is used only when asked for or when the head of
+    // the stream is gone and the first input cannot be replayed from.
+    let last_trim = held
         .records
         .iter()
         .rev()
-        .find_map(|r| output::decode(&r.payload).ok()?.trim())
-        .filter(|_| !from_start);
+        .find_map(|r| output::decode(&r.payload).ok()?.trim());
+    let trim = last_trim.filter(|_| starts_at_snapshot(origin, held.cut));
+    if trim.is_none() && origin == Origin::Snapshot {
+        bail!("{} holds no trim record to start from", cached.output);
+    }
     let cut = held.cut;
-    let records = match (&trim, held.trimmed) {
+    let records = held.records;
+    let mut trimmed = held.trimmed;
+    if trim.is_none()
+        && let Some(error) = trimmed.take()
+    {
         // Reading from the start, so a head Felix has deleted is an error
         // that names the stream and the oldest offset it keeps.
-        (None, Some(error)) => return Err(error),
-        _ => held.records,
-    };
+        return Err(error);
+    }
     // The module, input and limits the stream was written under, not those
     // of a later spec its owner refused.
     let (spec, limits) = judged(felix, id, &cached, &records, cut).await?;
@@ -142,6 +164,9 @@ async fn check_one(
         }
         None => None,
     };
+    if let (Some(error), Some(header)) = (&trimmed, &start) {
+        covered(error, header)?;
+    }
     let first = first_input(start);
     let mut feed = Feed::new(felix, id, &spec);
     let mut findings = Vec::new();
@@ -194,7 +219,16 @@ async fn check_one(
     // The snapshot covers every output below its tail.
     let checked =
         on_stream.partition_point(|&(offset, _)| offset < start.map_or(0, |h| h.output_tail));
-    findings.extend(check::check(&expected, &on_stream[checked..], complete));
+    let epoch_before = on_stream[..checked]
+        .iter()
+        .filter_map(|(_, payload)| Some(output::decode(payload).ok()?.epoch()))
+        .max();
+    findings.extend(check::check_after(
+        &expected,
+        &on_stream[checked..],
+        complete,
+        epoch_before,
+    ));
     let snapshots: Vec<(u64, &[u8])> = snapshots
         .iter()
         .map(|r| (r.offset, r.payload.as_ref()))
@@ -211,6 +245,32 @@ async fn check_one(
         from_snapshot: start.map(|h| h.input_offset),
         findings,
     })
+}
+
+/// Whether a check starts after a snapshot, given that Felix has deleted the
+/// head of the output stream or not (`cut`).
+fn starts_at_snapshot(origin: Origin, cut: bool) -> bool {
+    match origin {
+        Origin::Start => false,
+        Origin::Snapshot => true,
+        Origin::Auto => cut,
+    }
+}
+
+/// Fails with `trimmed`, the refused read of the output stream's head, when
+/// Felix has deleted records the snapshot's output tail says are still to be
+/// compared. The outputs missing from the start of what it keeps would
+/// otherwise show up as findings.
+fn covered(trimmed: &anyhow::Error, snapshot: &SnapshotHeader) -> Result<()> {
+    match Trimmed::of(trimmed) {
+        Some(t) if t.oldest > snapshot.output_tail => Err(Trimmed {
+            stream: t.stream.clone(),
+            requested: t.requested,
+            oldest: t.oldest,
+        }
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 /// The records Felix holds on an output stream.
@@ -378,3 +438,6 @@ async fn workload_ids(felix: &Felix) -> Result<Vec<String>> {
     let entries = felix.entries(names::WORKLOADS).await?;
     Ok(entries.into_iter().map(|(id, _)| id).collect())
 }
+
+#[cfg(test)]
+mod tests;

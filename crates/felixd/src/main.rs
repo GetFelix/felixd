@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::admission;
 use felixd_agent::agent::AgentConfig;
-use felixd_agent::check::check;
+use felixd_agent::check::{Origin, check};
 use felixd_agent::drain;
 use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
@@ -115,11 +115,16 @@ enum Command {
         /// reads, up the whole pipeline. Stages are checked upstream first.
         #[arg(long)]
         upstream: bool,
-        /// Replay from the first input even when the last trim record names
-        /// a snapshot to start from. Fails once Felix has deleted history
-        /// the replay needs.
-        #[arg(long)]
+        /// Replay from the first input. This is the default; it fails once
+        /// Felix has deleted history the replay needs.
+        #[arg(long, conflicts_with = "from_snapshot")]
         from_start: bool,
+        /// Start after the oldest snapshot the last trim record keeps. The
+        /// snapshot's state is taken as given, and outputs below its tail
+        /// are not compared. Used by default only when Felix has deleted
+        /// the head of the output stream.
+        #[arg(long)]
+        from_snapshot: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
     /// what its `inspect` returns, or with `--diff` compare the outputs a
@@ -322,15 +327,14 @@ async fn main() -> Result<()> {
             complete,
             upstream,
             from_start,
+            from_snapshot,
         } => {
-            let reports = check(
-                &connection.settings()?,
-                &ids,
-                complete,
-                upstream,
-                from_start,
-            )
-            .await?;
+            let origin = match (from_start, from_snapshot) {
+                (true, _) => Origin::Start,
+                (_, true) => Origin::Snapshot,
+                _ => Origin::Auto,
+            };
+            let reports = check(&connection.settings()?, &ids, complete, upstream, origin).await?;
             let mut found = false;
             for report in &reports {
                 if report.findings.is_empty() {

@@ -87,9 +87,10 @@ async fn trimmed_past(t: &common::TestFelix, step: u64) {
     .await;
 }
 
-/// With trim records on `.out`, `check` restores the oldest snapshot the last
-/// one keeps and starts after it. It gives the verdict a check from the first
-/// input gives, clean or not, for a fault after that snapshot.
+/// With trim records on `.out`, `check --from-snapshot` restores the oldest
+/// snapshot the last one keeps and starts after it. It gives the verdict a
+/// check from the first input gives, clean or not, for a fault after that
+/// snapshot. Without the flag the head is still there, so it replays all.
 #[tokio::test(flavor = "multi_thread")]
 async fn check_from_the_snapshot_gives_the_verdict_of_check_from_the_start() {
     let Some(t) = test_felix().await else { return };
@@ -105,14 +106,14 @@ async fn check_from_the_snapshot_gives_the_verdict_of_check_from_the_start() {
     trimmed_past(&t, 39).await;
     agent.kill();
 
-    let args = ["--id", ID, "--complete"];
+    let args = ["--id", ID, "--complete", "--from-snapshot"];
     let (ok, from_snapshot) = t.check(&args);
     assert!(ok, "{from_snapshot}");
     assert!(
         from_snapshot.contains("checked after the snapshot of input"),
         "{from_snapshot}"
     );
-    let (ok, from_start) = t.check(&["--id", ID, "--complete", "--from-start"]);
+    let (ok, from_start) = t.check(&["--id", ID, "--complete"]);
     assert!(ok, "{from_start}");
     assert!(!from_start.contains("checked after"), "{from_start}");
 
@@ -126,7 +127,7 @@ async fn check_from_the_snapshot_gives_the_verdict_of_check_from_the_start() {
     t.publish_all(OUTPUT, [wrong]).await;
     let (ok, from_snapshot) = t.check(&args);
     assert!(!ok, "{from_snapshot}");
-    let (_, from_start) = t.check(&["--id", ID, "--complete", "--from-start"]);
+    let (_, from_start) = t.check(&["--id", ID, "--complete"]);
     let duplicate = format!("duplicate at offset {tail}: input 55 output 0");
     assert!(from_snapshot.contains(&duplicate), "{from_snapshot}");
     assert!(from_start.contains(&duplicate), "{from_start}");
