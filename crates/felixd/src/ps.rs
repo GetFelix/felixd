@@ -65,7 +65,9 @@ pub(crate) fn render(report: &Report) -> String {
             cells.extend(more);
             rows.push(cells);
         }
-        if let Some(state @ (State::Failed(_) | State::NeedsOperator(_))) = &w.state {
+        if let Some(state @ (State::Failed(_) | State::NeedsOperator(_) | State::Degraded(_))) =
+            &w.state
+        {
             details.push(format!("{}: {state}", w.id));
         }
         if let Some(unread) = &w.unread {
@@ -133,6 +135,7 @@ fn state_word(state: Option<&State>) -> &'static str {
         Some(State::Stopped) => "stopped",
         Some(State::Failed(_)) => "failed",
         Some(State::NeedsOperator(_)) => "needs-operator",
+        Some(State::Degraded(_)) => "degraded",
         Some(State::Running) => "running",
         Some(State::Claiming) => "claiming",
         Some(State::Waiting) => "waiting",

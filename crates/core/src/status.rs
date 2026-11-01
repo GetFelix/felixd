@@ -32,6 +32,11 @@ pub enum State {
     /// spec comes from needs an operator. Nothing runs it until the spec
     /// changes, whoever holds the lease meanwhile.
     NeedsOperator(Parked),
+    /// The last record on the output stream says the holder of the spec
+    /// record the spec comes from released the workload for being stuck. It
+    /// is an observation: any node may claim, and the next one to do so
+    /// replaces this state.
+    Degraded(Degraded),
     /// A node holds the lease and has taken its epoch.
     Running,
     /// A node has claimed the lease and not yet taken an epoch.
@@ -46,6 +51,7 @@ impl fmt::Display for State {
             State::Stopped => f.write_str("stopped"),
             State::Failed(failure) => write!(f, "failed ({}): {}", failure.class, failure.detail),
             State::NeedsOperator(parked) => write!(f, "needs operator: {parked}"),
+            State::Degraded(degraded) => write!(f, "degraded {degraded}"),
             State::Running => f.write_str("running"),
             State::Claiming => f.write_str("claiming"),
             State::Waiting => f.write_str("waiting"),
@@ -70,6 +76,24 @@ impl fmt::Display for Parked {
     }
 }
 
+/// What a degraded record says: the class of the error the holder was stuck
+/// on, and its detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Degraded {
+    pub class: String,
+    pub detail: String,
+}
+
+impl fmt::Display for Degraded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.detail.is_empty() {
+            write!(f, "({})", self.class)
+        } else {
+            write!(f, "({}): {}", self.class, self.detail)
+        }
+    }
+}
+
 /// The workload's state, from its spec, lease and last output record.
 pub fn state(found: Found<'_>) -> State {
     match found.spec.state {
@@ -86,6 +110,11 @@ pub fn state(found: Found<'_>) -> State {
         && let Some(parked) = parked(last, record)
     {
         return State::NeedsOperator(parked);
+    }
+    if let (Some(record), Some(last)) = (found.spec.record, found.last_record)
+        && let Some(degraded) = degraded(last, record)
+    {
+        return State::Degraded(degraded);
     }
     match found.lease {
         Some(lease) if lease.epoch > 0 => State::Running,
@@ -111,6 +140,27 @@ pub fn parked(last: &[u8], record: u64) -> Option<Parked> {
         Ok(_) => None,
         Err(error) => (output::needs_operator_spec_of(last) == Some(record)).then(|| Parked {
             reason: format!("a reason this build cannot read ({error})"),
+            detail: String::new(),
+        }),
+    }
+}
+
+/// What `last` says if it is a degraded record naming spec record `record`.
+/// A newer build may record a class this one cannot read, which still shows.
+pub fn degraded(last: &[u8], record: u64) -> Option<Degraded> {
+    match output::decode(last) {
+        Ok(output::Record::Degraded {
+            spec,
+            class,
+            detail,
+            ..
+        }) if spec == record => Some(Degraded {
+            class: class.to_string(),
+            detail: String::from_utf8_lossy(detail).into_owned(),
+        }),
+        Ok(_) => None,
+        Err(error) => (output::degraded_spec_of(last) == Some(record)).then(|| Degraded {
+            class: format!("a class this build cannot read: {error}"),
             detail: String::new(),
         }),
     }
