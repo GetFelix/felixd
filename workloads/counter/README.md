@@ -27,9 +27,12 @@ Cargo features build variants from the same source, for the tests that check an 
 | `changed` | Counts by two once the total reaches ten. Includes `layout-v2`. | As `layout-v2` |
 | `unreadable` | Expects a sixteen-byte chunk in `restore`, so restoring a counter snapshot traps. Includes `layout-v2`. | As `layout-v2` |
 | `foreign-layout` | Identical to the default. | `{"format":"tally","reads":[]}` |
+| `malformed-layout` | Identical to the default. | JSON that is not a declaration, so reading it is an error |
+| `undeclared` | Identical to the default. | Nothing |
 
-`felixd_testkit::workload_with("counter", &["changed"])` builds one. Use at most one of `layout-v2` and
-`foreign-layout`.
+`felixd_testkit::workload_with("counter", &["changed"])` builds one. Use one of `layout-v2`,
+`foreign-layout`, `malformed-layout` and `undeclared` at a time; `changed` and `unreadable` already
+include `layout-v2`.
 
 ## Build
 
@@ -40,9 +43,9 @@ Run these from the repository root. The workloads are a separate cargo workspace
 cargo build --manifest-path workloads/Cargo.toml --release --target wasm32-unknown-unknown --package counter
 ```
 
-Add `--features changed` (or another feature from [Variants](#variants)) to build a variant. That
-produces a core module at `workloads/target/wasm32-unknown-unknown/release/counter.wasm`, unless
-`CARGO_TARGET_DIR` is set. `felixd run` takes a component, so wrap the module with
+Add `--features changed` (or another feature from [Variants](#variants)) to build a variant. The
+build produces a core module at `workloads/target/wasm32-unknown-unknown/release/counter.wasm`,
+unless `CARGO_TARGET_DIR` is set. `felixd run` takes a component, so wrap the module with
 [wasm-tools](https://github.com/bytecodealliance/wasm-tools) (`cargo install wasm-tools`):
 
 ```
