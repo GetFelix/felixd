@@ -358,6 +358,12 @@ REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
 create streams. The end state moves that to admission ([Submitting
 work](#submitting-work)).
 
+A create that Felix answers with 409 counts as done only if the stream or cache can be read
+back. Felix also refuses a stream under the name of a deleted one until the cluster has finalized
+stream incarnations, and a control plane that no broker registers with, as in the single-broker
+test stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait
+for a stream that does not exist.
+
 Running `felixd run` again for an existing id appends a new spec record and
 points `workloads` at it. The cache only moves forward: a write naming an
 older record than the one there is dropped. Agents run a spec only if its
