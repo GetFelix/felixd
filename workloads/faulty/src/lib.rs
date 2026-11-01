@@ -16,6 +16,7 @@
 //!   key when it is empty. The name is not checked here.
 //! - `meta`: outputs the input's metadata as text: stream, incarnation,
 //!   offset, timestamp, key in hex (`-` for none) and payload in hex.
+//! - `publisher`: outputs the input's publisher as text, `-` for none.
 //! - `chunks:<n>`: the state becomes `n` counters, each its own snapshot
 //!   chunk, so a snapshot has `n` chunks.
 //! - `touch:<i>`: adds one to counter `i`, changing only its chunk, and
@@ -26,7 +27,7 @@
 use std::cell::{Cell, RefCell};
 
 wit_bindgen::generate!({
-    path: "../../wit",
+    path: "../../wit/0.3",
     world: "workload",
 });
 
@@ -99,6 +100,12 @@ impl step::Guest for Faulty {
                 credential: None,
                 body: Vec::new(),
             })],
+            b"publisher" => vec![out(record
+                .publisher
+                .as_deref()
+                .unwrap_or("-")
+                .as_bytes()
+                .to_vec())],
             b"meta" => {
                 let key = record.key.as_deref().map_or("-".to_string(), hex);
                 let text = format!(

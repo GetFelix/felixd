@@ -1,9 +1,12 @@
 # Example workloads
 
 Two example workloads that implement workload contract 0.2, the `workload` world in
-[`../wit/workload.wit`](../wit/workload.wit), described in
+[`../wit/0.2/workload.wit`](../wit/0.2/workload.wit), described in
 [`../docs/contract.md`](../docs/contract.md). Both write every output under the name `out` with no
-key, and snapshot their state as one chunk.
+key, and snapshot their state as one chunk. `counter`, `window` and `scheduler` stay on 0.2 on
+purpose: felixd runs both contract versions, and they never need the publisher. `admission`
+and the `faulty` fixture are built against 0.3 ([`../wit/0.3/workload.wit`](../wit/0.3/workload.wit)),
+which adds the publisher of each input record.
 
 | Workload | What it does |
 |---|---|
@@ -15,7 +18,8 @@ records and node facts and writes assignments; see [scheduler/README.md](schedul
 
 `admission` decides requests on `sys.intake`, one decision each, accepting the spec or rejecting it
 with a reason code; see [admission/README.md](admission/README.md). `admission-strict` is the same
-component under a stricter policy, which the tests replay against admission's recorded requests.
+component under a stricter policy, which the tests replay against admission's recorded requests,
+and `admission-requesters` lets only two named principals ask.
 
 They are a separate cargo workspace because they build for `wasm32-unknown-unknown`. The tests in
 `felixd-runtime` build them on demand with `felixd-testkit` and run them in wasmtime:

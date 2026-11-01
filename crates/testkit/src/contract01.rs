@@ -1,6 +1,6 @@
 /// A component of workload contract 0.1: the top-level `step`, `snapshot`,
 /// `restore` and `inspect` functions, with their 0.1 types. It outputs
-/// nothing and its state is empty. A 0.2 host must refuse it.
+/// nothing and its state is empty. A host of 0.2 or later must refuse it.
 pub fn contract_01_component() -> Vec<u8> {
     wat::parse_str(
         r#"(component

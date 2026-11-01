@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- The requester (#182). Workload contract 0.3 adds `publisher` to `record-in`:
+  the principal the broker authenticated an input record's write from, `none`
+  when the broker stored none and for another workload's output. felixd runs
+  0.3 and 0.2 workloads side by side, chosen by the interfaces a component
+  exports; a 0.2 workload is unchanged and never sees the publisher, and
+  `wit/workload.wit` moved to `wit/0.2/workload.wit` beside the new
+  `wit/0.3/workload.wit`. The agent asks the broker for publishers and passes
+  the stored value on every path (live, takeover, resume, merge, `check`,
+  `replay`). Admission is built on 0.3 and records the requester in each
+  decision (`requester`, left out when none). Breaking: a request whose
+  publisher the broker did not record is rejected as `no_requester`, so
+  admission needs a broker that stores publishers, `FELIX_RECORD_PUBLISHERS=true`
+  on a lone broker or the `publisher_principal` fleet feature finalized in a
+  cluster, before `felixd init` brings it up or an upgraded admission module
+  runs. New `Policy::requesters` limits who may ask (`not_permitted`; the
+  `admission-requesters` example). `felixd_runtime::Input` and
+  `felixd_core::admission::decide` take the publisher. The test stacks turn
+  recording on.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and

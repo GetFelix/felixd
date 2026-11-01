@@ -11,6 +11,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "admission-requesters"
+version = "0.0.0"
+dependencies = [
+ "felixd-core",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "admission-strict"
 version = "0.0.0"
 dependencies = [

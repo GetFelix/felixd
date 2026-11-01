@@ -62,7 +62,7 @@ fn a_contract_01_component_is_refused_by_name() {
     assert!(matches!(err, LoadError::Contract01), "{err}");
     assert_eq!(
         err.to_string(),
-        "the component is built against felixd:workload@0.1.0, rebuild it against 0.2"
+        "the component is built against felixd:workload@0.1.0, rebuild it against 0.3"
     );
 }
 

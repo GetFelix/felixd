@@ -21,8 +21,10 @@ fn request(id: &str) -> Request {
     Request::new(id, spec(id), 1000, 1)
 }
 
+const ALICE: &str = "p:alice";
+
 fn decided(request: &Request) -> Decision {
-    decide(&Policy::default(), 7, &request.encode())
+    decide(&Policy::default(), 7, Some(ALICE), &request.encode())
 }
 
 fn rejected(decision: &Decision) -> Reason {
@@ -43,13 +45,18 @@ fn a_valid_request_is_accepted_with_its_spec() {
 
 #[test]
 fn every_request_gets_one_decision_even_unreadable() {
-    let decision = decide(&Policy::default(), 3, b"not json");
+    let decision = decide(&Policy::default(), 3, Some(ALICE), b"not json");
     assert_eq!(decision.request, 3);
     assert_eq!(rejected(&decision), Reason::Unreadable);
     let mut future = request("wl");
     future.format = 2;
     assert_eq!(
-        rejected(&decide(&Policy::default(), 0, &future.encode())),
+        rejected(&decide(
+            &Policy::default(),
+            0,
+            Some(ALICE),
+            &future.encode()
+        )),
         Reason::Unreadable
     );
 }
@@ -59,8 +66,8 @@ fn the_same_request_and_policy_decide_the_same() {
     let bytes = request("wl").encode();
     let policy = Policy::default();
     assert_eq!(
-        decide(&policy, 1, &bytes).encode(),
-        decide(&policy, 1, &bytes).encode()
+        decide(&policy, 1, Some(ALICE), &bytes).encode(),
+        decide(&policy, 1, Some(ALICE), &bytes).encode()
     );
 }
 
@@ -163,8 +170,12 @@ fn a_stricter_policy_decides_a_past_request_differently() {
         max_fuel_per_call: 1,
         ..Policy::default()
     };
-    assert!(decide(&Policy::default(), 0, &bytes).accepted().is_some());
-    assert!(decide(&strict, 0, &bytes).accepted().is_none());
+    assert!(
+        decide(&Policy::default(), 0, Some(ALICE), &bytes)
+            .accepted()
+            .is_some()
+    );
+    assert!(decide(&strict, 0, Some(ALICE), &bytes).accepted().is_none());
 }
 
 fn on_stream(decision: &Decision) -> Vec<u8> {
@@ -209,4 +220,83 @@ fn every_record_needs_a_decision_once_admission_runs() {
     assert!(needs_decision("wl", true));
     assert!(!needs_decision(names::ADMISSION, true));
     assert!(!needs_decision(names::SCHEDULER, true));
+}
+
+#[test]
+fn a_decision_records_who_asked() {
+    let accepted = decided(&request("wl"));
+    assert_eq!(accepted.requester.as_deref(), Some(ALICE));
+    let mut bad = request("wl");
+    bad.id = "Bad Id".to_owned();
+    assert_eq!(decided(&bad).requester.as_deref(), Some(ALICE));
+    let unreadable = decide(&Policy::default(), 0, Some(ALICE), b"not json");
+    assert_eq!(unreadable.requester.as_deref(), Some(ALICE));
+    let round = Decision::decode(&accepted.encode()).unwrap();
+    assert_eq!(round.requester.as_deref(), Some(ALICE));
+}
+
+#[test]
+fn a_request_with_no_recorded_publisher_is_rejected() {
+    let decision = decide(&Policy::default(), 7, None, &request("wl").encode());
+    assert_eq!(rejected(&decision), Reason::NoRequester);
+    assert_eq!(decision.id, "wl");
+    assert_eq!(decision.requester, None);
+    assert!(
+        !decision
+            .encode()
+            .windows(12)
+            .any(|w| w == b"\"requester\":")
+    );
+}
+
+#[test]
+fn nothing_in_the_payload_names_the_requester() {
+    // A payload that claims another requester is read as any other unknown
+    // field: ignored.
+    let mut json: serde_json::Value = serde_json::from_slice(&request("wl").encode()).unwrap();
+    json["requester"] = "p:mallory".into();
+    let bytes = serde_json::to_vec(&json).unwrap();
+    let decision = decide(&Policy::default(), 7, Some(ALICE), &bytes);
+    assert_eq!(decision.requester.as_deref(), Some(ALICE));
+    let policy = Policy {
+        requesters: &["p:mallory"],
+        ..Policy::default()
+    };
+    let decision = decide(&policy, 7, Some(ALICE), &bytes);
+    assert_eq!(rejected(&decision), Reason::NotPermitted);
+}
+
+#[test]
+fn a_policy_that_lists_requesters_admits_only_them() {
+    let policy = Policy {
+        requesters: &[ALICE, "p:bob"],
+        ..Policy::default()
+    };
+    let bytes = request("wl").encode();
+    assert!(
+        decide(&policy, 1, Some("p:bob"), &bytes)
+            .accepted()
+            .is_some()
+    );
+    let carol = decide(&policy, 1, Some("p:carol"), &bytes);
+    assert_eq!(rejected(&carol), Reason::NotPermitted);
+    assert_eq!(carol.requester.as_deref(), Some("p:carol"));
+    // The default policy has no list and admits any recorded requester.
+    assert!(
+        decide(&Policy::default(), 1, Some("p:carol"), &bytes)
+            .accepted()
+            .is_some()
+    );
+    assert_eq!(
+        rejected(&decide(&policy, 1, None, &bytes)),
+        Reason::NoRequester
+    );
+}
+
+#[test]
+fn a_decision_written_before_requesters_were_recorded_still_reads() {
+    let old = br#"{"format":1,"request":4,"id":"wl","outcome":"rejected","reason":"over_limit","detail":"x"}"#;
+    let decision = Decision::decode(old).unwrap();
+    assert_eq!(decision.requester, None);
+    assert_eq!(decision.request, 4);
 }

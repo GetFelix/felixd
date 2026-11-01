@@ -1,5 +1,5 @@
-//! Workload contract 0.2 end to end: rejections, poison, addressed outputs,
-//! chunked snapshots, input metadata and 0.1 modules, each through a takeover
+//! Workload contract 0.3 end to end: rejections, poison, addressed outputs,
+//! chunked snapshots, input metadata, the publisher and 0.1 modules, each through a takeover
 //! where it matters, and checked with `felixd check` and `felixd replay`.
 //!
 //! Needs a Felix broker; see `common`.
@@ -328,6 +328,36 @@ async fn the_input_metadata_is_the_same_live_after_a_takeover_and_in_a_replay() 
         )
     );
     diff_passes(&t, ID);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_publisher_is_the_same_live_after_a_takeover_and_in_a_replay() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("faulty", &["--snapshot-every", "3"]).await;
+    let mut first = t.start_agent();
+    t.publish_all(INPUT, inputs(&["publisher"; 5])).await;
+    produced(&t, OUTPUT, 5).await;
+    first.kill();
+    let _second = t.start_agent();
+    t.publish_all(INPUT, inputs(&["publisher"; 5])).await;
+    // Compares every output with one computed here from the stored records,
+    // publisher included.
+    assert_uninterrupted(&t, &module, 10).await;
+    let input = read_stamped(&t, INPUT).await;
+    let who = input[0]
+        .publisher
+        .clone()
+        .expect("the broker recorded the publisher");
+    assert!(!who.is_empty());
+    for record in &input {
+        assert_eq!(record.publisher.as_deref(), Some(who.as_str()));
+    }
+    let first_output = t.outputs(OUTPUT).await[0].1.clone();
+    let (_, a) = output::decode(&first_output).unwrap().output().unwrap();
+    assert_eq!(a.payload, who.as_bytes());
+    diff_passes(&t, ID);
+    let (ok, report) = t.check(&["--id", ID, "--complete"]);
+    assert!(ok, "{report}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

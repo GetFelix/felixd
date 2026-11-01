@@ -146,6 +146,22 @@ async fn a_rejected_request_never_runs_and_an_accepted_one_does() {
     t.publish_all(INPUT, (0..5).map(count)).await;
     assert_uninterrupted(&t, &counter, 5).await;
 
+    // Each decision names who published its request, as the broker stored it.
+    for id in ["big", ID] {
+        let [(_, decision)] = &decisions_for(&t, id).await[..] else {
+            panic!("not one decision for {id}");
+        };
+        let asked = decision.request;
+        let stored = t
+            .felix
+            .read_range(names::INTAKE, asked, asked + 1)
+            .await
+            .unwrap();
+        let publisher = stored[0].publisher.clone();
+        assert!(publisher.is_some(), "the broker recorded no publisher");
+        assert_eq!(decision.requester, publisher, "{id}");
+    }
+
     // A system workload's id is refused through intake, whatever it asks:
     // only an operator writes the scheduler's spec.
     let mut spec = admission::running(names::SCHEDULER, &module::hash(&counter), vec![]);
@@ -386,6 +402,30 @@ async fn a_replay_of_admission_matches_and_lists_what_a_policy_change_decides_ot
             "first divergence at input {} output 0",
             hungry.request
         )),
+        "{report}"
+    );
+
+    // A policy that lists other requesters decides every recorded request
+    // differently, because the replay gives it each request's stored
+    // publisher.
+    let listed = felixd_testkit::workload("admission-requesters");
+    let hash = module::hash(&listed);
+    t.felix
+        .cache_put(names::MODULES, &hash, listed.into())
+        .await
+        .unwrap();
+    let (ok, report) = t.replay(&[
+        "--id",
+        names::ADMISSION,
+        "--diff",
+        "--all",
+        "--module",
+        &hash,
+    ]);
+    assert!(!ok, "a list of other requesters changed nothing: {report}");
+    assert_eq!(
+        report.lines().count(),
+        decisions(&t).await.len(),
         "{report}"
     );
 }

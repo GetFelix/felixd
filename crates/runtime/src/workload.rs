@@ -4,13 +4,12 @@ use thiserror::Error;
 use wasmtime::{Store, StoreLimits, Trap};
 
 use crate::Limits;
-use crate::bindings::Workload as Bindings;
-use crate::bindings::exports::felixd::workload::step as wit;
+use crate::bindings::Guest;
 
 /// A loaded workload. Calls take `&mut self`, so they never overlap.
 pub struct Workload {
     store: Store<StoreLimits>,
-    bindings: Bindings,
+    guest: Guest,
     limits: Limits,
     failure: Option<Failure>,
 }
@@ -30,6 +29,10 @@ pub struct Input<'a> {
     /// output.
     pub key: Option<&'a [u8]>,
     pub payload: &'a [u8],
+    /// The principal the broker authenticated the record's publisher as, when
+    /// it recorded one. Always `None` for another workload's output. Only a
+    /// contract 0.3 workload sees it.
+    pub publisher: Option<&'a str>,
 }
 
 /// A record for a named output.
@@ -93,7 +96,7 @@ pub enum WorkloadError {
 }
 
 /// What a call produced, when the guest did not trap.
-type Called<T> = Result<T, Failure>;
+pub(crate) type Called<T> = Result<T, Failure>;
 
 fn broke(message: impl Into<String>) -> Failure {
     Failure {
@@ -103,10 +106,10 @@ fn broke(message: impl Into<String>) -> Failure {
 }
 
 impl Workload {
-    pub(crate) fn new(store: Store<StoreLimits>, bindings: Bindings, limits: Limits) -> Workload {
+    pub(crate) fn new(store: Store<StoreLimits>, guest: Guest, limits: Limits) -> Workload {
         Workload {
             store,
-            bindings,
+            guest,
             limits,
             failure: None,
         }
@@ -128,23 +131,8 @@ impl Workload {
     /// `poison`, a trap, running out of fuel or a result that breaks the
     /// contract fails it.
     pub fn step(&mut self, input: Input<'_>) -> Result<Stepped, WorkloadError> {
-        let input = wit::Input {
-            source: wit::Source {
-                stream: input.stream.to_owned(),
-                incarnation: input.incarnation,
-            },
-            offset: input.offset,
-            timestamp_micros: input.timestamp_micros,
-            body: wit::InputBody::Record(wit::RecordIn {
-                key: input.key.map(<[u8]>::to_vec),
-                payload: input.payload.to_vec(),
-            }),
-        };
         let fuel = self.limits.fuel_per_call;
-        self.call(fuel, |bindings, store| {
-            let stepped = bindings.felixd_workload_step().call_step(store, &input)?;
-            Ok(stepped_from(stepped))
-        })
+        self.call(fuel, |guest, store| guest.step(store, &input))
     }
 
     /// The state, as the chunks `snapshot` and `snapshot-chunk` return. The
@@ -152,9 +140,8 @@ impl Workload {
     /// is [`WorkloadError::SnapshotOutOfFuel`], not a failure of the workload.
     pub fn snapshot(&mut self) -> Result<Vec<Vec<u8>>, WorkloadError> {
         let fuel = self.limits.snapshot_fuel;
-        let result = self.attempt(fuel, |bindings, store| {
-            let state = bindings.felixd_workload_state();
-            let count = state.call_snapshot(&mut *store)?;
+        let result = self.attempt(fuel, |guest, store| {
+            let count = guest.snapshot(&mut *store)?;
             if count > MAX_CHUNKS {
                 return Ok(Err(broke(format!(
                     "the snapshot has {count} chunks, more than the {MAX_CHUNKS} allowed"
@@ -162,7 +149,7 @@ impl Workload {
             }
             let mut chunks = Vec::with_capacity(count as usize);
             for index in 0..count {
-                let chunk = state.call_snapshot_chunk(&mut *store, index)?;
+                let chunk = guest.snapshot_chunk(&mut *store, index)?;
                 if chunk.len() > MAX_CHUNK_BYTES {
                     return Ok(Err(broke(format!(
                         "snapshot chunk {index} is {} bytes, more than the {MAX_CHUNK_BYTES} allowed",
@@ -190,11 +177,10 @@ impl Workload {
             _ => return Err(self.fail(broke("a snapshot has too many chunks to restore"))),
         };
         let fuel = self.limits.snapshot_fuel;
-        self.call(fuel, |bindings, store| {
-            let state = bindings.felixd_workload_state();
-            state.call_restore(&mut *store, count)?;
+        self.call(fuel, |guest, store| {
+            guest.restore(&mut *store, count)?;
             for (index, chunk) in (0..count).zip(chunks) {
-                state.call_restore_chunk(&mut *store, index, chunk)?;
+                guest.restore_chunk(&mut *store, index, chunk)?;
             }
             Ok(Ok(()))
         })
@@ -203,9 +189,7 @@ impl Workload {
     /// The state as JSON.
     pub fn inspect(&mut self) -> Result<String, WorkloadError> {
         let fuel = self.limits.fuel_per_call;
-        self.call(fuel, |bindings, store| {
-            Ok(Ok(bindings.felixd_workload_state().call_inspect(store)?))
-        })
+        self.call(fuel, |guest, store| Ok(Ok(guest.inspect(store)?)))
     }
 
     fn fail(&mut self, failure: Failure) -> WorkloadError {
@@ -216,7 +200,7 @@ impl Workload {
     fn call<T>(
         &mut self,
         fuel: u64,
-        f: impl FnOnce(&Bindings, &mut Store<StoreLimits>) -> wasmtime::Result<Called<T>>,
+        f: impl FnOnce(&Guest, &mut Store<StoreLimits>) -> wasmtime::Result<Called<T>>,
     ) -> Result<T, WorkloadError> {
         self.attempt(fuel, f).map_err(|failure| self.fail(failure))
     }
@@ -225,13 +209,13 @@ impl Workload {
     fn attempt<T>(
         &mut self,
         fuel: u64,
-        f: impl FnOnce(&Bindings, &mut Store<StoreLimits>) -> wasmtime::Result<Called<T>>,
+        f: impl FnOnce(&Guest, &mut Store<StoreLimits>) -> wasmtime::Result<Called<T>>,
     ) -> Called<T> {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
         self.store.set_fuel(fuel).expect("fuel is enabled");
-        match f(&self.bindings, &mut self.store) {
+        match f(&self.guest, &mut self.store) {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(failure)) => Err(failure),
             Err(error) => {
@@ -251,16 +235,29 @@ impl Workload {
     }
 }
 
-fn stepped_from(stepped: Result<Vec<wit::Output>, wit::StepError>) -> Called<Stepped> {
+/// What a guest returned from `step`, in the host's own types so both
+/// contract versions share the checks below.
+pub(crate) enum Emitted {
+    Record {
+        name: String,
+        key: Option<Vec<u8>>,
+        payload: Vec<u8>,
+    },
+    Request {
+        kind: String,
+    },
+}
+
+pub(crate) enum Refused {
+    Reject { code: u32, detail: String },
+    Poison(String),
+}
+
+pub(crate) fn stepped_from(stepped: Result<Vec<Emitted>, Refused>) -> Called<Stepped> {
     let outputs = match stepped {
         Ok(outputs) => outputs,
-        Err(wit::StepError::Reject(error)) => {
-            return Ok(Stepped::Rejected {
-                code: error.code,
-                detail: error.detail,
-            });
-        }
-        Err(wit::StepError::Poison(reason)) => {
+        Err(Refused::Reject { code, detail }) => return Ok(Stepped::Rejected { code, detail }),
+        Err(Refused::Poison(reason)) => {
             return Err(Failure {
                 kind: FailureKind::Poison,
                 message: format!("poison: {reason}"),
@@ -270,23 +267,17 @@ fn stepped_from(stepped: Result<Vec<wit::Output>, wit::StepError>) -> Called<Ste
     let mut checked = Vec::with_capacity(outputs.len());
     for (index, output) in outputs.into_iter().enumerate() {
         match output {
-            wit::Output::Record(addressed) => {
-                if validate_name(&addressed.name).is_err() {
+            Emitted::Record { name, key, payload } => {
+                if validate_name(&name).is_err() {
                     return Err(broke(format!(
-                        "output {index} has the name {:?}, which is not 1 to 64 characters of a-z, 0-9 and '-'",
-                        addressed.name
+                        "output {index} has the name {name:?}, which is not 1 to 64 characters of a-z, 0-9 and '-'"
                     )));
                 }
-                checked.push(Output {
-                    name: addressed.name,
-                    key: addressed.key,
-                    payload: addressed.payload,
-                });
+                checked.push(Output { name, key, payload });
             }
-            wit::Output::Request(request) => {
+            Emitted::Request { kind } => {
                 return Err(broke(format!(
-                    "output {index} requests a {} effect, and this build has no effect executors",
-                    request.kind
+                    "output {index} requests a {kind} effect, and this build has no effect executors"
                 )));
             }
         }

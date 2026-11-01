@@ -58,6 +58,10 @@ impl Felix {
             token_provider: Some(Arc::new(settings.token.clone())),
             // Time-based snapshot points come from input append times.
             timestamps: true,
+            // A step is given its record's publisher. Reads return it once the
+            // broker has stored one; the flag also asks for it on live events,
+            // so a live step and a replay see the same value.
+            publishers: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
         let client = ClusterClient::connect_seeds(

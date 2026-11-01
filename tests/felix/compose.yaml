@@ -153,6 +153,9 @@ services:
       FELIX_TLS_CERT_EXPORT: /var/lib/felix/broker-cert.pem
       # Durable streams, consumer groups and cache watches need a log on disk.
       FELIX_DURABLE_STORAGE_DIR: /var/lib/felix/data
+      # Store who published each record. Admission decides on it, and fails
+      # closed for a record with none.
+      FELIX_RECORD_PUBLISHERS: "true"
       RUST_LOG: info
     ports:
       - "127.0.0.1:5000-5003:5000-5003/udp"  # client QUIC, one port per listener
