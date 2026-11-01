@@ -69,3 +69,16 @@ async fn a_needs_operator_record_counts_toward_the_floor() {
     // A marker before the last claim is that claim's floor's business.
     assert_eq!(floor_of(vec![marker(4), claim]).await, Some(0));
 }
+
+/// A degraded record is an observation: a node still on an older spec runs.
+#[tokio::test]
+async fn a_degraded_record_does_not_count_toward_the_floor() {
+    use felixd_core::class::ErrorClass;
+    let degraded = output::encode_degraded(1, 9, ErrorClass::Transient, "x");
+    let claim = output::encode_claim_under(1, 2, 2, "a");
+    assert_eq!(
+        floor_of(vec![claim.clone(), degraded.clone()]).await,
+        Some(2)
+    );
+    assert_eq!(floor_of(vec![degraded]).await, None);
+}

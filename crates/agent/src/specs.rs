@@ -165,18 +165,18 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
     }
 }
 
-/// The first record on `stream` that is not a needs-operator record, with
-/// its offset. A needs-operator record can be written before any claim and
-/// ran nothing, so it never says what the stream was written under.
+/// The first record on `stream` that is not a needs-operator or degraded
+/// record, with its offset. Either can be written before any claim and ran
+/// nothing, so it never says what the stream was written under.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
     let tail = felix.tail(stream).await?;
     let mut next = 0;
     while next < tail {
         let end = tail.min(next + LOOK_RECORDS);
         let (page, after) = felix.read_page(stream, next, end).await?;
-        let found = page.into_iter().find(|r| {
-            output::decode(&r.payload).map_or(true, |found| found.needs_operator_spec().is_none())
-        });
+        let found = page
+            .into_iter()
+            .find(|r| output::decode(&r.payload).map_or(true, |found| !found.precedes_claims()));
         if let Some(found) = found {
             return Ok(Some((found.offset, found.payload)));
         }

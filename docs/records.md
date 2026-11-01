@@ -14,7 +14,7 @@ On `wl.<id>.out`. The version is 4, followed by a kind byte.
 | Bytes | Field |
 |---|---|
 | 1 | version, 4 |
-| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator, 7 for a trim |
+| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator, 7 for a trim, 8 for degraded |
 | 8 | the writer's lease epoch |
 
 An output continues with:
@@ -83,6 +83,27 @@ node still reads as past the tail of `sys.specs` after 30 seconds is recorded as
 so a spec-history read lagging that long stops the workload on every node until the spec is
 submitted again.
 
+A degraded record, kind 8, says that the holder of a spec record let go of the workload because it stayed
+stuck on an error. It continues with:
+
+| Bytes | Field |
+|---|---|
+| 8 | the `sys.specs` offset of the spec record the holder ran |
+| 1 | the error class, as in a failure: 0 transient, 1 needs operator, 2 poison |
+| rest | the error, UTF-8, for people |
+
+A holder appends it with `publish_if` at the tail, behind everything of earlier epochs, and then deletes
+its lease, so any node may claim at once. This build writes it only for class 0, after the run failed on
+transient errors for `--stuck-after-ms` with no output or snapshot written in between. It is an
+observation, not a stop: the spec stays `running`, no node leaves the workload alone because of it, and it
+does not raise the spec floor. The next claim written after it ends it, so `felixd ps` shows `degraded`
+only while it is the last record. It is not written over a failure or needs-operator record, which it
+would hide from the nodes that read the last record, and a degraded record already last for the same spec
+record is not written again. A holder whose claim never landed can write it with no claim before it, so
+the search for the first claim passes over it, as it does over needs-operator records. A reader accepts
+any known class and refuses an unknown one when reading the record in full; a node that only needs to
+pass over it, or to show the spec record it names, reads its version, kind and spec record alone.
+
 A rejection says the workload's `step` returned `reject` for an input and carried on. It continues with:
 
 | Bytes | Field |
@@ -95,15 +116,15 @@ A rejection says the workload's `step` returned `reject` for an input and carrie
 A rejection is that input's only output. The resume fold, the skipped-output checks, reconcile and
 `felixd check` match it by `(input offset, index)` and compare it exactly like an output, so a
 stream with a rejection where a replay produces an output, or the other way round, diverges. They
-pass over claims, failures and needs-operator records. A workload whose input is another workload's output stream reads only
+pass over claims, failures, needs-operator, trim and degraded records. A workload whose input is another workload's output stream reads only
 the outputs addressed to one name, `out`, and passes over these, rejections and outputs of
 other names (`output::addressed_to`). Its step gets the output's key and payload, not the record. It
-decides by the version and kind bytes and reads the body of outputs only, so a failure or
-needs-operator record with a class or reason this build does not know is still passed over. A
+decides by the version and kind bytes and reads the body of outputs only, so a failure, needs-operator or
+degraded record with a class or reason this build does not know is still passed over. A
 version or kind it does not know is refused, never skipped: the reader cannot tell whether it holds
 an input, so the workload is recorded as needing an operator (reason 7), and upgrading the node
-fixes it. That includes kinds 5 and 6 read by a build from before them, so upgrade every node before
-a workload can write them. An output that does not decode is poison.
+fixes it. That includes kinds 5 and 6 read by a build from before them, and kind 8 read by a build from
+before it, so upgrade every node before a workload can write them. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
 ([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start

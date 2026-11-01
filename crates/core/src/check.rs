@@ -83,7 +83,8 @@ impl Produced {
             Record::Claim { .. }
             | Record::Failure { .. }
             | Record::NeedsOperator { .. }
-            | Record::Trim { .. } => None,
+            | Record::Trim { .. }
+            | Record::Degraded { .. } => None,
         }
     }
 
@@ -647,8 +648,8 @@ pub fn specs_applied<'a>(
 /// under, which is the first claim's when that names one and `cached`, the
 /// `workloads` value, otherwise; and the limits each input ran under, as
 /// `(first input, limits)`. `claimed` holds the spec record of every spec
-/// the claims name ([`specs_claimed`]). A needs-operator record before the
-/// first claim ran nothing and is passed over. A claim whose spec has another module
+/// the claims name ([`specs_claimed`]). A needs-operator or degraded record
+/// before the first claim ran nothing and is passed over. A claim whose spec has another module
 /// or input than the first claim's was refused by its owner and is passed
 /// over, so a refused later spec never decides the module or the limits.
 pub fn judged_under<'a, R>(
@@ -663,7 +664,7 @@ where
         .clone()
         .into_iter()
         .filter_map(|r| output::decode(r).ok())
-        .find(|r| r.needs_operator_spec().is_none());
+        .find(|r| !r.precedes_claims());
     let lineage = match first {
         Some(Record::Claim {
             spec: Some(spec), ..
