@@ -6,15 +6,19 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use felixd_core::check::{self, Expected, Finding};
 use felixd_core::output::{self, OutputHeader};
+use felixd_core::replay::first_input;
+use felixd_core::snapshot::SnapshotHeader;
+use felixd_core::trim::Trim;
 
 use crate::input::{self, Feed};
 use felix_client::StreamRecord;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_core::{module, names};
-use felixd_runtime::Runtime;
+use felixd_runtime::{Runtime, Workload};
 
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::settings::Settings;
+use crate::snapshots::Snapshot;
 use crate::specs;
 
 /// What the check found for one workload.
@@ -26,6 +30,9 @@ pub struct Report {
     pub inputs: Vec<String>,
     /// Output records on the stream, claims not counted.
     pub records: usize,
+    /// The input of the snapshot the check restored and started after, or
+    /// `None` when it started at the first input.
+    pub from_snapshot: Option<u64>,
     pub findings: Vec<Finding>,
 }
 
@@ -39,6 +46,7 @@ pub async fn check(
     ids: &[String],
     complete: bool,
     upstream: bool,
+    from_start: bool,
 ) -> Result<Vec<Report>> {
     let felix = Felix::connect(settings).await?;
     let runtime = Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -68,7 +76,7 @@ pub async fn check(
     }
     let mut reports = Vec::new();
     for id in check::upstream_first(&inputs) {
-        let report = check_one(&felix, &runtime, &id, complete)
+        let report = check_one(&felix, &runtime, &id, complete, from_start)
             .await
             .with_context(|| format!("check workload {id}"))?;
         reports.push(report);
@@ -76,7 +84,13 @@ pub async fn check(
     Ok(reports)
 }
 
-async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -> Result<Report> {
+async fn check_one(
+    felix: &Felix,
+    runtime: &Runtime,
+    id: &str,
+    complete: bool,
+    from_start: bool,
+) -> Result<Report> {
     let spec = felix
         .cache_get(names::WORKLOADS, id)
         .await?
@@ -90,25 +104,62 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     // it names is on its input when that is read.
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
-    let snapshots = felix.read_range(&snap_stream, 0, snap_tail).await?;
     let output_tail = felix.tail(&cached.output).await?;
-    let records = felix.read_range(&cached.output, 0, output_tail).await?;
+    let held = read_held(felix, &cached.output, output_tail).await?;
+    // The last trim says which snapshot a check may start from. Without
+    // one, or with `from_start`, it starts at the first input.
+    let trim = held
+        .records
+        .iter()
+        .rev()
+        .find_map(|r| output::decode(&r.payload).ok()?.trim())
+        .filter(|_| !from_start);
+    let cut = held.cut;
+    let records = match (&trim, held.trimmed) {
+        // Reading from the start, so a head Felix has deleted is an error
+        // that names the stream and the oldest offset it keeps.
+        (None, Some(error)) => return Err(error),
+        _ => held.records,
+    };
     // The module, input and limits the stream was written under, not those
     // of a later spec its owner refused.
-    let (spec, limits) = judged(felix, id, &cached, &records).await?;
+    let (spec, limits) = judged(felix, id, &cached, &records, cut).await?;
     let mut limits = limits.into_iter().peekable();
     let bytes = module_bytes(felix, &spec.module).await?;
     let mut workload = runtime
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let snapshots = felix
+        .read_range(
+            &snap_stream,
+            trim.as_ref().map_or(0, |t| t.snap_floor),
+            snap_tail,
+        )
+        .await?;
+    let start = match &trim {
+        Some(trim) => {
+            Some(restore_oldest_kept(felix, &snap_stream, &snapshots, trim, &mut workload).await?)
+        }
+        None => None,
+    };
+    let first = first_input(start);
     let mut feed = Feed::new(felix, id, &spec);
     let mut findings = Vec::new();
     if spec.merged() {
-        findings.extend(check_merge(felix, feed.stream(), &spec.inputs, complete).await?);
+        findings.extend(
+            check_merge(
+                felix,
+                feed.stream(),
+                &spec.inputs,
+                complete,
+                start.map(|h| h.input_offset),
+            )
+            .await?,
+        );
     }
     let input_tail = felix.tail(feed.stream()).await?;
     let mut expected = Vec::new();
-    let mut next = 0;
+    let mut next = first;
     'steps: while next < input_tail {
         let (page, after) = feed.page(next, input_tail).await?;
         for step in page {
@@ -140,7 +191,10 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         .iter()
         .map(|r| (r.offset, r.payload.as_ref()))
         .collect();
-    findings.extend(check::check(&expected, &on_stream, complete));
+    // The snapshot covers every output below its tail.
+    let checked =
+        on_stream.partition_point(|&(offset, _)| offset < start.map_or(0, |h| h.output_tail));
+    findings.extend(check::check(&expected, &on_stream[checked..], complete));
     let snapshots: Vec<(u64, &[u8])> = snapshots
         .iter()
         .map(|r| (r.offset, r.payload.as_ref()))
@@ -150,50 +204,146 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
         workload: id.to_owned(),
         output: spec.output.clone(),
         inputs: spec.inputs.clone(),
-        records: records
+        records: on_stream[checked..]
             .iter()
-            .filter(|r| !output::is_marker(&r.payload))
+            .filter(|(_, payload)| !output::is_marker(payload))
             .count(),
+        from_snapshot: start.map(|h| h.input_offset),
         findings,
     })
 }
 
+/// The records Felix holds on an output stream.
+struct Held {
+    records: Vec<StreamRecord>,
+    /// Felix had deleted the head, and `records` start at the oldest it
+    /// keeps. The read it refused, as an error.
+    trimmed: Option<anyhow::Error>,
+    cut: bool,
+}
+
+/// Reads `stream` up to `tail`, from its oldest record when Felix has
+/// deleted the head, which `Held::trimmed` then says.
+async fn read_held(felix: &Felix, stream: &str, tail: u64) -> Result<Held> {
+    match felix.read_range(stream, 0, tail).await {
+        Ok(records) => Ok(Held {
+            records,
+            trimmed: None,
+            cut: false,
+        }),
+        Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
+            Some(oldest) => Ok(Held {
+                records: felix.read_range(stream, oldest.min(tail), tail).await?,
+                trimmed: Some(error),
+                cut: true,
+            }),
+            None => Err(error),
+        },
+    }
+}
+
+/// Restores the snapshot `trim` names, the oldest it keeps, from
+/// `snapshots`, the records of the snapshot stream from the trim's floor.
+async fn restore_oldest_kept(
+    felix: &Felix,
+    stream: &str,
+    snapshots: &[StreamRecord],
+    trim: &Trim,
+    workload: &mut Workload,
+) -> Result<SnapshotHeader> {
+    let record = snapshots
+        .iter()
+        .find(|r| r.offset == trim.snapshot)
+        .with_context(|| {
+            format!(
+                "the last trim names {stream}:{}, which holds no record",
+                trim.snapshot
+            )
+        })?;
+    let snapshot = Snapshot::decode(&record.payload)
+        .map_err(|e| anyhow::anyhow!("snapshot at {stream}:{}: {e}", record.offset))?
+        .with_context(|| {
+            format!(
+                "the last trim names {stream}:{}, which is not a snapshot",
+                trim.snapshot
+            )
+        })?;
+    if snapshot.taken().header.input_offset != trim.step {
+        bail!(
+            "the last trim says {stream}:{} is of input {}, and it is of input {}",
+            trim.snapshot,
+            trim.step,
+            snapshot.taken().header.input_offset
+        );
+    }
+    crate::replay::restore(felix, stream, &snapshot, workload).await
+}
+
 /// The spec workload `id`'s output stream was written under and the limits
 /// each input ran under, from the spec records its claims name
-/// ([`check::judged_under`]). `cached` is the `workloads` value.
+/// ([`check::judged_from`]). `cached` is the `workloads` value, and `cut` says
+/// `records` start after a head Felix deleted.
 pub(crate) async fn judged(
     felix: &Felix,
     id: &str,
     cached: &WorkloadSpec,
     records: &[StreamRecord],
+    cut: bool,
 ) -> Result<(WorkloadSpec, Vec<(u64, Limits)>)> {
     let payloads = records.iter().map(|r| r.payload.as_ref());
+    let lineage = check::lineage_of(payloads.clone(), cut);
+    let mut named = check::specs_claimed(payloads.clone());
+    named.extend(lineage.filter(|spec| !named.contains(spec)));
     let mut claimed = HashMap::new();
-    for offset in check::specs_claimed(payloads.clone()) {
+    for offset in named {
         claimed.insert(offset, specs::read(felix, id, offset).await?);
     }
-    Ok(check::judged_under(cached, &claimed, payloads))
+    Ok(check::judged_from(cached, &claimed, lineage, payloads))
 }
 
 /// Checks the merge log `stream` of a workload reading `inputs`
-/// ([`check::check_merge`]). The log is read before the inputs.
+/// ([`check::check_merge_from`]). The log is read before the inputs. With
+/// `after`, the log is checked from the entry after that step.
 async fn check_merge(
     felix: &Felix,
     stream: &str,
     inputs: &[String],
     complete: bool,
+    after: Option<u64>,
 ) -> Result<Vec<Finding>> {
     let tail = felix.tail(stream).await?;
-    let log = felix.read_range(stream, 0, tail).await?;
+    let mut log = felix.read_range(stream, after.unwrap_or(0), tail).await?;
+    let start = match after {
+        Some(step) => {
+            let at_step = log.first().filter(|r| r.offset == step);
+            let start = at_step.and_then(|r| check::MergeStart::of(&r.payload));
+            let start = start.with_context(|| {
+                format!("{stream}:{step}, a snapshot's step, is not a merge record")
+            })?;
+            log.remove(0);
+            Some(start)
+        }
+        None => None,
+    };
     let mut offsets = Vec::with_capacity(inputs.len());
-    for input in inputs {
+    for (i, input) in inputs.iter().enumerate() {
         let tail = felix.read_tail(input).await?;
-        let records = felix.read_range(input, 0, tail).await?;
+        let from = start
+            .as_ref()
+            .and_then(|s| s.next.get(i))
+            .copied()
+            .unwrap_or(0);
+        let records = felix.read_range(input, from.min(tail), tail).await?;
         let found = records.iter().map(|r| (r.offset, r.timestamp_micros));
         offsets.push((input.as_str(), found.collect()));
     }
     let log: Vec<(u64, &[u8])> = log.iter().map(|r| (r.offset, r.payload.as_ref())).collect();
-    Ok(check::check_merge(&log, &offsets, complete))
+    Ok(check::check_merge_from(
+        &log,
+        &offsets,
+        complete,
+        start.as_ref(),
+    ))
 }
 
 /// The inputs workload `id`'s output stream was written under, from the same
@@ -205,8 +355,8 @@ async fn inputs_of(felix: &Felix, id: &str) -> Result<Vec<String>> {
         .context("no such workload")?;
     let cached = WorkloadSpec::decode(&cached)?;
     let tail = felix.tail(&cached.output).await?;
-    let records = felix.read_range(&cached.output, 0, tail).await?;
-    let (spec, _) = judged(felix, id, &cached, &records).await?;
+    let held = read_held(felix, &cached.output, tail).await?;
+    let (spec, _) = judged(felix, id, &cached, &held.records, held.cut).await?;
     Ok(spec.inputs)
 }
 

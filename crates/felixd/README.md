@@ -23,7 +23,7 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 | `felixd init <module>` | Brings admission up: creates the namespace and its system namespace, writes the grants of felixd's roles there, and writes admission's spec directly with the control plane token. Running it again with the same module changes nothing. |
 | `felixd run [flags] <module>` | Where admission runs, uploads the module, publishes a request on `sys.intake` and prints admission's decision, exiting 1 on a rejection. Otherwise stores the module, creates the workload's streams and starts it. `--id` and `--input` are required; repeat `--input` for several, merged through a merge log. |
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
-| `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
+| `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Starts from the oldest kept snapshot when the workload trims its history, or from the first input with `--from-start`. Exits 1 if it finds any. |
 | `felixd replay` | Rebuilds a workload as of `--to` and prints what its `inspect` returns, or with `--diff` compares a replay with the recorded outputs. Writes nothing. |
 | `felixd ps` | Shows each workload's state, holder, assignment (while a scheduler runs), epoch, output stream tail and position on each input, and each node. Reads only. |
 | `felixd drain <node>` | Marks a node as draining: it releases its leases so other nodes take its workloads over at once, and claims nothing. |

@@ -98,7 +98,8 @@ enum Command {
     },
     /// Check output streams: replay each workload's module over its input and
     /// report gaps, duplicates, records out of order, epoch regressions and
-    /// outputs that differ. Exits with 1 if anything is found.
+    /// outputs that differ. A workload that trims its history is checked from
+    /// the oldest snapshot it keeps. Exits with 1 if anything is found.
     Check {
         #[command(flatten)]
         connection: Connection,
@@ -114,6 +115,11 @@ enum Command {
         /// reads, up the whole pipeline. Stages are checked upstream first.
         #[arg(long)]
         upstream: bool,
+        /// Replay from the first input even when the last trim record names
+        /// a snapshot to start from. Fails once Felix has deleted history
+        /// the replay needs.
+        #[arg(long)]
+        from_start: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
     /// what its `inspect` returns, or with `--diff` compare the outputs a
@@ -315,13 +321,24 @@ async fn main() -> Result<()> {
             ids,
             complete,
             upstream,
+            from_start,
         } => {
-            let reports = check(&connection.settings()?, &ids, complete, upstream).await?;
+            let reports = check(
+                &connection.settings()?,
+                &ids,
+                complete,
+                upstream,
+                from_start,
+            )
+            .await?;
             let mut found = false;
             for report in &reports {
                 if report.findings.is_empty() {
+                    let after = report.from_snapshot.map_or(String::new(), |input| {
+                        format!(", checked after the snapshot of input {input}")
+                    });
                     println!(
-                        "{}: {} records, ok, from {}",
+                        "{}: {} records, ok, from {}{after}",
                         report.output,
                         report.records,
                         report.inputs.join(", ")

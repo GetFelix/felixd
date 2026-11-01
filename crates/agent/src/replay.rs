@@ -123,7 +123,7 @@ pub async fn diff(
         .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records).await?;
+    let (_, limits) = judged(&felix, id, &spec, &records, false).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
     let first = run_inputs(
@@ -217,16 +217,27 @@ async fn start(
     let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, None));
     };
-    let snapshot = &found[index];
+    let header = restore(felix, &snap_stream, &found[index], &mut workload).await?;
+    Ok((workload, Some(header)))
+}
+
+/// Restores `snapshot`, read from `stream`, into `workload`, and returns its
+/// header.
+pub(crate) async fn restore(
+    felix: &Felix,
+    stream: &str,
+    snapshot: &Snapshot,
+    workload: &mut Workload,
+) -> Result<SnapshotHeader> {
     let header = snapshot.taken().header;
-    let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
+    let chunks = snapshots::chunks(felix, stream, snapshot)
         .await
         .map_err(snapshots::ReadError::into_anyhow)?;
     let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
     workload
         .restore(&chunks)
         .with_context(|| format!("restore the snapshot of input {}", header.input_offset))?;
-    Ok((workload, Some(header)))
+    Ok(header)
 }
 
 /// Runs the steps at offsets `from..end` of `feed` through `workload`,

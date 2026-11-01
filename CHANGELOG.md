@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Trim records carry the stream's lineage, and `felixd check` starts from a
+  snapshot (#150). A trim record on the output stream now also holds the spec
+  record of the stream's first claim, copied from trim to trim, and the highest
+  spec record claimed so far. Once a cut head has taken the first claim, the
+  agent, `felixd run` and `felixd check` read what the stream was written under
+  from the oldest record Felix keeps, and the stale-spec check stops at a trim
+  record. Trim records without the new fields still read. `felixd check`
+  restores the oldest snapshot the last trim record keeps and checks what
+  follows it, the merge log from the entry at its step; `--from-start` replays
+  from the first input. Streams without trim records are checked as before.
+  Deleting `.out` and the floors downstream readers need remain (#150).
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and
