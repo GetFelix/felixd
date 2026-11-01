@@ -525,8 +525,14 @@ async fn a_restore_that_runs_out_of_fuel_is_left_for_an_operator() {
         t.lease(ID).await.is_none().then_some(())
     })
     .await;
+    let records = t.read_all(OUTPUT).await.len();
     tokio::time::sleep(LEASE_TTL * 2).await;
     assert!(t.lease(ID).await.is_none(), "the workload was held again");
+    assert_eq!(
+        t.read_all(OUTPUT).await.len(),
+        records,
+        "a node claimed it again or recorded it twice"
+    );
     assert_eq!(
         t.outputs(OUTPUT).await.len(),
         outputs,
