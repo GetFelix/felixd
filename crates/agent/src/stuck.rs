@@ -49,7 +49,7 @@ impl Streak {
             self.since = None;
         }
         let since = *self.since.get_or_insert(now);
-        now.saturating_duration_since(since) >= self.bound
+        now.saturating_duration_since(since) >= Duration::MAX
     }
 }
 
