@@ -211,6 +211,45 @@ boundaries (by key range, say) lets the host write only the chunks that
 changed: the host hashes each chunk and does not write one whose sha256 the
 previous snapshot already holds.
 
+## Snapshot layouts
+
+A snapshot is only as portable as the code that wrote it. A module may say
+which snapshots it can restore, in a custom section of the component named
+`felixd.snapshot`, UTF-8 JSON:
+
+```json
+{"format": "counter.2", "reads": ["counter"]}
+```
+
+- `format` names the layout of the snapshots the module writes: how its state
+  is split into chunks and what the bytes of a chunk mean.
+- `reads` lists other layouts its `restore` accepts. A module always reads its
+  own `format`. `reads` may be left out.
+
+A layout id is 1 to 128 bytes of printable ASCII without spaces, and `reads`
+lists at most 64. The section appears once and has no other fields.
+
+The module promises two things. Another module that names the same `format`
+promises that chunks of that layout mean the same state to both. A module that
+lists a layout in `reads` promises that `restore` on chunks of it gives the
+state the writing module had, from which `step` carries on. A module with no
+section writes a layout that only the exact same module, by hash, can read.
+The section is optional, the WIT is unchanged and a module without one is
+still a valid 0.2 workload.
+
+The host does not check the promise. It runs a workload without looking at the
+section, and a workload resumes from its own module's snapshots. It reads the
+section for one thing: `felixd replay --module` starts the new module from the
+recorded module's snapshot only when the new module's `format` or `reads`
+names the layout the recorded module wrote, and otherwise from the initial
+state, saying why ([design.md, Replay](design.md#replay)). A new module that
+declares a layout and then traps or runs out of fuel restoring it is reported
+as "snapshot not readable by the new module", with the snapshot's input
+offset, and not as a divergence. One that restores a layout it misreads shows
+up as outputs that differ, so a declaration is worth no more than the tests
+behind it. A `felixd.snapshot` section that does not parse is an error for
+`felixd replay` and does not stop the module from running.
+
 ## Records
 
 The output stream moves to version 4 and the snapshot stream to version 3.

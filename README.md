@@ -145,7 +145,10 @@ input with a recorded output) and compares each output with the one on the
 stream, reporting the first divergence with the node, epoch, input offset and
 both digests, and exits with 1 if it finds one. `--module <hash>` runs another
 module from the `modules` cache over the recorded inputs instead, so
-`--diff --module` checks an upgrade before it goes live. Replay writes nothing,
+`--diff --module` checks an upgrade before it goes live. The new module starts
+from the nearest snapshot before `--from` if its `felixd.snapshot` section
+says it reads that snapshot's layout, and from the initial state if not;
+stderr says which. `--from-start` always starts from the initial state. Replay writes nothing,
 but until Felix can report a stream's tail to a reader
 ([Felix #1621](https://github.com/GetFelix/felix/issues/1621)) it needs publish
 grants on the streams it reads, as `felixd check` does.
@@ -409,7 +412,12 @@ are still planned.
   through it.
 - **Checking an upgrade before it goes live.** Run a new version of a module
   against recorded inputs and compare its outputs with what the current
-  version produced, before switching it on.
+  version produced, before switching it on. With the new module in the
+  `modules` cache, `felixd replay --id orders --diff --from 120000 --module
+  <sha256 of the module>` restores the snapshot before input 120000 into the
+  new version, if it declares it can read it, and reports the first input whose
+  output differs, or that every output matches. It exits with 1 on a
+  difference.
 
 A worked example: a payments team runs a fraud-scoring workload per merchant.
 A node dies during a traffic spike. Within one lease TTL, its workloads are

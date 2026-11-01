@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Upgrade check from a snapshot (#29). `felixd replay --diff --module <hash>`
+  and `replay --to ... --module <hash>` start the new module from the
+  workload's nearest snapshot before `--from` when the new module's
+  `felixd.snapshot` custom section says it reads the layout the workload's
+  module wrote, and from the initial state when it does not, saying which and
+  why on stderr. The section is optional JSON, `{"format": "<id>", "reads":
+  ["<id>", ...]}`, additive to contract 0.2 (docs/contract.md, "Snapshot
+  layouts"); a module without one is readable only by itself. A new module
+  that declares the layout and traps or runs out of fuel restoring it is
+  reported as "snapshot not readable by the new module", not as a divergence.
+  New `--from-start` always replays from the initial state. `replay` and `diff`
+  in `felixd_agent::replay` take `from_start`, and `Replayed` and `Diffed` carry
+  a `Start` in place of `restored` (breaking for library users). The `counter`
+  example declares its layout and has cargo features that build the variants
+  the tests replay against it; `felixd_testkit::workload_with` builds one.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and

@@ -55,6 +55,17 @@ the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a 
 `--all`, with `--diff`, reports every divergence rather than the first; with `--module` on
 admission it lists each recorded request a policy change decides otherwise.
 
+A replay restores the nearest snapshot before its first input. With `--module`, the new module
+restores the workload's snapshot only if the `felixd.snapshot` section of its component says it
+reads the layout the workload's module wrote ([docs/contract.md](../../docs/contract.md#snapshot-layouts));
+otherwise it starts from the initial state. `--from-start` starts from the initial state in every
+case. Stderr says where the replay started, and when the new module could not read the snapshot,
+why. A new module that declares it reads the snapshot and then traps or runs out of fuel restoring
+it is an error, "snapshot not readable by the new module", with the snapshot's input offset, and
+exits 1 with nothing on stdout, where a divergence is on stdout. A diff starts at input 0 unless
+`--from` says otherwise, and no snapshot is before input 0, so `--from` is what lets an upgrade
+check start from a snapshot.
+
 Flags of `ps`: `--id` (repeat for several; every workload by default).
 
 Flags of `drain`: `--wait`, which returns once no live lease names the node and the node says it

@@ -865,9 +865,31 @@ checks determinism; CI runs it on every example workload after a takeover.
 
 The same comparison with a different module (`--module <hash>`, a module in
 the `modules` cache) checks an upgrade before it goes live: the new version
-runs over the recorded inputs from its initial state, since the snapshots hold
-the old version's state, and the diff shows where its outputs differ (#29).
-`--module` without `--diff` prints the new version's state at `--to`.
+runs over the recorded inputs, and the diff shows the first input where its
+outputs differ from the recorded ones, or that none does. A workload runs one
+module for its life, since `felixd run` refuses a new module once the output
+or snapshot stream has a record, so every snapshot on the stream was written
+by the module in the spec. The new module starts from the nearest of them
+before `--from` if it declares it can read that snapshot, and runs the inputs
+after it. A long history is then checked from a recent `--from` instead of
+from input 0, which has no snapshot before it. `--from-start` runs the whole
+history from the initial state whatever `--from` says.
+
+A module declares what it can read in a `felixd.snapshot` custom section
+([contract.md, Snapshot layouts](contract.md#snapshot-layouts)): the layout of
+the snapshots it writes and the other layouts it restores. The new module may
+restore a snapshot when its own layout or its `reads` names the layout the
+recorded module wrote. A module with no section is readable only by itself,
+so a recorded module that declares nothing has no snapshot another module
+may start from. When the new module cannot read the snapshot, the replay
+starts from the initial state and says why on stderr, so a result never comes
+from the wrong start silently. Where a replay started is always on stderr, as
+"started from the snapshot of input N" or "started from the initial state".
+If the new module declares the layout and its `restore` traps or runs out of
+fuel on the snapshot, the command stops with "snapshot not readable by the new
+module" and the snapshot's input offset. That is not a divergence of the
+outputs, but it exits with 1 like every error does. `--module` without
+`--diff` prints the new version's state at `--to`, started the same way.
 
 Replay needs no lease and writes nothing. It should run anywhere with read
 grants, but it reads the input and snapshot streams' tails with a refused
