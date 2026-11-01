@@ -183,6 +183,11 @@ output stream, fenced by epoch like an output, so a node that was frozen
 while another took over can't fail it. Its class says whether it is poison or
 needs an operator.
 
+When a node records that a workload needs an operator, `felixd run` with a
+changed spec is the way out. A build older than the one that recorded it can
+submit that spec too, but its nodes leave the workload alone until a node that
+can read the record takes it.
+
 `felixd ps` shows where every workload is: its state (`running`, `waiting`
 for a holder, `needs-operator` with the reason, `failed` with the reason, or
 `stopped`), the node holding it and its epoch, the output stream's tail, and
