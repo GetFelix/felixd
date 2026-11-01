@@ -362,7 +362,9 @@ A create that Felix answers with 409 counts as done only if the stream or cache 
 back. Felix also refuses a stream under the name of a deleted one until the cluster has finalized
 stream incarnations, and a control plane that no broker registers with, as in the single-broker
 test stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait
-for a stream that does not exist.
+for a stream that does not exist. Admission's projector, which creates an accepted workload's
+streams, logs the same reason and retries every poll, so later decisions wait behind it until an
+operator finalizes incarnations.
 
 Running `felixd run` again for an existing id appends a new spec record and
 points `workloads` at it. The cache only moves forward: a write naming an

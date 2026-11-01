@@ -57,25 +57,49 @@ fn read_request(socket: &mut std::net::TcpStream) -> String {
 }
 
 /// A control plane that answers each request with the next status in
-/// `statuses`, and the request paths it saw.
+/// `statuses`, and the requests it saw as `METHOD /path`.
 fn control_plane(statuses: &'static [u16]) -> (String, std::thread::JoinHandle<Vec<String>>) {
     let replies: Vec<(u16, &'static str)> = statuses.iter().map(|&s| (s, "{}")).collect();
     control_plane_replying(replies)
 }
 
-/// Like [`control_plane`], with a body for each answer.
+/// Like [`control_plane`], with a body for each answer. It stops waiting for
+/// a request that never comes, so a test that expects one fails on what it
+/// saw instead of hanging.
 fn control_plane_replying(
     replies: Vec<(u16, &'static str)>,
 ) -> (String, std::thread::JoinHandle<Vec<String>>) {
     use std::io::Write;
+    use std::time::{Duration, Instant};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let served = std::thread::spawn(move || {
-        let mut paths = Vec::new();
+        let mut seen = Vec::new();
         for (status, body) in replies {
-            let (mut socket, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() > deadline {
+                            return seen;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
             let request = read_request(&mut socket);
-            paths.push(request.split_whitespace().nth(1).unwrap().to_owned());
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer c\r\n"),
+                "no control plane token in {request}"
+            );
+            let mut line = request.split_whitespace();
+            seen.push(format!("{} {}", line.next().unwrap(), line.next().unwrap()));
             write!(
                 socket,
                 "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -83,7 +107,7 @@ fn control_plane_replying(
             )
             .unwrap();
         }
-        paths
+        seen
     });
     (url, served)
 }
@@ -108,9 +132,9 @@ async fn a_namespace_without_old_system_streams_is_not_refused() {
     assert_eq!(
         served.join().unwrap(),
         [
-            "/v1/tenants/dev/namespaces/ns/streams/sys.specs",
-            "/v1/tenants/dev/namespaces/ns/streams/sys.intake",
-            "/v1/tenants/dev/namespaces/ns/streams/sys.facts",
+            "GET /v1/tenants/dev/namespaces/ns/streams/sys.specs",
+            "GET /v1/tenants/dev/namespaces/ns/streams/sys.intake",
+            "GET /v1/tenants/dev/namespaces/ns/streams/sys.facts",
         ]
     );
 }
@@ -130,6 +154,7 @@ async fn a_reply_that_is_not_found_or_not_missing_is_an_error_not_absence() {
 }
 
 const STREAMS: &str = "/v1/tenants/dev/namespaces/ns/streams";
+const CACHES: &str = "/v1/tenants/dev/namespaces/ns/caches";
 
 const REUSED: &str = r#"{"code":"conflict","message":"a stream named s was deleted on this cluster; finalize stream_incarnations before reusing the name"}"#;
 
@@ -145,7 +170,17 @@ async fn a_409_for_a_stream_that_exists_is_success() {
     ensure_stream(&settings_at(url), "s", kind()).await.unwrap();
     assert_eq!(
         served.join().unwrap(),
-        [STREAMS.to_owned(), format!("{STREAMS}/s")]
+        [format!("POST {STREAMS}"), format!("GET {STREAMS}/s")]
+    );
+}
+
+#[tokio::test]
+async fn a_409_for_a_cache_that_exists_is_success() {
+    let (url, served) = control_plane(&[409, 200]);
+    ensure_cache(&settings_at(url), "c", kind()).await.unwrap();
+    assert_eq!(
+        served.join().unwrap(),
+        [format!("POST {CACHES}"), format!("GET {CACHES}/c")]
     );
 }
 
@@ -162,7 +197,7 @@ async fn a_409_that_left_no_stream_is_an_error_with_the_reason() {
 }
 
 #[tokio::test]
-async fn a_409_for_a_cache_is_read_back_too() {
+async fn a_409_that_left_no_cache_is_an_error() {
     let (url, served) = control_plane_replying(vec![(409, REUSED), (404, "{}")]);
     let error = ensure_cache(&settings_at(url), "c", kind())
         .await
@@ -171,10 +206,7 @@ async fn a_409_for_a_cache_is_read_back_too() {
     assert!(error.contains("namespaces/ns/caches/c"), "{error}");
     assert_eq!(
         served.join().unwrap(),
-        [
-            "/v1/tenants/dev/namespaces/ns/caches".to_owned(),
-            "/v1/tenants/dev/namespaces/ns/caches/c".to_owned()
-        ]
+        [format!("POST {CACHES}"), format!("GET {CACHES}/c")]
     );
 }
 
@@ -193,11 +225,25 @@ async fn a_409_whose_read_back_fails_is_an_error() {
 }
 
 #[tokio::test]
+async fn a_refusal_that_is_not_a_409_is_not_read_back() {
+    let (url, served) = control_plane(&[403]);
+    let error = ensure_stream(&settings_at(url), "s", kind())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("failed with HTTP 403"), "{error}");
+    assert_eq!(served.join().unwrap(), [format!("POST {STREAMS}")]);
+}
+
+#[tokio::test]
 async fn a_namespace_that_exists_is_success() {
     let (url, served) = control_plane(&[409, 201]);
     ensure_namespace(&settings_at(url)).await.unwrap();
     assert_eq!(
         served.join().unwrap(),
-        ["/v1/tenants/dev/namespaces", "/v1/tenants/dev/namespaces"]
+        [
+            "POST /v1/tenants/dev/namespaces",
+            "POST /v1/tenants/dev/namespaces"
+        ]
     );
 }
