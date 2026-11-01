@@ -10,6 +10,8 @@ it ([Spec history](#spec-history)).
 `tla-merge` job checks it ([Several inputs](#several-inputs)).
 `specs/FelixdAdmission.tla` models admission's projection and the gate a spec record passes
 before it runs, and the `tla-admission` job checks it ([Admission](#admission)).
+`Felixd.tla` and `FelixdMerge.tla` also model trimming and the deletion it will allow
+([Trimming](#trimming)).
 
 ```bash
 scripts/check_tla.sh                 # every configuration (needs Java 11+)
@@ -31,6 +33,7 @@ TLA_MODULE=FelixdAdmission scripts/check_tla.sh      # the admission model
 | `NoPoison` | No node finds the streams impossible to resume from. The model is deterministic, so every such finding would fail a healthy workload. |
 | `UniqueEpoch` | No two claims that run, or have records or requests in flight, share an epoch. |
 | `SnapshotsSplit` | For each snapshot (X, T), the output records below offset T are of inputs up to X and the rest are of later inputs. |
+| `RestoreIntact` | After a trim and the deletion it names, the snapshot a resume restores is still on `.snap`, and so are the inputs from its step on ([Trimming](#trimming)). Only configurations with `MaxTrims` above 0 can break it. |
 
 Under weak fairness of every node's own steps, of delivery and of expiry, `FelixdLive` checks
 `FreeIsClaimed` (a free, running workload is claimed) and `EventuallyDone` (every output is
@@ -70,6 +73,10 @@ since TLC stops at the first violation a worker finds.
 | `FelixdTailFold` | `NoPoison` | the fold on event offsets off (#67) | 20 | under 1 s |
 | `FelixdNoLaterEpochWins` | `EpochMonotone` | reconcile's later-epoch rule off | about 21,000 | 2 s |
 | `FelixdPartialNoIndex` | `NoPoison` | the fold skipping whole inputs, not outputs by index | about 700,000 | 14 s |
+| `FelixdTrim` | pass | an input with an output, then one with none, two claims, a crash, a clock fault, two snapshots, a trim that keeps the last snapshot | 1,995,590 | TIME1 |
+| `FelixdTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 1,687,132 | TIME2 |
+| `FelixdTrimNoOwn` | pass | the same as `FelixdTrim`, with the own-snapshot rule off | 1,995,590 | TIME1 |
+| `FelixdTrimOldest` | `RestoreIntact` | the input floor from the oldest kept record's step, not the lowest | about 25,000 | under 1 s |
 
 `FelixdFull` has everything at once, with a second input whose batch of two may land in part. The `TLA nightly` workflow walks three million random
 behaviours of it with `TLC_SIMULATE`, which takes about five minutes on an Apple M-series laptop. A
@@ -110,6 +117,8 @@ Paths are from the repository root, as of workload contract 0.2.
 | `Step` | `Steps::step`, with `already_written` and `Written::check`: `crates/agent/src/runner.rs:420-457`, `crates/core/src/resume.rs:70-77`, `crates/agent/src/runner.rs:651-670`. A rejection is the step's one output, at index 0 |
 | `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:393-436` |
 | `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:520-569` |
+| `TrimStep` | `Runner::trim` after a snapshot, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
+| `DeleteSnaps`, `DeleteInputs` | not built: Felix has no call to delete below an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). The model deletes what a trim record names, once the record has landed |
 | `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:814-832` |
@@ -271,6 +280,7 @@ could still write is on `.out`, the assumption design.md states.
 | `OneWriter` | One holder writes under each epoch, on both streams. |
 | `OutputsFollowMerge` | The outputs on `.out` are a prefix of the outputs of the merge log's entries, in log order: no gap, no duplicate. |
 | `StepsFollowMerge` | Each output names the offset of the entry it was stepped from, in increasing order, so a replay of the log steps the same records in the same order. |
+| `RestoreIntact` | After a trim and the deletion it names, the snapshot a resume restores still has the merge log from its entry on and the input records after its entry's `next` ([Trimming](#trimming)). |
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
@@ -285,6 +295,9 @@ could still write is on `.out`, the assumption design.md states.
 | `FelixdMergeNoCatchUp` | `OutputsFollowMerge` | the entries before the claim not stepped: a holder that crashed between its merge append and its steps leaves a gap | about 2,300 | under 3 s |
 | `FelixdMergeBeforeOut` | `OneWriter` | the merge log claimed before `.out`, with `epochs` recreated | about 250 | under 3 s |
 | `FelixdMergeNoSameBytes` | `StepsFollowMerge` | reconcile takes any record of its own epoch past the tail as the entry it sent | about 240 | under 3 s |
+| `FelixdMergeTrim` | pass | one record on each input, the second with no output, two holders, two snapshots, a trim that keeps the last snapshot | 86,958 | TIME3 |
+| `FelixdMergeTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 55,420 | TIME3 |
+| `FelixdMergeTrimOldest` | `RestoreIntact` | the floors from the oldest kept record's step, not the lowest | about 15,000 | under 3 s |
 
 Every configuration has two nodes. Counts and times are from the `tla-merge` job on the CI
 runner, where the whole script takes about eight and a half minutes. `FelixdMergeFull` has two records on each input, four holders, two crashes, two lost
@@ -322,13 +335,17 @@ append there first: comparing epochs alone, it steps the new record at the old o
 | `Resume` | the last output, `resume::fold` and the catch-up loop in `merged`: `crates/agent/src/runner.rs` |
 | `Merge`, `MAns` | `merged`, `merge_and_step` and `MergeLog::append` with `merge::reconcile`: `crates/agent/src/runner.rs`, `crates/agent/src/merge.rs`, `crates/core/src/merge.rs` |
 | `OSend`, `OAns` | `Steps::step` and `OutputLog::append`: `crates/agent/src/runner.rs`, `crates/agent/src/output.rs` |
+| `QuietStep` | a step whose input produces no output |
+| `SnapTake`, `SnapGiveUp`, `SnapLand` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs` |
+| `TrimStep` | `Runner::trim`, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
+| `DeleteMerge`, `DeleteInputs` | not built ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)) |
 | `Deliver`, `LoseAnswer`, `Timeout`, `DeliverPrefix` | `publish_if` landing late or not at all, and the `drop-*`, `lose-*-answer` and `append-prefix` test faults: `crates/agent/src/faults.rs` |
 | `Crash` | an agent killed, or `crash-after-merge` |
 | `Recreate` | the `epochs` cache recreated |
 
-Not in this model: snapshots, failure and needs-operator records, generation-start records,
-records a step passes over (every entry has one output here), and the gap read-back, which the
-model covers by letting a holder merge any input's next record.
+Not in this model: failure and needs-operator records, generation-start records, snapshot chunks,
+and the gap read-back, which the model covers by letting a holder merge any input's next record.
+Snapshots, and entries with no output (`Quiet`), appear only in the trimming configurations.
 
 ## Admission
 
@@ -405,6 +422,49 @@ alone; forged skip records, which only make the projector pass over decisions, a
 than a safety problem; a writer of `wl.admission.out` other than admission (#74); trimmed
 decisions; and the module check, reduced to whether the module is there.
 
+## Trimming
+
+`felixd run --keep-snapshots K` makes a holder record a trim on `.out` after each snapshot of its
+own: the floors below which this workload's resume reads nothing ([design.md](design.md#retention)).
+Felix cannot delete below an offset yet, so the code deletes nothing. The models include the
+deletion that will follow, so the rules are checked before it exists.
+
+Both `Felixd.tla` and `FelixdMerge.tla` add three things:
+
+- **`TrimStep`** is the step after an acked snapshot. The kept snapshots are the last `Keep` on
+  `.snap`. The holder appends a trim record at the `.out` tail it expects, like an output, so a
+  holder a later one has superseded cannot land one. A trim that is not planned, or is refused, is
+  skipped, and floors never go back.
+- **`Delete*`** drops what the last trim record names, only after that record has landed. The
+  `.snap` records and the inputs go in separate steps, so a crash between them leaves less
+  deleted than recorded.
+- **`RestoreIntact`** is checked in every state: the newest snapshot, the one a resume restores,
+  and the inputs it reads (from its step on; in `FelixdMerge`, the merge log from its entry on
+  and each input after the `next` its entry carries) have not been deleted.
+
+The floor is the lowest step among the kept snapshots, not the oldest one's, because the newest
+snapshot can have a lower step than an older kept one. A snapshot's step is the last input
+stepped, not the last output. If a holder's last inputs produce no output, a later holder that
+replays up to the last output may snapshot below the step of the first holder's snapshot, which
+lands late. So the configurations have an input with no output after the last one that has one
+(`Quiet` in `FelixdMerge`). `FelixdTrimOldest` and `FelixdMergeTrimOldest` take the oldest
+record's step instead, and TLC finds a resume that needs inputs already deleted.
+
+Two things the models showed about the code's rules:
+
+- **The own-snapshot rule is a second guard.** `FelixdTrimNoOwn` turns it off and passes, with
+  the same states as `FelixdTrim`. A later holder's snapshot can land only after its claim is on
+  `.out`, and that claim makes the earlier holder's trim append fail, so a holder never trims
+  with another holder's snapshot newest. The rule stays as defence in depth, and `trim::plan`
+  keeps its test.
+- **The trim has to follow the holder's own ack.** With a trim allowed at any later time, TLC
+  finds a holder whose snapshot write timed out and then landed. The holder had given up, resumed
+  and replayed, and wrote a second snapshot at a lower step, which landed after a trim set from
+  the first. The code trims right after the ack of a snapshot it wrote, so the model does too.
+
+Not modelled: snapshot chunks (a snapshot is its manifest), the `.snap` offsets in `FelixdMerge`
+(`Felixd.tla` checks them), and the head trim of `.out` ([Not modelled](#not-modelled)).
+
 ## Pipelines
 
 A pipeline needs no new model. `Felixd.tla` takes the input as a fixed sequence of records, each
@@ -451,6 +511,10 @@ composition.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
 
-No model has a trim action yet. A trim record is a fenced append that every reader passes over and
-that deletes nothing, so it can break no property the models check; the action and its twins come
-with deletion ([#151](https://github.com/GetFelix/felixd/issues/151)).
+- The head trim of `.out`, with the first claim's spec record carried in the trim record so the
+  spec lineage survives it. Neither is built ([#150](https://github.com/GetFelix/felixd/issues/150)),
+  and `.out` is not trimmed today. `FelixdSpecs.tla` numbers its offsets from the start of the
+  stream, so modelling it means rewriting its first-claim and check functions on a base offset;
+  that comes with the code.
+- Trimming an input shared with other readers, which is deleted only below every reader's floor
+  (#150). The models check one workload's floors.

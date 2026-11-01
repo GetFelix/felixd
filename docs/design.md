@@ -973,7 +973,8 @@ stale holder's is refused by the next claim. A crash before it lands changes
 nothing, and one after leaves a record the next holder passes over, like a
 claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
 
-Nothing is deleted yet. Felix trims only by age or size, which knows nothing
+Nothing is deleted yet. The TLA models include the deletion that will follow and check these
+floors against it ([formal.md](formal.md#trimming)). Felix trims only by age or size, which knows nothing
 of what a resume needs, and has no call to trim a stream before an offset
 ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). When it does,
 the floors decide different things per stream:

@@ -49,6 +49,10 @@ felixd_expectations=(
   "FelixdNoLaterEpochWins violates EpochMonotone"
   "FelixdPartial pass"
   "FelixdPartialNoIndex violates NoPoison"
+  "FelixdTrim pass"
+  "FelixdTrimKeepTwo pass"
+  "FelixdTrimNoOwn pass"
+  "FelixdTrimOldest violates RestoreIntact"
 )
 
 felixd_specs_expectations=(
@@ -78,6 +82,9 @@ felixd_merge_expectations=(
   "FelixdMergeRecreate pass"
   "FelixdMergeLost pass"
   "FelixdMerge pass"
+  "FelixdMergeTrim pass"
+  "FelixdMergeTrimKeepTwo pass"
+  "FelixdMergeTrimOldest violates RestoreIntact"
 )
 
 felixd_admission_expectations=(
