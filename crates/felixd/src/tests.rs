@@ -20,6 +20,41 @@ fn a_lease_ttl_below_two_seconds_is_refused() {
     assert!(parse("2000").is_ok());
 }
 
+/// The command line the README shows for changing the stuck limits.
+#[test]
+fn the_stuck_limits_are_flags_of_the_agent() {
+    let parse = |extra: &[&str]| {
+        let mut args = vec![
+            "felixd",
+            "agent",
+            "--brokers=127.0.0.1:5000",
+            "--tenant=t",
+            "--token-file=t.jwt",
+            "--controlplane-url=http://127.0.0.1",
+        ];
+        args.extend(extra);
+        Cli::try_parse_from(args).map(|cli| match cli.command {
+            super::Command::Agent {
+                stuck_after_ms,
+                degraded_backoff_ms,
+                ..
+            } => (stuck_after_ms, degraded_backoff_ms),
+            _ => unreachable!(),
+        })
+    };
+    assert_eq!(parse(&[]).unwrap(), (None, 120_000));
+    let example = [
+        "--lease-ttl-ms",
+        "10000",
+        "--stuck-after-ms",
+        "30000",
+        "--degraded-backoff-ms",
+        "60000",
+    ];
+    assert_eq!(parse(&example).unwrap(), (Some(30_000), 60_000));
+    assert!(parse(&["--stuck-after-ms", "soon"]).is_err());
+}
+
 #[test]
 fn replay_takes_an_offset_or_a_time() {
     assert_eq!(parse_target("42"), Ok(Target::Offset(42)));

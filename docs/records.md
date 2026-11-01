@@ -83,8 +83,8 @@ node still reads as past the tail of `sys.specs` after 30 seconds is recorded as
 so a spec-history read lagging that long stops the workload on every node until the spec is
 submitted again.
 
-A degraded record, kind 8, says that the holder of a spec record let go of the workload because it stayed
-stuck on an error. It continues with:
+A degraded record, kind 8, says that the holder of a spec record gave up on a workload that stayed
+stuck on an error, and let go of its lease. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -92,17 +92,27 @@ stuck on an error. It continues with:
 | 1 | the error class, as in a failure: 0 transient, 1 needs operator, 2 poison |
 | rest | the error, UTF-8, for people |
 
-A holder appends it with `publish_if` at the tail, behind everything of earlier epochs, and then deletes
-its lease, so any node may claim at once. This build writes it only for class 0, after the run failed on
-transient errors for `--stuck-after-ms` with no output or snapshot written in between. It is an
-observation, not a stop: the spec stays `running`, no node leaves the workload alone because of it, and it
-does not raise the spec floor. The next claim written after it ends it, so `felixd ps` shows `degraded`
-only while it is the last record. It is not written over a failure or needs-operator record, which it
-would hide from the nodes that read the last record, and a degraded record already last for the same spec
-record is not written again. A holder whose claim never landed can write it with no claim before it, so
-the search for the first claim passes over it, as it does over needs-operator records. A reader accepts
-any known class and refuses an unknown one when reading the record in full; a node that only needs to
-pass over it, or to show the spec record it names, reads its version, kind and spec record alone.
+It is an observation, not a stop. The spec stays `running`, any node may claim at once, and no node
+leaves the workload alone because of it. `felixd ps` shows `degraded` while it is the last record, so
+the next claim ends it. It does not raise the spec floor.
+
+When it is written:
+
+- This build writes it only with class 0. The run failed on transient errors for `--stuck-after-ms`
+  with no output or snapshot written in between ([design.md](design.md#leases-and-failure-detection)).
+- The holder appends it with `publish_if` at the tail, behind everything of earlier epochs, and then
+  deletes its lease.
+- It is not written over a failure record under the same spec version or later, or a needs-operator
+  record for the same spec record, which it would hide from the nodes that read the last record.
+- A degraded record already last for the same spec record is not written again.
+
+How readers treat it:
+
+- A holder whose claim never landed can write it with no claim before it, so the search for the first
+  claim passes over it, as it does over needs-operator records.
+- A reader that reads the record in full accepts any known class and refuses an unknown one. A node
+  that only needs to pass over it, or to show the spec record it names, reads its version, kind and
+  spec record alone.
 
 A rejection says the workload's `step` returned `reject` for an input and carried on. It continues with:
 

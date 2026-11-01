@@ -151,6 +151,41 @@ fn a_degraded_workload_shows_its_class_and_detail() {
     assert!(!printed.contains("no node is up"), "{printed}");
 }
 
+/// The output the README shows for a degraded workload.
+#[test]
+fn a_degraded_workload_prints_as_the_readme_shows() {
+    let mut counter = workload(
+        "counter",
+        State::Degraded(Degraded {
+            class: "transient".into(),
+            detail: "the input stream closed".into(),
+        }),
+        None,
+    );
+    counter.last_epoch = Some(7);
+    counter.outputs = 120;
+    counter.inputs = vec![Position {
+        stream: "in".into(),
+        next: 120,
+        tail: 140,
+    }];
+    let report = Report {
+        workloads: vec![counter],
+        nodes: vec![node("n", true, false, 0)],
+        scheduled: false,
+    };
+    let printed = render(&report);
+    let shown: Vec<&str> = printed.lines().take(3).collect();
+    assert_eq!(
+        shown,
+        [
+            "WORKLOAD  STATE     HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG",
+            "counter   degraded  -       (7)    120      in     120   140   20",
+            "counter: degraded (transient): the input stream closed",
+        ]
+    );
+}
+
 #[test]
 fn waiting_with_every_node_draining_says_so() {
     let report = Report {

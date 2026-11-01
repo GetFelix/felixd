@@ -194,6 +194,35 @@ everything from the caches and streams, so it shows the same on any machine,
 and it writes nothing. A workload's position comes from its last output or
 snapshot, so one that writes nothing for a while shows behind where it is.
 
+A workload shows `degraded` when the node holding it gave up on it. While a
+node holds a workload it retries errors from Felix, such as a broker it cannot
+reach. If the retries keep failing for `--stuck-after-ms` (60 s by default,
+and never less than the lease TTL) and the node has written no output or
+snapshot in that time, it writes a `degraded` record with the error, deletes
+its lease and leaves the workload alone for `--degraded-backoff-ms` (120 s by
+default). Any other node can then claim the workload at once. The spec stays
+`running`, so nothing has to be done for the workload to carry on. `ps` shows
+`degraded` and the error until a node claims it:
+
+```
+WORKLOAD  STATE     HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG
+counter   degraded  -       (7)    120      in     120   140   20
+counter: degraded (transient): the input stream closed
+```
+
+If a workload keeps coming back as `degraded`, the fault is usually in the
+node that gave up, such as its network path to Felix. The record names the
+epoch (7 above), not the node, so look for the log line `stuck, recording it
+and releasing the lease` on your nodes, or for `felixd_degraded_total` in
+their metrics. Then fix that node or take it out of service with `felixd
+drain`. The limits belong to each node. To change them:
+
+```
+felixd agent --lease-ttl-ms 10000 --stuck-after-ms 30000 --degraded-backoff-ms 60000
+```
+
+An agent refuses to start if `--stuck-after-ms` is below the lease TTL.
+
 `felixd drain node-1` takes a node out of service without waiting out lease
 TTLs: the node stops each workload it holds and deletes the lease, so another
 node claims it at once and carries on from the same input, and the node
@@ -240,14 +269,7 @@ still missing after 30 seconds, a 0.1 module or a restore out of fuel, is
 not a failure: the spec stays `running`, and the node writes one
 needs-operator record with the reason to the output stream, fenced the same
 way. Every node then leaves the workload alone until its spec changes or it
-is removed. A workload that keeps failing on a transient error, such as a
-broker that cannot be reached, is retried while the node holds its lease. If
-that goes on for `--stuck-after-ms` (60 s, at least the lease TTL) with no
-output or snapshot written in between, the node writes a `degraded` record
-with the error, releases the lease and leaves the workload alone for
-`--degraded-backoff-ms` (120 s), so another node gets a turn. Nothing is
-stopped: the spec stays `running`, and `ps` shows `degraded` until a node
-claims it again. Cache values and stream records carry a format version, so an
+is removed. Cache values and stream records carry a format version, so an
 older felixd refuses a newer record instead of misreading it. For a workload
 that reads another workload's output stream, refusing means it needs an
 operator: an older felixd stops there once a record kind it does not know
