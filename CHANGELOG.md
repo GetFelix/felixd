@@ -2,15 +2,16 @@
 
 ## Unreleased
 
-- Refused stream creates (#149). `felixd run` and `felixd init` read a stream
-  or cache back after Felix answers 409, and fail with Felix's reason when it is
-  not there, instead of counting every 409 as "already exists". Felix refuses a
-  stream under the name of a deleted one until the cluster has finalized stream
+- Refused stream creates (#149). `felixd run`, `felixd init` and `felixd drain`
+  read a stream or cache back after Felix answers 409, and now exit with an
+  error carrying Felix's reason where they used to succeed and leave the next
+  read waiting for a stream that was never created. Felix refuses a stream
+  under the name of a deleted one until the cluster has finalized stream
   incarnations; a control plane no broker registers with, like the
-  single-broker test stack, never does. Admission's projector hits the same
-  refusal when it creates an accepted workload's streams: it logs Felix's
-  reason and retries until the name can be reused, instead of recording a spec
-  whose streams do not exist.
+  single-broker test stack, never finalizes them. Admission's projector hits the
+  same refusal when it creates an accepted workload's streams: it logs Felix's
+  reason and retries every second until the name can be reused, instead of
+  recording a spec whose streams do not exist.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and

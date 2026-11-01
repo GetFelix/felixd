@@ -99,10 +99,7 @@ felixd agent
 than once), appends the spec as a record to the `sys.specs` stream and points the `workloads` cache at it. `sys.specs` keeps every version of every
 spec. It creates felixd's caches and
 streams with three `Quorum` replicas unless `--replication-factor` says
-otherwise; the single-broker test stack needs 1. If Felix refuses a create,
-`felixd run` stops and prints its reason. The usual cause is a stream named like
-a deleted one before the cluster has finalized stream incarnations; use a new
-name, or finalize incarnations on a cluster whose brokers have registered. The agent watches the
+otherwise; the single-broker test stack needs 1. The agent watches the
 `workloads` cache, checks each spec against its record, claims the lease of each
 one nobody holds and runs it while the lease holds. Start a second agent and kill the first: within one lease TTL
 (10 s by default and at least 2 s, `--lease-ttl-ms`) the second carries on from the right input,
@@ -122,6 +119,13 @@ finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
 should have caught up. `--upstream` also checks the workloads a checked one
 reads from, up the pipeline. It writes nothing.
+
+If Felix refuses a create, `felixd run` stops and prints Felix's reason. The usual
+cause is a stream or cache with that name that was deleted earlier: Felix will not
+reuse a deleted name until `stream_incarnations` (or `cache_incarnations`) is
+finalized, and its reason names the call. A new cluster does this when its first
+broker registers (brokers need `FELIX_NODE_ID`). The single-broker test stack never
+does, so use a new `--id` there.
 
 A workload can read another's output stream. This pipeline counts the inputs
 on `in`, then counts the first stage's outputs:
