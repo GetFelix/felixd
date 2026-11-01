@@ -925,8 +925,7 @@ impl Steps<'_> {
         }
         let wrote = !batch.is_empty();
         self.log.append(batch).await?;
-        self.progress
-            .stepped(offset, offset >= self.resume.stepped_to(), wrote);
+        self.progress.stepped(offset, false, wrote);
         if wrote && faults::fail_after_append() {
             anyhow::bail!("injected: a transient failure after an append");
         }
