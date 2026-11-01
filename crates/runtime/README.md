@@ -37,9 +37,6 @@ Every node must reach the same result for the same input, including where a work
 
 The limits come from the workload's spec, so every node applies the same ones.
 
-The runtime does not read a component's `felixd.snapshot` custom section, which says what
-snapshots the module can restore. `felixd-core` does ([contract.md](../../docs/contract.md#snapshot-layouts)).
-
 ## Build and test
 
 All tests run offline. They build the example workloads from `workloads/` on demand, which needs

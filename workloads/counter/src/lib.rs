@@ -14,6 +14,8 @@ wit_bindgen::generate!({
 use exports::felixd::workload::state;
 use exports::felixd::workload::step::{self, Addressed, Input, Output, StepError};
 
+// The `undeclared` variant declares nothing.
+#[cfg_attr(feature = "undeclared", allow(unused_macros))]
 macro_rules! declare_snapshot_layout {
     ($json:literal) => {
         #[used]
@@ -22,12 +24,19 @@ macro_rules! declare_snapshot_layout {
     };
 }
 
-#[cfg(not(any(feature = "layout-v2", feature = "foreign-layout")))]
+#[cfg(not(any(
+    feature = "layout-v2",
+    feature = "foreign-layout",
+    feature = "malformed-layout",
+    feature = "undeclared"
+)))]
 declare_snapshot_layout!(br#"{"format":"counter","reads":[]}"#);
 #[cfg(feature = "layout-v2")]
 declare_snapshot_layout!(br#"{"format":"counter.2","reads":["counter"]}"#);
 #[cfg(feature = "foreign-layout")]
 declare_snapshot_layout!(br#"{"format":"tally","reads":[]}"#);
+#[cfg(feature = "malformed-layout")]
+declare_snapshot_layout!(br#"{"layout":"counter"}"#);
 
 thread_local! {
     static COUNT: Cell<u64> = const { Cell::new(0) };

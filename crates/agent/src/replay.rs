@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use felixd_core::check::Produced;
-use felixd_core::module::{self, ModuleInfo, Unreadable};
+use felixd_core::module::{self, ModuleInfo, SectionError, Unreadable};
 use felixd_core::names;
 use felixd_core::replay::{self, Divergence, Initial, Recorded, Start};
 use felixd_core::spec::{Limits, WorkloadSpec};
@@ -60,9 +60,10 @@ pub struct Diffed {
 
 /// Rebuilds workload `id` as of `to` on a fresh instance under the limits in
 /// its spec. With `module`, the hash of another module in the `modules`
-/// cache, that module runs instead. It starts from the recorded module's
-/// nearest snapshot when it declares it can read it, and from the initial
-/// state when it does not. With `from_start` no snapshot is restored.
+/// cache or the path of a component file, that module runs instead. It
+/// starts from the recorded module's nearest snapshot when it declares it can
+/// read it, and from the initial state when it does not. With `from_start` no
+/// snapshot is restored.
 ///
 /// It reads the input and snapshot streams' tails, which Felix only reports to
 /// a conditional write, so it needs publish grants on them although it writes
@@ -208,7 +209,13 @@ async fn start(
     before: u64,
     from_start: bool,
 ) -> Result<(Workload, Start)> {
-    let bytes = module_bytes(felix, module.unwrap_or(&spec.module)).await?;
+    let (hash, bytes) = match module {
+        Some(module) => candidate(felix, module).await?,
+        None => (
+            spec.module.clone(),
+            module_bytes(felix, &spec.module).await?,
+        ),
+    };
     let runtime = Runtime::new().map_err(|e| anyhow!("{e}"))?;
     let mut workload = runtime
         .load(&bytes, spec.limits)
@@ -232,7 +239,7 @@ async fn start(
     let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, Start::Initial(Initial::NoSnapshot)));
     };
-    let swapped = module.is_some_and(|m| m != spec.module);
+    let swapped = hash != spec.module;
     if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
         return Ok((workload, Start::Initial(Initial::Unreadable(why))));
     }
@@ -253,6 +260,32 @@ async fn start(
     Ok((workload, Start::Snapshot(header)))
 }
 
+/// The module a replay tries, as its hash and bytes. `module` is the hash of
+/// one in the `modules` cache, or else the path of a component file, which
+/// needs no upload and so changes nothing on Felix.
+async fn candidate(felix: &Felix, which: &str) -> Result<(String, Vec<u8>)> {
+    if is_hash(which) {
+        return Ok((which.to_owned(), module_bytes(felix, which).await?));
+    }
+    let bytes = std::fs::read(which).with_context(|| {
+        format!(
+            "read {which}; --module takes the sha256 of a module in the modules cache or the path of a component"
+        )
+    })?;
+    Ok((module::hash(&bytes), bytes))
+}
+
+fn unparsed(which: &str, error: SectionError) -> anyhow::Error {
+    anyhow!("{which}: {error}; --from-start replays without reading snapshots")
+}
+
+fn is_hash(which: &str) -> bool {
+    which.len() == 64
+        && which
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Why `candidate`, a module's bytes, cannot restore what the module the
 /// workload runs snapshotted, or `None` when it can.
 async fn unreadable(
@@ -261,8 +294,9 @@ async fn unreadable(
     candidate: &[u8],
 ) -> Result<Option<Unreadable>> {
     let recorded = module_bytes(felix, &spec.module).await?;
-    let recorded = ModuleInfo::of(&recorded).with_context(|| format!("module {}", spec.module))?;
-    let candidate = ModuleInfo::of(candidate).context("the new module")?;
+    let recorded = ModuleInfo::of(&recorded)
+        .map_err(|e| unparsed(&format!("the workload's module {}", spec.module), e))?;
+    let candidate = ModuleInfo::of(candidate).map_err(|e| unparsed("the new module", e))?;
     Ok(module::can_restore(&recorded, &candidate).err())
 }
 

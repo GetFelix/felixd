@@ -6,7 +6,7 @@
 mod common;
 
 use common::{input, outputs};
-use felixd_core::module::{self, Layouts, ModuleInfo, Unreadable};
+use felixd_core::module::{self, Layouts, ModuleInfo, SectionError, Unreadable};
 use felixd_runtime::{FailureKind, Limits, Runtime, Workload, WorkloadError};
 
 fn build(features: &[&str]) -> Vec<u8> {
@@ -53,6 +53,11 @@ fn the_built_component_carries_the_declared_layout() {
     assert_eq!(layouts(&[]), want("counter", &[]));
     assert_eq!(layouts(&["layout-v2"]), want("counter.2", &["counter"]));
     assert_eq!(layouts(&["foreign-layout"]), want("tally", &[]));
+    assert_eq!(layouts(&["undeclared"]), None);
+    assert!(matches!(
+        module::layouts(&build(&["malformed-layout"])),
+        Err(SectionError::Json(_))
+    ));
     // A fixture that declares nothing.
     assert_eq!(
         module::layouts(&felixd_testkit::workload("faulty")).unwrap(),

@@ -12,7 +12,11 @@ mod common;
 use std::process::Stdio;
 use std::time::Duration;
 
-use common::{ID, INPUT, SNAPSHOTS, TestFelix, assert_uninterrupted, eventually, test_felix};
+use common::{
+    ID, INPUT, SNAPSHOTS, TestFelix, assert_uninterrupted, eventually, replication_factor,
+    test_felix,
+};
+use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_core::replay::digest;
 use felixd_core::snapshot::{self, SnapshotHeader};
 use felixd_core::{module, names};
@@ -59,12 +63,27 @@ async fn put_module(t: &TestFelix, bytes: Vec<u8>) -> String {
     hash
 }
 
-/// A counter that ran [`INPUTS`] inputs on an agent and snapshotted every
-/// five. Each input is its own number from 1, so a module that echoes its
-/// input outputs what the counter did. Returns the input offsets of the
-/// snapshots.
-async fn recorded_counter(t: &TestFelix) -> Vec<u64> {
-    let module = t.submit("counter", &["--snapshot-every", "5"]).await;
+/// A recorded run of the counter.
+struct Recorded {
+    /// The input offsets of its snapshots.
+    offsets: Vec<u64>,
+    /// The module that ran.
+    module: Vec<u8>,
+}
+
+/// The counter, built with `features`, run on an agent over [`INPUTS`] inputs
+/// and snapshotted every five. Each input is its own number from 1, so a
+/// module that echoes its input outputs what the counter did.
+async fn recorded_counter(t: &TestFelix, features: &[&str]) -> Recorded {
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    ensure_stream(&t.settings, INPUT, kind).await.unwrap();
+    let module = felixd_testkit::workload_with("counter", features);
+    assert!(
+        t.run(ID, &module, INPUT, &["--snapshot-every", "5"])
+            .success()
+    );
     let mut agent = t.start_agent();
     t.publish_all(INPUT, (1..=INPUTS).map(count)).await;
     assert_uninterrupted(t, &module, INPUTS).await;
@@ -75,7 +94,7 @@ async fn recorded_counter(t: &TestFelix) -> Vec<u64> {
     })
     .await;
     agent.kill();
-    offsets
+    Recorded { offsets, module }
 }
 
 async fn snapshot_offsets(t: &TestFelix) -> Vec<u64> {
@@ -95,8 +114,9 @@ fn nearest(offsets: &[u64], from: u64) -> u64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upgrade_that_behaves_the_same_matches_from_the_snapshot() {
     let Some(t) = test_felix().await else { return };
-    let offsets = recorded_counter(&t).await;
-    let hash = put_module(&t, felixd_testkit::workload_with("counter", &["layout-v2"])).await;
+    let Recorded { offsets, module } = recorded_counter(&t, &[]).await;
+    let upgrade = felixd_testkit::workload_with("counter", &["layout-v2"]);
+    let hash = put_module(&t, upgrade.clone()).await;
 
     let from = 20;
     let at = nearest(&offsets, from);
@@ -118,6 +138,37 @@ async fn an_upgrade_that_behaves_the_same_matches_from_the_snapshot() {
     assert_eq!(ran.stdout, "inputs from 20 below 30: 10 outputs match");
     assert_eq!(ran.stderr, "started from the initial state, as asked");
 
+    // The workload's own module, by hash or as a file, restores its snapshot
+    // as it always has.
+    let own = module::hash(&module);
+    let ran = replay(&t, &["--diff", "--from", "20", "--module", &own]);
+    assert!(ran.ok, "{} {}", ran.stdout, ran.stderr);
+    assert_eq!(ran.stdout, "inputs from 20 below 30: 10 outputs match");
+    assert_eq!(
+        ran.stderr,
+        format!("started from the snapshot of input {at}")
+    );
+
+    // A component file does as well as one in the cache, and uploads nothing.
+    let path = std::env::temp_dir().join(format!("felixd-upgrade-{hash}.wasm"));
+    std::fs::write(&path, &upgrade).unwrap();
+    let file = path.to_str().unwrap();
+    let ran = replay(&t, &["--diff", "--from", "20", "--module", file]);
+    assert!(ran.ok, "{} {}", ran.stdout, ran.stderr);
+    assert_eq!(ran.stdout, "inputs from 20 below 30: 10 outputs match");
+    assert_eq!(
+        ran.stderr,
+        format!("started from the snapshot of input {at}")
+    );
+    std::fs::remove_file(&path).unwrap();
+    let ran = replay(&t, &["--diff", "--from", "20", "--module", file]);
+    assert!(!ran.ok);
+    assert!(
+        ran.stderr.contains("--module takes the sha256"),
+        "{}",
+        ran.stderr
+    );
+
     // From the first input there is no snapshot to start from.
     let ran = replay(&t, &["--diff", "--module", &hash]);
     assert!(ran.ok, "{} {}", ran.stdout, ran.stderr);
@@ -128,7 +179,7 @@ async fn an_upgrade_that_behaves_the_same_matches_from_the_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upgrade_that_changes_behaviour_is_reported_at_the_first_input_it_differs_on() {
     let Some(t) = test_felix().await else { return };
-    let offsets = recorded_counter(&t).await;
+    let offsets = recorded_counter(&t, &[]).await.offsets;
     let hash = put_module(&t, felixd_testkit::workload_with("counter", &["changed"])).await;
 
     // The new counter counts by two once the total reaches ten, so the
@@ -181,7 +232,7 @@ async fn an_upgrade_that_changes_behaviour_is_reported_at_the_first_input_it_dif
 #[tokio::test(flavor = "multi_thread")]
 async fn a_module_that_declares_no_layout_it_can_read_starts_from_the_beginning() {
     let Some(t) = test_felix().await else { return };
-    recorded_counter(&t).await;
+    recorded_counter(&t, &[]).await;
     let faulty = put_module(&t, felixd_testkit::workload("faulty")).await;
     let foreign = put_module(
         &t,
@@ -213,7 +264,7 @@ async fn a_module_that_declares_no_layout_it_can_read_starts_from_the_beginning(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_the_new_module_declared_it_reads_but_cannot_is_not_a_divergence() {
     let Some(t) = test_felix().await else { return };
-    let offsets = recorded_counter(&t).await;
+    let offsets = recorded_counter(&t, &[]).await.offsets;
     let hash = put_module(
         &t,
         felixd_testkit::workload_with("counter", &["unreadable"]),
@@ -280,9 +331,110 @@ async fn a_replay_to_an_offset_continues_the_new_module_from_the_snapshot() {
     assert_eq!(ran.stdout, r#"{"chunks":[]}"#);
     assert!(
         ran.stderr.starts_with(
-            "from the initial state, since the new module declares no snapshot layout"
+            "started from the initial state, since the new module declares no snapshot layout"
         ),
         "{}",
         ran.stderr
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_module_that_declares_no_layout_has_no_snapshot_to_start_from() {
+    let Some(t) = test_felix().await else { return };
+    recorded_counter(&t, &["undeclared"]).await;
+    // Behaves as the recorded module did, and declares a layout.
+    let upgrade = put_module(&t, felixd_testkit::workload("counter")).await;
+
+    let ran = replay(&t, &["--diff", "--from", "20", "--module", &upgrade]);
+    assert!(ran.ok, "{} {}", ran.stdout, ran.stderr);
+    assert_eq!(ran.stdout, "inputs from 20 below 30: 10 outputs match");
+    assert_eq!(
+        ran.stderr,
+        "started from the initial state, since the module the workload runs declares no snapshot \
+         layout, so only that module reads its snapshots"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_section_that_does_not_parse_is_an_error_only_where_it_is_read() {
+    let Some(t) = test_felix().await else { return };
+    let Recorded { module, .. } = recorded_counter(&t, &[]).await;
+    let broken = put_module(
+        &t,
+        felixd_testkit::workload_with("counter", &["malformed-layout"]),
+    )
+    .await;
+
+    // It is read to decide whether to restore a snapshot, and says how to go on.
+    let ran = replay(&t, &["--diff", "--from", "20", "--module", &broken]);
+    assert!(!ran.ok, "{} {}", ran.stdout, ran.stderr);
+    assert!(ran.stdout.is_empty(), "{}", ran.stdout);
+    assert!(
+        ran.stderr
+            .contains("the new module: the felixd.snapshot section"),
+        "{}",
+        ran.stderr
+    );
+    assert!(ran.stderr.contains("--from-start"), "{}", ran.stderr);
+
+    // It is not read when no snapshot is in play.
+    for args in [&["--diff", "--from", "20", "--from-start"][..], &["--diff"]] {
+        let ran = replay(&t, &[args, &["--module", &broken]].concat());
+        assert!(ran.ok, "{args:?}: {} {}", ran.stdout, ran.stderr);
+        assert!(ran.stdout.ends_with("outputs match"), "{}", ran.stdout);
+    }
+    let own = module::hash(&module);
+    let ran = replay(&t, &["--diff", "--from", "20", "--module", &own]);
+    assert!(ran.ok, "{} {}", ran.stdout, ran.stderr);
+}
+
+/// Two inputs, so the workload has a merge log, and its snapshots and the
+/// replay's offsets are steps on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upgrade_of_a_workload_with_two_inputs_starts_from_a_snapshot_on_the_merge_log() {
+    let Some(t) = test_felix().await else { return };
+    const INPUTS: [&str; 2] = ["orders", "payments"];
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    for input in INPUTS {
+        ensure_stream(&t.settings, input, kind).await.unwrap();
+    }
+    let module = felixd_testkit::workload("counter");
+    assert!(
+        t.run_on(ID, &module, &INPUTS, &["--snapshot-every", "4"])
+            .success()
+    );
+    t.publish_all(INPUTS[0], (0..6).map(count)).await;
+    t.publish_all(INPUTS[1], (0..6).map(count)).await;
+    let mut agent = t.start_agent();
+    let offsets = eventually("three snapshots", Duration::from_secs(60), || async {
+        let offsets = snapshot_offsets(&t).await;
+        (offsets.len() >= 3).then_some(offsets)
+    })
+    .await;
+    agent.kill();
+    let upgrade = put_module(&t, felixd_testkit::workload_with("counter", &["layout-v2"])).await;
+
+    // The merge log offset of the second to last snapshot.
+    let mut sorted = offsets.clone();
+    sorted.sort_unstable();
+    let at = sorted[sorted.len() - 2];
+    let from = (at + 1).to_string();
+    let ran = replay(&t, &["--diff", "--from", &from, "--module", &upgrade]);
+    assert!(ran.ok, "{} {}", ran.stdout, ran.stderr);
+    assert!(ran.stdout.ends_with("4 outputs match"), "{}", ran.stdout);
+    assert_eq!(
+        ran.stderr,
+        format!("started from the snapshot of input {at}")
+    );
+
+    let changed = put_module(&t, felixd_testkit::workload_with("counter", &["changed"])).await;
+    let ran = replay(&t, &["--diff", "--module", &changed]);
+    assert!(!ran.ok, "{} {}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stdout.starts_with("first divergence at input "),
+        "{}",
+        ran.stdout
     );
 }

@@ -142,14 +142,16 @@ enum Command {
         /// policy change decides otherwise.
         #[arg(long, requires = "diff")]
         all: bool,
-        /// The first input a diff compares.
+        /// The first input a diff compares. The diff also begins from the
+        /// nearest snapshot before it, so the default 0, which has none,
+        /// replays from the initial state.
         #[arg(long, default_value_t = 0, requires = "diff")]
         from: u64,
-        /// Run this module, the hash of one in the `modules` cache, over the
-        /// recorded inputs instead of the workload's own. It starts from the
-        /// workload's nearest snapshot if it declares it can read that
-        /// snapshot's layout, and from the initial state if not. With `--diff`
-        /// this checks an upgrade.
+        /// Run this module over the recorded inputs instead of the
+        /// workload's own: a component file, or the sha256 of one in the
+        /// `modules` cache. It starts from the workload's nearest snapshot if
+        /// it declares it can read that snapshot's layout, and from the
+        /// initial state if not. With `--diff` this checks an upgrade.
         #[arg(long)]
         module: Option<String>,
         /// Start from the initial state even where a snapshot could be
