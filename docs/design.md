@@ -335,7 +335,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
-| `modules` | cache | sha256 of the module | the module bytes | submitters (`felixd run`) |
+| `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 4 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
 
@@ -1020,9 +1020,8 @@ workload carries on.
   workload needs its own single-shard output and snapshot streams, created
   through the control plane. That's fine for hundreds of workloads. At tens
   of thousands it depends on how Felix handles many small streams.
-- **Module size.** Wasm modules can be several megabytes. Whether a cache
-  value that large is reasonable, or modules should be chunked, needs
-  measuring.
+- **Module size.** Wasm modules can be tens of megabytes, more than one frame
+  to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
   stream when its leader changes, and the writer gets an error. felixd copes
   (see Exactly-once output), but anything that cannot re-read and compare
@@ -1067,7 +1066,8 @@ failovers. Three rules hold that:
 
 State is not capped by the size of one record. Snapshots are written in chunks,
 and a snapshot writes only the chunks that changed since the last one, with
-separate fuel from `step`. Snapshots are taken by input count and by time, old
+separate fuel from `step`. A module is stored the same way, in chunks
+([Modules](#modules)). Snapshots are taken by input count and by time, old
 snapshots and inputs are trimmed by a stated retention, and each workload has a
 recovery time budget that bounds how far a resume may replay.
 
@@ -1550,9 +1550,10 @@ now:
    ([Credentials](#credentials), #97). Agents never hold control-plane rights.
    Built: a separate credential a node is given, granted as in
    [Grants](#grants); binding it by name in the spec is #97.
-5. **Modules stay in the `modules` cache**, uploaded by hash. The store is
-   content-addressed, so a submitter cannot overwrite another's module, and
-   binaries stay off the log. Admission verifies presence and size.
+5. **Modules stay in the `modules` cache**, uploaded by hash, in chunks above
+   4 MiB ([Modules](#modules)). The store is content-addressed, so a submitter
+   cannot overwrite another's module, and binaries stay off the log. Admission
+   verifies presence, size and hash, reading the chunks of a large module.
 6. **`felixd run` is a thin client:** it uploads the module, publishes the
    request, waits for the accepted or rejected record and prints it.
 7. **Bootstrap.** `felixd init` writes admission's own spec directly with
@@ -1706,8 +1707,9 @@ chunk store (#77):
   per-tenant secret. Two tenants storing the same bytes get different
   addresses, so the store leaks no equality across tenants, and deleting a
   tenant's key and chunks removes its data.
-- Large modules are chunked the same way, which answers the module-size
-  question under [Risks](#risks-and-what-this-surfaces-in-felix) (#21).
+- Modules over 4 MiB are already cut into hashed chunks in the `modules` cache
+  ([Modules](#modules), #21). This store would share those chunks across
+  modules and free them by reference count.
 
 Venti never deleted a block, which made it simple and made deletion
 impossible. Plain content hashes also let anyone who can probe the store

@@ -17,7 +17,7 @@ it: `felixd init` writes it.
   or one of admission's own; the output stream is `wl.<id>.out`; the
   state is `running` or `stopped`; snapshot settings are at least 1; fuel per call is at most ten
   times the default, memory at most 1 GiB, snapshot fuel at most ten times the default, the module
-  at most 8 MiB and the replication factor 1 to 7. A decision reads nothing but its request, so
+  at most 64 MiB and the replication factor 1 to 7. A decision reads nothing but its request, so
   the same requests always get the same decisions.
 - **State:** none. A snapshot is empty.
 

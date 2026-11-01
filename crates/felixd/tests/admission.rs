@@ -121,6 +121,32 @@ async fn append_record(t: &TestFelix, record: &SpecRecord) -> u64 {
     }
 }
 
+/// A module over the 8 MiB one write holds is uploaded in chunks, admitted on
+/// its length, checked by the projector, and runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_over_one_write_is_admitted_and_runs() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let _a = t.start_agent();
+    let module = felixd_testkit::padded(&felixd_testkit::workload("counter"), 9 << 20);
+    assert!(t.run(ID, &module, INPUT, &[]).success());
+    let [(_, decision)] = &decisions_for(&t, ID).await[..] else {
+        panic!("not one decision for the request");
+    };
+    assert!(
+        matches!(decision.outcome, Outcome::Accepted { module_bytes, .. } if module_bytes == 9 << 20),
+        "{decision:?}"
+    );
+    assert!(
+        records(&t)
+            .await
+            .iter()
+            .any(|(_, r)| r.id == ID && !r.skipped)
+    );
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    assert_uninterrupted(&t, &module, 5).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_request_never_runs_and_an_accepted_one_does() {
     let Some(t) = test_felix().await else { return };

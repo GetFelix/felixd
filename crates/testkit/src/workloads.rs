@@ -56,3 +56,43 @@ fn target_dir(root: &Path) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"))
 }
+
+/// `module` with a custom section appended, so it is `len` bytes long and
+/// still a valid component that runs as before. `len` must be at least a few
+/// bytes more than the module.
+pub fn padded(module: &[u8], len: usize) -> Vec<u8> {
+    const NAME: &[u8] = b"padding";
+    let mut out = module.to_vec();
+    // The section's size field is a LEB128 of up to five bytes; the name has
+    // its own one-byte length.
+    let body = |data: usize| 1 + NAME.len() + data;
+    let leb = |mut n: usize| {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                bytes.push(byte);
+                return bytes;
+            }
+            bytes.push(byte | 0x80);
+        }
+    };
+    let mut data = len - module.len();
+    // Shrink until the whole section, with the header it needs, fits exactly.
+    loop {
+        let header = 1 + leb(body(data)).len();
+        if header + body(data) <= len - module.len() {
+            break;
+        }
+        data -= 1;
+    }
+    let size = body(data);
+    out.push(0);
+    out.extend(leb(size));
+    out.push(NAME.len() as u8);
+    out.extend_from_slice(NAME);
+    out.extend(std::iter::repeat_n(0xa5, data));
+    assert_eq!(out.len(), len, "the padding does not fit");
+    out
+}

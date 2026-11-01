@@ -20,7 +20,7 @@ It depends on no other felixd crate. `felixd-runtime` takes its `Limits` from it
 | `placement` | Which free workloads a node claims: `FirstClaimWins`, and `Scheduled`, which follows the scheduler's assignments with first claim wins as the fallback |
 | `admission` | Requests on `sys.intake`, admission's decisions and its policy (`decide`), and whether a spec record's decision admits it (`admits`) |
 | `schedule` | The scheduler workload's fold (`Scheduler`), the node facts it reads from `sys.facts` and the assignments it writes |
-| `module` | How a module is identified: the hex sha256 of its bytes |
+| `module` | How a module is identified (the hex sha256 of its bytes) and laid out in the `modules` cache: whole up to 4 MiB, above that a manifest and 4 MiB chunks, with the checks a reader makes |
 | `resume` | `fold`, which says where a new owner restores from, where it subscribes, and which outputs the stream already holds |
 | `replay` | Where a replay starts and stops |
 | `status` | What `felixd ps` says about a workload: its state from the spec, lease and last output record, and its next step |
