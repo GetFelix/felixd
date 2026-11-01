@@ -70,6 +70,9 @@
 //! - `fail-after-append=1`: every append of output records, once it has
 //!   landed, fails with an error that is retried. The workload gets one
 //!   step further on each attempt.
+//! - `fail-after-first-step=1`: the first time each input is stepped, the
+//!   attempt fails with an error that is retried, whether or not the step
+//!   wrote anything. Later attempts replay it and go one input further.
 //! - `fail-transient=1`: every attempt to run a workload on this node fails
 //!   with an error that is retried, as when Felix cannot be reached, so the
 //!   workload is stuck here and only here.
@@ -394,6 +397,14 @@ pub(crate) fn before_failure_append() {
 
 pub(crate) fn fail_workload() -> bool {
     fault("fail-workload") == Some(1)
+}
+
+/// Whether to fail after stepping the input at `offset`, which it does the
+/// first time each input is stepped and never again.
+pub(crate) fn fail_after_first_step(offset: u64) -> bool {
+    static FAILED_THROUGH: AtomicU64 = AtomicU64::new(0);
+    fault("fail-after-first-step") == Some(1)
+        && FAILED_THROUGH.fetch_max(offset + 1, Ordering::Relaxed) <= offset
 }
 
 pub(crate) fn fail_after_append() -> bool {

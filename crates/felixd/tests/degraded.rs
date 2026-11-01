@@ -152,6 +152,35 @@ async fn a_workload_that_gets_further_on_each_attempt_is_not_stuck() {
     assert_eq!(lease.owner, "slow");
 }
 
+/// A workload that outputs nothing, so nothing is ever appended, still gets
+/// one input further on each attempt here. That is progress too: no degraded
+/// record, and the node keeps the lease. Ten seconds is past the bound the
+/// test sets, and past the seven attempts it takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workload_that_steps_new_inputs_without_writing_is_not_stuck() {
+    let Some(t) = test_felix().await else { return };
+    t.submit("faulty", &[]).await;
+    t.publish_all(INPUT, (0..6).map(|_| b"big-chunk".to_vec()))
+        .await;
+    let record = t.spec().await.record.expect("a spec record");
+    let stuck_after = LEASE_TTL.as_millis().to_string();
+    let mut quiet = t.start_node_with_args(
+        "quiet",
+        "fail-after-first-step=1",
+        LEASE_TTL,
+        &["--stuck-after-ms", &stuck_after],
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(quiet.alive());
+    assert!(
+        degraded(&t, record).await.is_empty(),
+        "a workload that stepped new inputs was called stuck"
+    );
+    let (lease, _) = t.lease(ID).await.expect("the node still holds it");
+    assert_eq!(lease.owner, "quiet");
+    assert!(t.outputs(OUTPUT).await.is_empty());
+}
+
 /// `--stuck-after-ms 0` turns the bound off, as a rolling upgrade from a
 /// build that cannot read the record needs: the node retries for ever and
 /// writes nothing.
@@ -171,7 +200,8 @@ async fn a_zero_bound_never_records_or_releases() {
         t.lease(ID).await.filter(|(lease, _)| lease.owner == "off")
     })
     .await;
-    // Long past the default bound of a few TTLs and the 2 s a test would use.
+    // Far longer than the 2 s bound the other tests set; a node with that
+    // bound would have released it by now.
     tokio::time::sleep(Duration::from_secs(10)).await;
     assert!(off.alive());
     assert!(degraded(&t, record).await.is_empty());

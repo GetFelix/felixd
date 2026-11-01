@@ -222,3 +222,63 @@ async fn reconnecting_and_failing_again_is_not_progress() {
     // and reaches the bound at the fifth.
     assert_eq!(start.elapsed(), Duration::from_secs(14));
 }
+
+/// A quiet workload makes no progress, so only the time an attempt ran
+/// tells it from a stuck one. Failures hours apart, with a leader change
+/// each time, are not a streak.
+#[tokio::test(start_paused = true)]
+async fn an_idle_workload_failing_hours_apart_is_not_stuck() {
+    let hour = Duration::from_secs(3600);
+    let start = Instant::now();
+    let attempts = Cell::new(0);
+    let progress = Progress::default();
+    let result = retry(
+        BOUND,
+        DELAY,
+        &progress,
+        || async {
+            attempts.set(attempts.get() + 1);
+            // Idle for an hour, then the connection drops, five times, and
+            // then the attempt ends the run.
+            tokio::time::sleep(hour).await;
+            if attempts.get() == 5 {
+                return Ok(());
+            }
+            anyhow::bail!("the input stream closed")
+        },
+        sink,
+    )
+    .await;
+    assert!(result.is_ok());
+    assert!(start.elapsed() > hour * 5);
+}
+
+/// After a long healthy attempt fails, the workload is stuck only if it goes
+/// on failing for the whole bound from there.
+#[tokio::test(start_paused = true)]
+async fn a_long_healthy_attempt_does_not_count_toward_the_streak() {
+    let start = Instant::now();
+    let attempts = Cell::new(0);
+    let progress = Progress::default();
+    let result: Result<()> = retry(
+        BOUND,
+        DELAY,
+        &progress,
+        || async {
+            attempts.set(attempts.get() + 1);
+            // Two quick failures, then one attempt that holds on for the
+            // whole bound before it fails too.
+            if attempts.get() == 3 {
+                tokio::time::sleep(BOUND).await;
+            }
+            anyhow::bail!("attempt {}", attempts.get())
+        },
+        sink,
+    )
+    .await;
+    result.unwrap_err();
+    // The third attempt starts at 2 s and fails at 12 s, which starts a new
+    // streak. Counted from the first failure, the workload would be stuck
+    // there.
+    assert_eq!(start.elapsed(), Duration::from_secs(12) + BOUND);
+}

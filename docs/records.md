@@ -105,8 +105,8 @@ takes work.
 When it is written:
 
 - This build writes it only with class 0. The run failed on transient errors for `--stuck-after-ms`
-  with no progress in between: no new input stepped and no record appended
-  ([design.md](design.md#leases-and-failure-detection)). `--stuck-after-ms 0` turns it off.
+  with no progress in between: no new input stepped and no record appended, and no attempt that ran
+  for the whole bound ([design.md](design.md#leases-and-failure-detection)). `--stuck-after-ms 0` turns it off.
 - The holder appends it with `publish_if` at the tail, behind everything of earlier epochs, and then
   deletes its lease.
 - It is not written over a failure record under the same spec version or later, or a needs-operator

@@ -930,6 +930,9 @@ impl Steps<'_> {
         if wrote && faults::fail_after_append() {
             anyhow::bail!("injected: a transient failure after an append");
         }
+        if faults::fail_after_first_step(offset) {
+            anyhow::bail!("injected: a transient failure after a step");
+        }
 
         self.since_snapshot += 1;
         let due = interval || self.since_snapshot >= self.spec.snapshot_every;

@@ -48,15 +48,15 @@ struct Streak {
 }
 
 impl Streak {
-    /// Notes that an attempt failed at `now`. Returns whether the streak has
-    /// lasted `bound`.
+    /// Notes that an attempt failed at `now` after running for `ran`.
+    /// Returns whether the streak has lasted `bound`.
     ///
-    /// The streak starts at a failure, not at the attempt before it, so an
-    /// idle workload that ran well and then lost its connection is not
-    /// counted for the time it was healthy. An attempt that made progress
-    /// ends the streak before this failure.
-    fn failed(&mut self, now: Instant, progressed: bool) -> bool {
-        if progressed {
+    /// The streak starts at a failure, not at the attempt before it. An
+    /// attempt that made progress ends the streak before this failure, and
+    /// so does one that ran for the whole bound: a quiet workload makes no
+    /// progress, but time it spent running well is not time it was stuck.
+    fn failed(&mut self, now: Instant, ran: Duration, progressed: bool) -> bool {
+        if progressed || ran >= self.bound {
             self.since = None;
         }
         let since = *self.since.get_or_insert(now);
@@ -80,14 +80,14 @@ where
 {
     let mut streak = Streak { bound, since: None };
     loop {
-        let before = progress.count();
+        let (started, before) = (Instant::now(), progress.count());
         let error = match attempt().await {
             Ok(value) => return Ok(value),
             Err(error) => error,
         };
         failed(&error);
         let progressed = progress.count() != before;
-        if streak.failed(Instant::now(), progressed) {
+        if streak.failed(Instant::now(), started.elapsed(), progressed) {
             return Err(error);
         }
         tokio::time::sleep(delay).await;

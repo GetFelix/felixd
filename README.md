@@ -204,7 +204,10 @@ record with the error, deletes its lease and leaves the workload alone for
 `--degraded-backoff-ms` (120 s by default). Another node can then claim the
 workload, after its usual random `--claim-delay-ms`. While a scheduler runs and
 the workload is assigned to the node that gave up, the others first wait for
-that node for up to `--assignment-bound-ms` (15 s). The spec stays `running`,
+that node for up to `--assignment-bound-ms` (15 s). Time a node spends running
+well does not count: an attempt that ran for a whole `--stuck-after-ms` before
+it failed starts the count again, so a quiet workload whose connection drops
+now and then is left alone. The spec stays `running`,
 so nothing has to be done for the workload to carry on. `ps` shows `degraded`,
 the node and the error until the next holder's claim record is written:
 

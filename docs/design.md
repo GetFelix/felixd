@@ -534,8 +534,12 @@ an input beyond the furthest any earlier attempt of this holder stepped, or
 appends a record to the output stream; progress starts the count again. An
 attempt that only reconnects, or replays inputs the stream already covers,
 makes none. The holder remembers the furthest input in memory, so a long
-replay that fails at its first new append is stuck after the first attempt.
-`--stuck-after-ms 0` turns the bound off.
+replay that fails at its first new append counts as stuck one bound after
+that first failure. A quiet workload makes no progress either, so an attempt
+that ran for the whole bound before it failed also starts the count again:
+time spent running well is not time spent stuck, and a quiet stream whose
+connection drops now and then is left alone. `--stuck-after-ms 0` turns the
+bound off.
 
 When a run is stuck the holder:
 
@@ -1514,9 +1518,9 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   claimer counts them from the claim records on `wl.<id>.out`; past the limit
   it records `degraded` with class needs operator, fenced by epoch like the
   `failed` write (#70), and nothing claims the workload until an operator acts.
-  That blocking record needs a record kind of its own. Kind 8 never blocks on
-  any build, and a build from before the blocking kind would read a kind 8 of
-  class needs operator as an observation and claim anyway.
+  That blocking record will get a new kind. Kind 8 never blocks, and builds
+  that predate the blocking kind treat kind 8 as non-blocking whatever its
+  class, so reusing it would let those nodes claim anyway.
   There is no escalation tree. The TLA model gets the counter under
   `NoStaleFailure` (#104). Implementation is #99.
 - **Poison has a recorded way out.** The failing input is in the log, so every
