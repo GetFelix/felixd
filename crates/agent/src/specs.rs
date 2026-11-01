@@ -168,8 +168,8 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
 /// The first record on `stream` that is not a needs-operator record, with
 /// its offset. A needs-operator record can be written before any claim and
 /// ran nothing, so it never says what the stream was written under.
-/// One whose reason this build cannot read is passed over too: a newer build
-/// may have written it, and the operator's way out is to submit a new spec.
+/// It is judged from its header, so a reason this build cannot read counts too:
+/// a newer build may have written it, and the way out is to submit a new spec.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
     let tail = felix.tail(stream).await?;
     let mut next = 0;

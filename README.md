@@ -183,11 +183,6 @@ output stream, fenced by epoch like an output, so a node that was frozen
 while another took over can't fail it. Its class says whether it is poison or
 needs an operator.
 
-When a node records that a workload needs an operator, `felixd run` with a
-changed spec is the way out. A build older than the one that recorded it can
-submit that spec too, but its nodes leave the workload alone until a node that
-can read the record takes it.
-
 `felixd ps` shows where every workload is: its state (`running`, `waiting`
 for a holder, `needs-operator` with the reason, `failed` with the reason, or
 `stopped`), the node holding it and its epoch, the output stream's tail, and
@@ -246,7 +241,10 @@ not a failure: the spec stays `running`, and the node writes one
 needs-operator record with the reason to the output stream, fenced the same
 way. Every node then leaves the workload alone until its spec changes or it
 is removed. Cache values and stream records carry a format version, so an
-older felixd refuses a newer record instead of misreading it. For a workload
+older felixd refuses a newer record instead of misreading it. If a newer felixd recorded a
+reason an older one does not know, `felixd run` from the older build still submits the new
+spec. Nodes on the older build leave the workload alone, so `felixd ps` shows it as
+`waiting`; nodes on the newer build run it. For a workload
 that reads another workload's output stream, refusing means it needs an
 operator: an older felixd stops there once a record kind it does not know
 lands on the stream it reads. Upgrade every node first.
