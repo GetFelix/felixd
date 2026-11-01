@@ -216,6 +216,9 @@ async fn start(
     if from_start {
         return Ok((workload, Start::Initial(Initial::Requested)));
     }
+    if module.is_some_and(|m| m != spec.module) {
+        return Ok((workload, Start::Initial(Initial::NoSnapshot)));
+    }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
     let records = felix.read_range(&snap_stream, 0, snap_tail).await?;
