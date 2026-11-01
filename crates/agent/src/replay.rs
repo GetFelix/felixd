@@ -1,12 +1,14 @@
 //! `felixd replay`: rebuilds a workload's state as of an input offset or a
 //! time, from the nearest snapshot and the inputs after it, or compares the
 //! outputs a replay produces with the ones on the stream. Writes nothing.
+//! Another module may replay the recorded inputs, from the recorded module's
+//! snapshot when it declares it can read it.
 
 use anyhow::{Context, Result, anyhow, bail};
 use felixd_core::check::Produced;
+use felixd_core::module::{self, ModuleInfo, Unreadable};
 use felixd_core::names;
-use felixd_core::replay::{self, Divergence, Recorded};
-use felixd_core::snapshot::SnapshotHeader;
+use felixd_core::replay::{self, Divergence, Initial, Recorded, Start};
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
@@ -33,8 +35,8 @@ pub enum Target {
 pub struct Replayed {
     /// Inputs below this offset are in the state.
     pub end: u64,
-    /// The input offset of the snapshot it restored, if any.
-    pub restored: Option<u64>,
+    /// Where the state began: a snapshot or the initial state.
+    pub start: Start,
     /// How many inputs it ran after the snapshot.
     pub steps: u64,
     /// What the workload's `inspect` returned.
@@ -47,6 +49,8 @@ pub struct Diffed {
     /// Outputs of inputs in `from..end` were compared.
     pub from: u64,
     pub end: u64,
+    /// Where the state began: a snapshot or the initial state.
+    pub start: Start,
     /// How many outputs matched.
     pub matched: u64,
     pub divergence: Option<Divergence>,
@@ -56,8 +60,9 @@ pub struct Diffed {
 
 /// Rebuilds workload `id` as of `to` on a fresh instance under the limits in
 /// its spec. With `module`, the hash of another module in the `modules`
-/// cache, that module runs instead, from the initial state, since the
-/// snapshots hold the recorded module's state.
+/// cache, that module runs instead. It starts from the recorded module's
+/// nearest snapshot when it declares it can read it, and from the initial
+/// state when it does not. With `from_start` no snapshot is restored.
 ///
 /// It reads the input and snapshot streams' tails, which Felix only reports to
 /// a conditional write, so it needs publish grants on them although it writes
@@ -67,18 +72,19 @@ pub async fn replay(
     id: &str,
     to: Target,
     module: Option<&str>,
+    from_start: bool,
 ) -> Result<Replayed> {
     let (felix, spec) = open(settings, id).await?;
     let mut feed = Feed::new(&felix, id, &spec);
     let input_tail = felix.tail(feed.stream()).await?;
     let end = end_of(&felix, feed.stream(), Some(to), input_tail).await?;
-    let (mut workload, restored) = start(&felix, id, &spec, module, end).await?;
+    let (mut workload, start) = start(&felix, id, &spec, module, end, from_start).await?;
     let mut steps = 0;
     run_inputs(
         &mut feed,
         &mut workload,
         &[],
-        replay::first_input(restored),
+        replay::first_input(start.snapshot()),
         end,
         |_, _| {
             steps += 1;
@@ -89,7 +95,7 @@ pub async fn replay(
     let state = workload.inspect().context("inspect")?;
     Ok(Replayed {
         end,
-        restored: restored.map(|h| h.input_offset),
+        start,
         steps,
         state,
     })
@@ -99,10 +105,11 @@ pub async fn replay(
 /// compares each output it produces with the one recorded on the output
 /// stream, by header and payload digest. It stops at the first divergence,
 /// and at the last input with a recorded output, which the workload may not
-/// have got past yet. `module` is as for [`replay`]. With `all` it carries
-/// on past divergences and reports each, which says something for a
-/// workload whose outputs depend on their input alone, such as admission:
-/// with another module, which recorded requests it decides otherwise.
+/// have got past yet. `module` and `from_start` are as for [`replay`]. With
+/// `all` it carries on past divergences and reports each, which says
+/// something for a workload whose outputs depend on their input alone, such
+/// as admission: with another module, which recorded requests it decides
+/// otherwise.
 pub async fn diff(
     settings: &Settings,
     id: &str,
@@ -110,6 +117,7 @@ pub async fn diff(
     to: Option<Target>,
     module: Option<&str>,
     all: bool,
+    from_start: bool,
 ) -> Result<Diffed> {
     let (felix, spec) = open(settings, id).await?;
     // The output stream first, so every input a recorded output came from is
@@ -122,7 +130,7 @@ pub async fn diff(
     let recorded = Recorded::read(records.iter().map(|r| r.payload.as_ref()), from..end)
         .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
-    let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
+    let (mut workload, start) = start(&felix, id, &spec, module, from, from_start).await?;
     let (_, limits) = judged(&felix, id, &spec, &records).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
@@ -130,7 +138,7 @@ pub async fn diff(
         &mut feed,
         &mut workload,
         &limits,
-        replay::first_input(restored),
+        replay::first_input(start.snapshot()),
         end,
         |offset, outputs| {
             if offset < from {
@@ -152,6 +160,7 @@ pub async fn diff(
     Ok(Diffed {
         from,
         end,
+        start,
         matched,
         divergence: found_all.next(),
         more: found_all.collect(),
@@ -187,22 +196,25 @@ async fn end_of(felix: &Felix, stream: &str, to: Option<Target>, input_tail: u64
 }
 
 /// A fresh instance of the workload's module, or of `module`, under the
-/// spec's limits. The recorded module is restored from the nearest snapshot
-/// of inputs below `before`, and the snapshot's header returned.
+/// spec's limits. The nearest snapshot of inputs below `before` is restored
+/// into it, unless `from_start` asks for the initial state. Another module
+/// restores the recorded module's snapshot only when it declares it can
+/// ([`module::can_restore`]). Where the state began is returned.
 async fn start(
     felix: &Felix,
     id: &str,
     spec: &WorkloadSpec,
     module: Option<&str>,
     before: u64,
-) -> Result<(Workload, Option<SnapshotHeader>)> {
+    from_start: bool,
+) -> Result<(Workload, Start)> {
     let bytes = module_bytes(felix, module.unwrap_or(&spec.module)).await?;
     let runtime = Runtime::new().map_err(|e| anyhow!("{e}"))?;
     let mut workload = runtime
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow!("{e}"))?;
-    if module.is_some_and(|m| m != spec.module) {
-        return Ok((workload, None));
+    if from_start {
+        return Ok((workload, Start::Initial(Initial::Requested)));
     }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
@@ -215,18 +227,40 @@ async fn start(
     }
     let headers = found.iter().map(|s| s.taken().header);
     let Some(index) = replay::nearest_snapshot(headers, before) else {
-        return Ok((workload, None));
+        return Ok((workload, Start::Initial(Initial::NoSnapshot)));
     };
+    let swapped = module.is_some_and(|m| m != spec.module);
+    if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
+        return Ok((workload, Start::Initial(Initial::Unreadable(why))));
+    }
     let snapshot = &found[index];
     let header = snapshot.taken().header;
     let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
         .await
         .map_err(snapshots::ReadError::into_anyhow)?;
     let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
-    workload
-        .restore(&chunks)
-        .with_context(|| format!("restore the snapshot of input {}", header.input_offset))?;
-    Ok((workload, Some(header)))
+    workload.restore(&chunks).map_err(|e| {
+        let offset = header.input_offset;
+        if swapped {
+            anyhow!("snapshot not readable by the new module: restoring the snapshot of input {offset} failed: {e}")
+        } else {
+            anyhow!(e).context(format!("restore the snapshot of input {offset}"))
+        }
+    })?;
+    Ok((workload, Start::Snapshot(header)))
+}
+
+/// Why `candidate`, a module's bytes, cannot restore what the module the
+/// workload runs snapshotted, or `None` when it can.
+async fn unreadable(
+    felix: &Felix,
+    spec: &WorkloadSpec,
+    candidate: &[u8],
+) -> Result<Option<Unreadable>> {
+    let recorded = module_bytes(felix, &spec.module).await?;
+    let recorded = ModuleInfo::of(&recorded).with_context(|| format!("module {}", spec.module))?;
+    let candidate = ModuleInfo::of(candidate).context("the new module")?;
+    Ok(module::can_restore(&recorded, &candidate).err())
 }
 
 /// Runs the steps at offsets `from..end` of `feed` through `workload`,
