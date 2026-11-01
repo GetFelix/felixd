@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Resubmitting past a newer build's park (#136). A needs-operator record with
+  a reason this build cannot read no longer stops `felixd run` from submitting
+  a new spec, which is the way out of the park, and it counts toward the
+  highest spec claimed.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and

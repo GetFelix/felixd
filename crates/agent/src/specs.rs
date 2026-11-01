@@ -168,21 +168,27 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
 /// The first record on `stream` that is not a needs-operator record, with
 /// its offset. A needs-operator record can be written before any claim and
 /// ran nothing, so it never says what the stream was written under.
+/// One whose reason this build cannot read is passed over too: a newer build
+/// may have written it, and the operator's way out is to submit a new spec.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
     let tail = felix.tail(stream).await?;
     let mut next = 0;
     while next < tail {
         let end = tail.min(next + LOOK_RECORDS);
         let (page, after) = felix.read_page(stream, next, end).await?;
-        let found = page.into_iter().find(|r| {
-            output::decode(&r.payload).map_or(true, |found| found.needs_operator_spec().is_none())
-        });
+        let found = page.into_iter().find(|r| ran_something(&r.payload));
         if let Some(found) = found {
             return Ok(Some((found.offset, found.payload)));
         }
         next = after;
     }
     Ok(None)
+}
+
+/// Whether `record` is anything but a needs-operator record. Judged from its
+/// header alone, so a reason this build does not know still counts as one.
+fn ran_something(record: &[u8]) -> bool {
+    output::needs_operator_spec_of(record).is_none()
 }
 
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
@@ -257,7 +263,8 @@ where
             match output::decode(record.as_ref()) {
                 Ok(Record::Claim { floor, .. }) => return Ok(floor.max(recorded)),
                 Ok(found) => recorded = recorded.max(found.needs_operator_spec()),
-                Err(_) => {}
+                // A reason this build cannot read still names the spec it parks.
+                Err(_) => recorded = recorded.max(output::needs_operator_spec_of(record.as_ref())),
             }
         }
         end = from;

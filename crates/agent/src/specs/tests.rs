@@ -69,3 +69,33 @@ async fn a_needs_operator_record_counts_toward_the_floor() {
     // A marker before the last claim is that claim's floor's business.
     assert_eq!(floor_of(vec![marker(4), claim]).await, Some(0));
 }
+
+/// As a newer build writes it: a reason this build has no name for.
+fn unreadable_marker(spec: u64) -> Vec<u8> {
+    use felixd_core::class::OperatorReason;
+    let mut record = output::encode_needs_operator(1, spec, OperatorReason::ModuleMissing, "x");
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(output::decode(&record).is_err());
+    record
+}
+
+#[test]
+fn a_needs_operator_record_with_an_unknown_reason_is_not_the_first_run() {
+    use felixd_core::class::OperatorReason;
+    assert!(!ran_something(&unreadable_marker(3)));
+    assert!(!ran_something(&output::encode_needs_operator(
+        1,
+        3,
+        OperatorReason::ModuleMissing,
+        "x"
+    )));
+    assert!(ran_something(&output::encode_claim_under(1, 0, 0, "a")));
+    // A record that is nothing this build knows is still one that may have run.
+    assert!(ran_something(&[0xff, 0xff]));
+}
+
+#[tokio::test]
+async fn a_needs_operator_record_with_an_unknown_reason_counts_toward_the_floor() {
+    let claim = output::encode_claim_under(1, 0, 0, "a");
+    assert_eq!(floor_of(vec![claim, unreadable_marker(4)]).await, Some(4));
+}
