@@ -1033,7 +1033,7 @@ workload carries on.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix

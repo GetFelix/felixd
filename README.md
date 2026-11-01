@@ -484,7 +484,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain` and metrics done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics and the upgrade check done |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates
