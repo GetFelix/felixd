@@ -99,7 +99,10 @@ felixd agent
 than once), appends the spec as a record to the `sys.specs` stream and points the `workloads` cache at it. `sys.specs` keeps every version of every
 spec. It creates felixd's caches and
 streams with three `Quorum` replicas unless `--replication-factor` says
-otherwise; the single-broker test stack needs 1. The agent watches the
+otherwise; the single-broker test stack needs 1. If Felix refuses a create,
+`felixd run` stops and prints its reason. The usual cause is a stream named like
+a deleted one before the cluster has finalized stream incarnations; use a new
+name, or finalize incarnations on a cluster whose brokers have registered. The agent watches the
 `workloads` cache, checks each spec against its record, claims the lease of each
 one nobody holds and runs it while the lease holds. Start a second agent and kill the first: within one lease TTL
 (10 s by default and at least 2 s, `--lease-ttl-ms`) the second carries on from the right input,
