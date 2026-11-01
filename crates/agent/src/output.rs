@@ -33,7 +33,8 @@ pub(crate) struct OutputLog<'a> {
     pub(crate) metrics: Option<Arc<WorkloadMetrics>>,
 }
 
-/// How [`record_failure`] or [`record_needs_operator`] ended.
+/// How [`record_failure`], [`record_needs_operator`] or [`record_degraded`]
+/// ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Recorded {
     /// The failure record landed, or was already there: under this spec
@@ -45,6 +46,9 @@ pub(crate) enum Recorded {
     /// The needs-operator record landed, or one for the same spec record and
     /// reason was already there.
     NeedsOperator,
+    /// The degraded record landed, or one for the same spec record was
+    /// already last.
+    Degraded,
     /// A later owner has written, so this node must not fail the workload.
     Superseded(u64),
 }
@@ -147,6 +151,54 @@ fn needs_operator_found(
         found => {
             (found.needs_operator_under(spec) == Some(reason)).then_some(Recorded::NeedsOperator)
         }
+    }
+}
+
+/// Appends a record at `epoch` saying the holder let go of spec record
+/// `spec` for being stuck on an error of `class`, fenced like
+/// [`record_failure`]. One already last for the same spec record is not
+/// written again. A failure last under `spec_version` or later ends the run
+/// instead, and so does a needs-operator record for `spec`: a degraded
+/// record after either would hide it from the nodes that read the last
+/// record.
+pub(crate) async fn record_degraded(
+    felix: &Felix,
+    stream: &str,
+    fence: &Fence,
+    epoch: u64,
+    (spec_version, spec): (u64, u64),
+    (class, detail): (class::ErrorClass, &str),
+) -> Result<Recorded> {
+    let record = output::encode_degraded(epoch, spec, class, detail);
+    append_last(
+        felix,
+        stream,
+        fence,
+        epoch,
+        record,
+        Recorded::Degraded,
+        |found| degraded_found(found, (spec_version, spec)),
+    )
+    .await
+}
+
+/// What [`record_degraded`] makes of `found`, the last record.
+fn degraded_found(found: &Record<'_>, (spec_version, spec): (u64, u64)) -> Option<Recorded> {
+    match found {
+        Record::Failure {
+            spec_version: found,
+            class,
+            reason,
+            ..
+        } if *found >= spec_version => Some(Recorded::Failed {
+            spec_version: *found,
+            failure: class::Failure {
+                class: *class,
+                detail: String::from_utf8_lossy(reason).into_owned(),
+            },
+        }),
+        found if found.needs_operator_under(spec).is_some() => Some(Recorded::NeedsOperator),
+        found => found.degraded_under(spec).map(|_| Recorded::Degraded),
     }
 }
 

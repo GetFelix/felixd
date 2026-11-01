@@ -11,6 +11,7 @@ fn metrics(max_workloads: usize) -> Metrics {
         claims: Default::default(),
         handoffs: Default::default(),
         needs_operator: Default::default(),
+        degraded: Default::default(),
         failures: AtomicU64::new(0),
         snapshots_written: AtomicU64::new(0),
         snapshots_skipped: AtomicU64::new(0),
@@ -148,6 +149,7 @@ fn node_series_have_a_fixed_label_set_and_escape_the_node_name() {
     m.claims[Claim::Contended as usize].fetch_add(1, Ordering::Relaxed);
     m.handoffs[Handoff::Drained as usize].fetch_add(1, Ordering::Relaxed);
     m.needs_operator[2].fetch_add(1, Ordering::Relaxed);
+    m.degraded[0].fetch_add(3, Ordering::Relaxed);
     m.draining.store(true, Ordering::Relaxed);
     m.leases_held.store(2, Ordering::Relaxed);
     m.snapshots_written.fetch_add(1, Ordering::Relaxed);
@@ -159,6 +161,9 @@ fn node_series_have_a_fixed_label_set_and_escape_the_node_name() {
         "felixd_lease_handoffs_total{reason=\"drained\"} 1",
         "felixd_needs_operator_total{reason=\"spec_unrecorded\"} 1",
         "felixd_needs_operator_total{reason=\"module_missing\"} 0",
+        "felixd_degraded_total{class=\"transient\"} 3",
+        "felixd_degraded_total{class=\"needs_operator\"} 0",
+        "felixd_degraded_total{class=\"poison\"} 0",
         "felixd_node_draining 1",
         "felixd_leases_held 2",
         "felixd_snapshots_total{result=\"written\"} 1",

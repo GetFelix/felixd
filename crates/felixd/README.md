@@ -41,6 +41,10 @@ refused above about 125,000, where a node's facts would not fit in one record),
 another node it is assigned to that can take it, `--assignment-grace-ms` (2000), the longest an
 unassigned one waits for a healthy scheduler to read its spec, and `--facts-every-ms` (three lease
 TTLs), how often the node appends its facts for the scheduler when they have not changed, and
+`--stuck-after-ms` (60000, or the lease TTL if that is longer, and never below it), how long a held
+workload may keep failing on a transient error with nothing written in between before the node
+records it as degraded and releases the lease, `--degraded-backoff-ms` (120000), how long that node
+then leaves the workload to other nodes, and
 `--admission-token-file` (`FELIXD_ADMISSION_TOKEN_FILE`), the broker token of admission's
 credential, which the node's own token stands in for when left out.
 

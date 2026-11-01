@@ -67,6 +67,9 @@
 //!   record is appended. It carries on at `SIGCONT`.
 //! - `fail-workload=1`: fail every workload this node claims, as a trap would,
 //!   but only on this node.
+//! - `fail-transient=1`: every attempt to run a workload on this node fails
+//!   with an error that is retried, as when Felix cannot be reached, so the
+//!   workload is stuck here and only here.
 //! - `drop-watch=MS`: when the key `drop-watch` is written to the workloads
 //!   cache, end the workloads watch and wait MS milliseconds before opening a
 //!   new one.
@@ -388,6 +391,10 @@ pub(crate) fn before_failure_append() {
 
 pub(crate) fn fail_workload() -> bool {
     fault("fail-workload") == Some(1)
+}
+
+pub(crate) fn fail_transient() -> bool {
+    fault("fail-transient") == Some(1)
 }
 
 /// How long to stay without a watch, if the change to `key` should end it.

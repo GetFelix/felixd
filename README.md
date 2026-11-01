@@ -184,8 +184,8 @@ while another took over can't fail it. Its class says whether it is poison or
 needs an operator.
 
 `felixd ps` shows where every workload is: its state (`running`, `waiting`
-for a holder, `needs-operator` with the reason, `failed` with the reason, or
-`stopped`), the node holding it and its epoch, the output stream's tail, and
+for a holder, `needs-operator` with the reason, `degraded` with the class and
+detail, `failed` with the reason, or `stopped`), the node holding it and its epoch, the output stream's tail, and
 for each input the next offset it steps, the input's tail and the lag between
 them. A workload with several inputs gets a line per input, for how far each
 is merged, and one for its merge log. Below that it lists the nodes: up or
@@ -240,7 +240,14 @@ still missing after 30 seconds, a 0.1 module or a restore out of fuel, is
 not a failure: the spec stays `running`, and the node writes one
 needs-operator record with the reason to the output stream, fenced the same
 way. Every node then leaves the workload alone until its spec changes or it
-is removed. Cache values and stream records carry a format version, so an
+is removed. A workload that keeps failing on a transient error, such as a
+broker that cannot be reached, is retried while the node holds its lease. If
+that goes on for `--stuck-after-ms` (60 s, at least the lease TTL) with no
+output or snapshot written in between, the node writes a `degraded` record
+with the error, releases the lease and leaves the workload alone for
+`--degraded-backoff-ms` (120 s), so another node gets a turn. Nothing is
+stopped: the spec stays `running`, and `ps` shows `degraded` until a node
+claims it again. Cache values and stream records carry a format version, so an
 older felixd refuses a newer record instead of misreading it. For a workload
 that reads another workload's output stream, refusing means it needs an
 operator: an older felixd stops there once a record kind it does not know

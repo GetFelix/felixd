@@ -525,6 +525,18 @@ only before any later owner has begun, and a claimer that finds it last
 before its claim, or past the tail when its claim is refused, stops instead
 of claiming after it.
 
+A holder retries a run that fails on an error from Felix, such as a broker
+that is down or a stream that cannot be read, because the next attempt resumes
+from what the streams hold. It does not retry forever. When attempts have
+failed for `--stuck-after-ms` (60 s, at least the lease TTL) with no output or
+snapshot written in between, it stops, appends a degraded record the way it
+appends a needs-operator record, and deletes its lease with `cache_delete_if`
+at the version it holds, so another node can claim at once
+([System records and errors](#system-records-and-errors)). The record is best
+effort: if Felix will not take it, the lease is released anyway. The node does
+not claim that workload again for `--degraded-backoff-ms` (120 s), which it
+keeps in memory. The spec stays `running` and no other node is held back.
+
 Agents watch `workloads` with retained values. When a watch ends they open
 a new one, which redelivers every current spec first and says how many. Once
 all of them are in, the agent stops the workloads that were not among them:
@@ -607,8 +619,11 @@ it. For each workload:
 - **State.** `stopped` and `failed`, with the class and reason, come from the
   spec. `needs-operator`, with the reason and detail, when the last record on
   the output stream is a needs-operator record naming the spec record the spec
-  comes from. Otherwise `running` when a lease with an epoch exists, `claiming`
-  when the lease has no epoch yet, and `waiting` when there is none.
+  comes from. `degraded`, with the class and detail, when the last record is a
+  degraded record naming that spec record: the holder was stuck and let go, and
+  the next claim ends it. Otherwise `running` when a lease with an epoch
+  exists, `claiming` when the lease has no epoch yet, and `waiting` when there
+  is none.
 - **Holder and epoch.** The lease's owner and epoch, and whether that node is
   draining. With no holder, the epoch of the last record on the output stream.
 - **Outputs.** The output stream's tail.
@@ -1406,7 +1421,8 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   failure carries its class ([records.md](records.md)). Defining them in WIT
   with the workload contract waits for the effect records, which are not
   built.
-- Every error has a class: **transient** (retried while the lease is held),
+- Every error has a class: **transient** (retried while the lease is held, up
+  to the stuck bound below),
   **needs operator** (a missing module, an input past retention, a changed
   incarnation) or **poison** (an input the workload deterministically fails on).
   The [trap classes](#determinism) map onto these. The text is detail, never
@@ -1429,10 +1445,23 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   `sys.specs` after 30 s is recorded, so a lagging spec-history read stops the
   workload cluster-wide until the spec is submitted again. `felixd ps` shows it
   as `needs-operator` with the reason and detail.
-- A workload stuck on a transient error past a bound releases its lease and is
-  recorded `degraded` with its class and reason, so it is visible instead of
-  retrying silently on one node. `degraded` is not built yet
-  ([#99](https://github.com/GetFelix/felixd/issues/99)).
+- **A workload stuck on a transient error past a bound releases its lease and
+  is recorded `degraded`** with its class and reason, so it is visible instead
+  of retrying silently on one node. This is built per holder. A run that fails
+  on a transient error is retried while its lease is held, and once the
+  attempts have failed for `--stuck-after-ms` with no output or snapshot
+  written between them, the holder appends a degraded record on `wl.<id>.out`
+  naming the spec record, the class and the detail, fenced by epoch like the
+  needs-operator record, and deletes its lease. It lands before any later
+  owner's claim or not at all, and is not written behind a failure or
+  needs-operator record. Unlike those it stops nothing: the spec stays
+  `running`, any node may claim at once, and the claim that follows ends the
+  state `felixd ps` shows. The releasing node alone leaves the workload for
+  `--degraded-backoff-ms`, in memory, so another node gets a turn.
+  `felixd_degraded_total{class}` counts releases. Only transient is written
+  today, and a failure, poison or needs-operator error never produces one.
+  Counting degraded records across holders, and keeping every node from
+  claiming past a limit, is [#99](https://github.com/GetFelix/felixd/issues/99).
 - **Restart intensity is counted cluster-wide.** The release above is per
   holder, so a workload that fails everywhere would bounce between nodes, each
   spending its own budget. The spec sets MaxR takeovers per window. Any

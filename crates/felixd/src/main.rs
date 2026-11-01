@@ -76,6 +76,17 @@ enum Command {
         /// left out.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         facts_every_ms: Option<u64>,
+        /// How long, in milliseconds, a workload this node holds may keep
+        /// failing on a transient error, with nothing written in between,
+        /// before the node records it as degraded and releases the lease so
+        /// another node can try. At least the lease TTL. 60000, or the lease
+        /// TTL if that is longer, when left out.
+        #[arg(long)]
+        stuck_after_ms: Option<u64>,
+        /// How long, in milliseconds, this node leaves a workload alone after
+        /// releasing it as degraded, so another node gets a turn.
+        #[arg(long, default_value_t = felixd_agent::agent::DEFAULT_DEGRADED_BACKOFF.as_millis() as u64)]
+        degraded_backoff_ms: u64,
         /// Serve Prometheus metrics at `/metrics` on this address, such as
         /// 127.0.0.1:9464. Off when left out. Plain HTTP with no
         /// authentication: it names workloads and streams, so keep it on an
@@ -277,6 +288,8 @@ async fn main() -> Result<()> {
             assignment_bound_ms,
             assignment_grace_ms,
             facts_every_ms,
+            stuck_after_ms,
+            degraded_backoff_ms,
             metrics_bind,
             metrics_max_workloads,
             admission_token_file,
@@ -306,6 +319,12 @@ async fn main() -> Result<()> {
                     3 * Duration::from_millis(lease_ttl_ms),
                     Duration::from_millis,
                 ),
+                stuck_after: stuck_after_ms.map_or(
+                    felixd_agent::agent::DEFAULT_STUCK_AFTER
+                        .max(Duration::from_millis(lease_ttl_ms)),
+                    Duration::from_millis,
+                ),
+                degraded_backoff: Duration::from_millis(degraded_backoff_ms),
                 admission_token,
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await

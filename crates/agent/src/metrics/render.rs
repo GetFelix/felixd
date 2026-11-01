@@ -3,7 +3,7 @@
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 
-use super::{Histogram, Metrics, REASONS, reason_label};
+use super::{CLASSES, Histogram, Metrics, REASONS, class_label, reason_label};
 
 impl Metrics {
     /// Every series, as a scrape returns them.
@@ -80,6 +80,20 @@ impl Metrics {
                 out,
                 "felixd_needs_operator_total{{reason=\"{}\"}} {}",
                 reason_label(*reason),
+                count.load(Ordering::Relaxed)
+            );
+        }
+        family(
+            &mut out,
+            "felixd_degraded_total",
+            "counter",
+            "Workloads this node released after they stayed stuck on an error, by its class.",
+        );
+        for (class, count) in CLASSES.iter().zip(&self.degraded) {
+            let _ = writeln!(
+                out,
+                "felixd_degraded_total{{class=\"{}\"}} {}",
+                class_label(*class),
                 count.load(Ordering::Relaxed)
             );
         }

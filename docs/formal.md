@@ -454,3 +454,7 @@ composition.
 No model has a trim action yet. A trim record is a fenced append that every reader passes over and
 that deletes nothing, so it can break no property the models check; the action and its twins come
 with deletion ([#151](https://github.com/GetFelix/felixd/issues/151)).
+
+A degraded record is likewise a fenced append that every reader passes over. It stops no node and
+raises no floor, and the release after it is a holder stopping and deleting its lease, which the
+models already cover as `Crash` followed at once by `Expire`. None has an action for it.

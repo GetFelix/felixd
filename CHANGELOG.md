@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Degraded workloads (#73). A workload that keeps failing on a transient
+  error, such as a broker that cannot be reached, is no longer retried
+  silently on one node for ever. When attempts have failed for
+  `--stuck-after-ms` (default 60000, or the lease TTL if longer; values below
+  the TTL are refused) with no output or snapshot written in between, the
+  holder appends a `degraded` record (output record kind 8: spec record,
+  error class, detail) fenced by epoch, deletes its lease so another node can
+  claim at once, and leaves the workload alone for `--degraded-backoff-ms`
+  (default 120000). The spec stays `running`. `felixd ps` shows `degraded`
+  with the class and detail while the record is the last on the stream, and
+  `felixd_degraded_total{class}` counts releases. Readers pass over the
+  record like a claim, so upgrade every node before a workload can write it:
+  a build from before kind 8 refuses it, and a downstream workload reading
+  the stream needs an operator. Counting degraded records across
+  nodes and blocking claims is #99.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and

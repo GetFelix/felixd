@@ -60,3 +60,34 @@ fn a_failed_spec_read_below_the_record_is_read_again() {
         SpecWrite::Done(false)
     );
 }
+
+fn config(ttl: Duration, stuck_after: Duration) -> AgentConfig {
+    AgentConfig {
+        node_id: "node".into(),
+        lease: LeaseTiming { ttl },
+        placement: FirstClaimWins {
+            max_workloads: 4,
+            max_delay: Duration::ZERO,
+        },
+        assignment_bound: Duration::from_secs(15),
+        assignment_grace: Duration::from_secs(2),
+        facts_every: Duration::from_secs(30),
+        stuck_after,
+        degraded_backoff: DEFAULT_DEGRADED_BACKOFF,
+        admission_token: None,
+    }
+}
+
+#[test]
+fn a_stuck_bound_below_the_lease_ttl_is_refused() {
+    let ttl = Duration::from_secs(10);
+    assert!(check(&config(ttl, ttl)).is_ok());
+    assert!(check(&config(ttl, DEFAULT_STUCK_AFTER)).is_ok());
+    let error = check(&config(ttl, ttl - Duration::from_millis(1))).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("--stuck-after-ms (9999) must be at least the lease TTL (10000 ms)"),
+        "{error}"
+    );
+}

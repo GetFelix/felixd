@@ -19,6 +19,7 @@ binary depends on it.
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
 | `ps` | What `felixd ps` does: each workload's state, holder, assignment and positions, and each node, read from the caches and streams. |
 | `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
+| `stuck` | `retry`, which runs a workload's attempts until one ends the run or they have failed for the stuck bound with nothing written in between. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. Tokens are a `Secret`, which formats as a placeholder; `expose` is called only where a token is handed to Felix. |
 
 Behaviour that matters:
@@ -65,6 +66,10 @@ Behaviour that matters:
 - **Failure.** A trap, running out of fuel or `poison` writes a failure record, then `failed` into
   the spec, and the workload stops. A rejection does not fail it. A component of the old contract
   is left unclaimed rather than failed.
+- **Stuck.** An error from Felix is retried while the lease is held. Once attempts have failed for
+  `--stuck-after-ms` with no output or snapshot written in between (`stuck::retry`), the holder appends a
+  degraded record behind its epoch, best effort, and deletes its lease, and leaves the workload
+  alone for `--degraded-backoff-ms`. The spec stays `running`, so other nodes claim at once.
 
 The `faults` feature lets `FELIXD_FAULTS` inject crashes and dropped answers, such as
 `crash-after-append-sent=3`. Only the `felixd` integration tests enable it; a normal build
