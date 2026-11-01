@@ -39,6 +39,14 @@ pub enum LoadError {
     /// does not run. It needs a rebuild, not a retry.
     #[error("the component is built against felixd:workload@0.1.0, rebuild it against 0.3")]
     Contract01,
+    /// A workload of a contract version newer than this build knows. Another
+    /// node may run it, so it needs a newer felixd, not a rebuild.
+    #[error(
+        "the component is built against a workload contract this build does not know ({}); \
+         upgrade felixd, which runs 0.3 and 0.2",
+        .0.join(", ")
+    )]
+    UnknownContract(Vec<String>),
     #[error(
         "the component does not export the step and state interfaces of felixd:workload@0.3.0 \
          or 0.2.0; it exports {}",
@@ -103,8 +111,22 @@ impl Runtime {
             let (step, state) = version.interfaces();
             has(step) && has(state)
         });
+        // Interfaces of this package at a version this build does not know.
+        let known = [Version::V03, Version::V02].map(Version::interfaces);
+        let newer: Vec<String> = exports
+            .iter()
+            .filter(|e| e.starts_with("felixd:workload/"))
+            .filter(|e| {
+                !known
+                    .iter()
+                    .any(|(step, state)| e.as_str() == *step || e.as_str() == *state)
+            })
+            .cloned()
+            .collect();
         if let Some(version) = version {
             Ok(Compiled(component, version))
+        } else if !newer.is_empty() {
+            Err(LoadError::UnknownContract(newer))
         } else if CONTRACT_01.iter().all(|name| has(name)) {
             Err(LoadError::Contract01)
         } else {

@@ -11,7 +11,8 @@ dev-dependency of `felixd-runtime` and `felixd`. It depends on no other felixd c
   if the build fails. It builds into `$CARGO_TARGET_DIR/workloads`, or `target/workloads` when that
   is unset, and takes a lock so tests in one process do not build at once.
 - `contract_01_component()` returns a small component of the old contract, 0.1, which the host
-  must refuse.
+  must refuse. `newer_contract_component()` returns one that exports a contract version the host
+  does not know, which it must leave to an operator.
 
 A test runs the real workload instead of a stand-in:
 

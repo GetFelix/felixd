@@ -1,11 +1,11 @@
 # Example workloads
 
-Two example workloads that implement workload contract 0.2, the `workload` world in
-[`../wit/0.2/workload.wit`](../wit/0.2/workload.wit), described in
-[`../docs/contract.md`](../docs/contract.md). Both write every output under the name `out` with no
-key, and snapshot their state as one chunk. `counter`, `window` and `scheduler` stay on 0.2 on
-purpose: felixd runs both contract versions, and they never need the publisher. `admission`
-and the `faulty` fixture are built against 0.3 ([`../wit/0.3/workload.wit`](../wit/0.3/workload.wit)),
+The examples and test fixtures that run on felixd. `counter` and `window`, below, implement
+workload contract 0.2, the `workload` world in [`../wit/0.2/workload.wit`](../wit/0.2/workload.wit),
+described in [`../docs/contract.md`](../docs/contract.md). Both write every output under the name
+`out` with no key, and snapshot their state as one chunk. `scheduler` is on 0.2 too. They stay on 0.2
+on purpose: felixd runs both contract versions, and these never need the publisher. `admission` and
+the `faulty` fixture are built against 0.3 ([`../wit/0.3/workload.wit`](../wit/0.3/workload.wit)),
 which adds the publisher of each input record.
 
 | Workload | What it does |

@@ -423,11 +423,12 @@ async fn a_replay_of_admission_matches_and_lists_what_a_policy_change_decides_ot
         &hash,
     ]);
     assert!(!ok, "a list of other requesters changed nothing: {report}");
-    assert_eq!(
-        report.lines().count(),
-        decisions(&t).await.len(),
-        "{report}"
-    );
+    let all = decisions(&t).await;
+    assert_eq!(report.lines().count(), all.len(), "{report}");
+    for (_, decision) in &all {
+        let want = format!("first divergence at input {} output 0", decision.request);
+        assert!(report.lines().any(|l| l.starts_with(&want)), "{report}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

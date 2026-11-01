@@ -230,7 +230,9 @@ principal the broker authenticated the request from, which admission reads from
 the record's publisher and never from the payload. That needs a broker that
 stores publishers: `FELIX_RECORD_PUBLISHERS=true` on a single broker, or the
 `publisher_principal` fleet feature finalized in a cluster
-(`POST /v1/fleet/features/publisher_principal/finalize`). Without it admission
+(`POST /v1/fleet/features/publisher_principal/finalize`). Finalizing is
+one-way: records with a publisher are storage format v6, which older brokers
+refuse to open, so take a backup and read [Felix's upgrades page](https://docs.getfelix.dev/deployment/upgrades/) first. Without it admission
 fails closed and rejects every request as `no_requester`. The test stack and
 `deploy/compose.yaml` turn it on. Its decisions replay, so `felixd replay --id
 admission --diff --all --module <hash>` shows which past requests a new policy

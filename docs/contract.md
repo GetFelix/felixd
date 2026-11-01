@@ -214,7 +214,9 @@ choose it. It is `none` when:
 
 - the broker recorded no publisher. A Felix broker stores one only when it is
   set up to: `FELIX_RECORD_PUBLISHERS=true` on a lone broker, or the
-  `publisher_principal` fleet feature finalized in a cluster. Records written
+  `publisher_principal` fleet feature finalized in a cluster. Finalizing is
+  one-way: records with a publisher are storage format v6, which older brokers
+  refuse to open, so take a backup and read [Felix's upgrades page](https://docs.getfelix.dev/deployment/upgrades/) first. Records written
   before that have none, and so do records from a connection with no
   principal;
 - the input is another workload's output ([Inputs from another
@@ -343,7 +345,13 @@ A 0.2 workload keeps running as it is. To read the publisher, rebuild it against
 
 The rebuilt component is a new module. `felixd run` refuses a new module for a
 workload that has already written output, so submit it under a new id, as for
-any new code. The examples show both versions: `admission` and the `faulty`
+any new code. In particular a deployment that already runs admission keeps its
+0.2 module, which records no requester, until module upgrades exist.
+
+Upgrade every node and the `felixd` CLI before submitting a 0.3 module or
+running the 0.3 admission. A felixd from this release on that meets a contract
+version it does not know leaves the module to an operator, as for a 0.1 module,
+and does not fail the workload; earlier builds fail it as poison. The examples show both versions: `admission` and the `faulty`
 fixture are built against 0.3, and `counter`, `window` and `scheduler` against
 0.2.
 

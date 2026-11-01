@@ -127,6 +127,10 @@ pub enum Reason {
     NoRequester,
     /// The policy lists who may ask, and the requester is not on it.
     NotPermitted,
+    /// A reason a newer build wrote. Readers of an older build see the
+    /// rejection and not an error.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Reason {
@@ -142,6 +146,7 @@ impl Reason {
             Reason::ModuleTooLarge => 7,
             Reason::NoRequester => 8,
             Reason::NotPermitted => 9,
+            Reason::Unknown => 0,
         }
     }
 }
@@ -158,6 +163,7 @@ impl std::fmt::Display for Reason {
             Reason::ModuleTooLarge => "module_too_large",
             Reason::NoRequester => "no_requester",
             Reason::NotPermitted => "not_permitted",
+            Reason::Unknown => "unknown",
         })
     }
 }
@@ -257,7 +263,8 @@ fn check(
     request: &Request,
 ) -> Result<(), (Reason, String)> {
     let spec = &request.spec;
-    let Some(requester) = publisher else {
+    // An empty name is no one: treat it as unrecorded.
+    let Some(requester) = publisher.filter(|p| !p.is_empty()) else {
         return Err((
             Reason::NoRequester,
             "the broker recorded no publisher for the request".to_owned(),

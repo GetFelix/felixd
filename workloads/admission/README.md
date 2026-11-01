@@ -18,7 +18,7 @@ it: `felixd init` writes it.
   the spec or rejecting it with a reason code, and recording the requester. Formats are in
   [docs/records.md](../../docs/records.md#requests-and-decisions).
 - **Policy:** the request has a recorded requester (a request with none is rejected as
-  `no_requester`, so admission fails closed), and the requester is on the policy's list when it has
+  `no_requester`, so admission fails closed; an empty name counts as none), and the requester is on the policy's list when it has
   one (`Policy::requesters`, empty by default, so any recorded requester; another is rejected as
   `not_permitted`). The id is valid and not a system workload's (`admission`, `scheduler`), whose specs
   only an operator writes; the inputs are 1 to 64 different streams, none of them a `sys.` stream
@@ -57,11 +57,15 @@ The module also needs `felixd-core` and `wit-bindgen` as dependencies, like the 
 
 Names are matched exactly as the broker records them, which is the subject of the requester's
 token. A request from anyone else is rejected as `not_permitted`, and the decision still records who
-asked. Replay the new module over the recorded requests, as below, before switching.
+asked. A new deployment can start from this module. An existing deployment keeps the module it
+has: a workload's module cannot change once it has written output, and admission's id is fixed, so
+switching waits for module upgrades.
 
 ## Changing the policy
 
-A policy change is a new module. Before switching, replay it over the recorded requests:
+A policy change is a new module. Before switching, replay it over the recorded requests. Replaying
+this 0.3 module over decisions a 0.2 admission wrote differs on every line, because those decisions
+have no requester and the 0.3 module rejects them as `no_requester`:
 
 ```
 felixd replay --id admission --diff --all --module <hash of the new module in modules>

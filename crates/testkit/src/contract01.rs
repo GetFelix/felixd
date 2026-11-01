@@ -24,3 +24,17 @@ pub fn contract_01_component() -> Vec<u8> {
     )
     .expect("the 0.1 fixture parses")
 }
+
+/// A component that exports the workload interfaces of a contract version
+/// newer than any this build knows. A host must refuse it without failing the
+/// workload.
+pub fn newer_contract_component() -> Vec<u8> {
+    wat::parse_str(
+        r#"(component
+            (instance $step)
+            (instance $state)
+            (export "felixd:workload/step@9.0.0" (instance $step))
+            (export "felixd:workload/state@9.0.0" (instance $state)))"#,
+    )
+    .expect("the newer-contract fixture parses")
+}

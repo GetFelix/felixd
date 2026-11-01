@@ -245,7 +245,9 @@ services:
           done
           [ -n "$$ok" ] || { echo "felix-fleet: finalizing $$feature failed"; exit 1; }
         done
-        sleep 3
+        # Brokers act on the enabled set at their next heartbeat (5 s by
+        # default), so wait out more than one.
+        sleep 8
         admin="Authorization: Bearer $$(cat /var/lib/felix/controlplane.jwt)"
         streams=http://127.0.0.1:8443/v1/tenants/dev/namespaces/default/streams
         # A rerun finds the stream already there.

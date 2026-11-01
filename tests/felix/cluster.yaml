@@ -231,7 +231,9 @@ services:
           done
           [ -n "$$ok" ] || { echo "felix-fleet: finalizing $$feature failed"; exit 1; }
         done
-        sleep 3
+        # Brokers act on the enabled set at their next heartbeat (5 s by
+        # default), so wait out more than one.
+        sleep 8
         echo "felix-fleet: features finalized"
 
 networks:

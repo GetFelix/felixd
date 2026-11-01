@@ -294,6 +294,20 @@ fn a_policy_that_lists_requesters_admits_only_them() {
 }
 
 #[test]
+fn an_empty_publisher_is_no_requester() {
+    let decision = decide(&Policy::default(), 7, Some(""), &request("wl").encode());
+    assert_eq!(rejected(&decision), Reason::NoRequester);
+}
+
+#[test]
+fn a_reason_a_newer_build_wrote_still_reads() {
+    let future = br#"{"format":1,"request":4,"id":"wl","outcome":"rejected","reason":"over_quota","detail":"x"}"#;
+    let decision = Decision::decode(future).unwrap();
+    assert_eq!(rejected(&decision), Reason::Unknown);
+    assert_eq!(Reason::Unknown.code(), 0);
+}
+
+#[test]
 fn a_decision_written_before_requesters_were_recorded_still_reads() {
     let old = br#"{"format":1,"request":4,"id":"wl","outcome":"rejected","reason":"over_limit","detail":"x"}"#;
     let decision = Decision::decode(old).unwrap();

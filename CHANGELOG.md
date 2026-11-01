@@ -12,11 +12,19 @@
   the stored value on every path (live, takeover, resume, merge, `check`,
   `replay`). Admission is built on 0.3 and records the requester in each
   decision (`requester`, left out when none). Breaking: a request whose
-  publisher the broker did not record is rejected as `no_requester`, so
-  admission needs a broker that stores publishers, `FELIX_RECORD_PUBLISHERS=true`
-  on a lone broker or the `publisher_principal` fleet feature finalized in a
-  cluster, before `felixd init` brings it up or an upgraded admission module
-  runs. New `Policy::requesters` limits who may ask (`not_permitted`; the
+  publisher the broker did not record is rejected as `no_requester`, so a
+  deployment that brings up the 0.3 admission needs a broker that stores
+  publishers, `FELIX_RECORD_PUBLISHERS=true` on a lone broker or the
+  `publisher_principal` fleet feature finalized in a cluster (one-way: storage
+  format v6, which older brokers refuse), before `felixd init`. A deployment
+  that already runs admission keeps its 0.2 module, which records no requester,
+  until module upgrades exist: a workload's module cannot change once it has
+  written output, and admission's id is fixed. Upgrade every node and the CLI
+  before submitting a 0.3 module or running the 0.3 admission: a felixd from
+  this release on leaves a module of a newer contract to an operator, and
+  earlier builds fail the workload; an older `felixd run` cannot read the new
+  reasons. Decision `reason` now tolerates a code a newer build wrote
+  (`unknown`). New `Policy::requesters` limits who may ask (`not_permitted`; the
   `admission-requesters` example). `felixd_runtime::Input` and
   `felixd_core::admission::decide` take the publisher. The test stacks turn
   recording on.

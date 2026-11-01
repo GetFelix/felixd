@@ -362,10 +362,20 @@ async fn the_publisher_is_the_same_live_after_a_takeover_and_in_a_replay() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
+    refused_and_left_for_an_operator(felixd_testkit::contract_01_component()).await;
+}
+
+/// A module of a contract this build does not know is left to an operator
+/// too, never failed: a newer felixd may run it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_of_a_newer_contract_is_left_for_an_operator() {
+    refused_and_left_for_an_operator(felixd_testkit::newer_contract_component()).await;
+}
+
+async fn refused_and_left_for_an_operator(old: Vec<u8>) {
     let Some(t) = test_felix().await else { return };
     // Another workload, so the caches exist and an agent has work it does.
     t.submit_as("other", "counter", &[]).await;
-    let old = felixd_testkit::contract_01_component();
     let hash = module::hash(&old);
     assert!(!t.run(ID, &old, INPUT, &[]).success(), "felixd run took it");
     assert!(
@@ -417,7 +427,7 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
         OperatorReason::ModuleRefused
     );
     tokio::time::sleep(LEASE_TTL * 2).await;
-    assert!(t.lease(ID).await.is_none(), "the 0.1 workload is held");
+    assert!(t.lease(ID).await.is_none(), "the refused workload is held");
     let record = t.spec().await.record.unwrap();
     assert_eq!(
         t.needs_operator().await,

@@ -72,7 +72,8 @@ impl Modules {
                 })
                 .await?
                 .map_err(|error| match error {
-                    LoadError::Contract01 => NeedsOperator::new(
+                    // A newer felixd may run it: upgrading this node is the fix.
+                    LoadError::Contract01 | LoadError::UnknownContract(_) => NeedsOperator::new(
                         OperatorReason::ModuleRefused,
                         format!("module {hash}: {error}"),
                     )
