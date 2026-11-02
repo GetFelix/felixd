@@ -281,6 +281,18 @@ async fn a_shared_input_is_deleted_only_below_the_lowest_floor() {
         || async { (t.readable_from(INPUT).await >= low).then_some(()) },
     )
     .await;
+    // The fast workload's trim lands at its snapshot after input 35, before it
+    // steps 36 and 37, and `check --complete` counts a step still to come as
+    // missing.
+    eventually(
+        "both to step every input",
+        Duration::from_secs(60),
+        || async {
+            (stepped(&t, "wl.fast.out", 37).await && stepped(&t, "wl.slow.out", 37).await)
+                .then_some(())
+        },
+    )
+    .await;
     let kept_from = t.readable_from(INPUT).await;
     assert!(
         kept_from <= low,
