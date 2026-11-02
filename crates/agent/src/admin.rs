@@ -91,10 +91,11 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
 
 /// Writes every rule of [`grants::policies`] the control plane does not hold,
 /// and the node's [`grants::trim_policy`] when `grant_trim`, so running it
-/// again writes nothing. It first lists every rule and role
-/// assignment and refuses, writing nothing, when a felixd role holds more than
-/// [`grants::policies`] gives it or one principal holds two roles
-/// ([`grants::audit`]). Needs `rbac.view` over the whole tenant, because a
+/// again writes nothing. It first lists every rule and role assignment and
+/// refuses, writing nothing, when a felixd role holds more than
+/// [`grants::policies`] and the trim rule give it or one principal holds two
+/// roles ([`grants::audit`]). A trim rule already held stays when `grant_trim`
+/// is off, with a warning. Needs `rbac.view` over the whole tenant, because a
 /// scope-filtered listing could hide the rule that breaks the roles apart; a
 /// token with less is refused. Also needs `rbac.policy.manage`. Assigning
 /// principals to the roles is left to an operator.
@@ -111,6 +112,13 @@ pub async fn ensure_grants(settings: &Settings, grant_trim: bool) -> Result<()> 
         grant_trim,
     )
     .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
+    if !grant_trim && held.contains(&grants::trim_policy(&settings.tenant, &settings.namespace)) {
+        eprintln!(
+            "warning: nodes of {} can still delete history: the node role keeps its stream.trim \
+             rule. Remove it through the control plane's RBAC API to turn deletion off",
+            settings.namespace
+        );
+    }
     for policy in missing {
         let body = serde_json::to_value(&policy)?;
         let (status, text) = call(settings, "POST", "rbac/policies", Some(body)).await?;

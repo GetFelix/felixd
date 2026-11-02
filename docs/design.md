@@ -1050,8 +1050,9 @@ reaches none of them.
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
 
-`stream.trim` is not in the table because `felixd init` leaves it out unless
-asked. `felixd init --grant-trim` adds one rule: the node role may trim every
+The node role's `stream.trim` is not in the table because `felixd init`
+leaves it out unless asked. (Admission's `stream.manage` includes trim, see
+below.) `felixd init --grant-trim` adds one rule: the node role may trim every
 stream of the namespace. Without it, history deletion stays off: a workload
 with `--keep-snapshots` still records its floors, and its nodes delete nothing
 (see [What a node needs](#what-a-node-needs)). Running `init` again without
@@ -1073,7 +1074,8 @@ would rename every existing stream, so neither is done. Per-lease tokens
 Residuals of `stream.manage`: Felix has no create-only stream action, and
 `stream.manage` over `<namespace>/*` also covers deleting or patching a
 stream and operating its consumer groups (`group.manage`). Admission's
-credential can delete or patch any workload stream. Nothing in
+credential can delete, patch or trim any workload stream, with or without
+`--grant-trim`. Nothing in
 `<namespace>.sys` is in its reach.
 
 `felixd init` audits before it writes. It lists every rule and role
@@ -1212,11 +1214,13 @@ workload:
 - **The node's token carries `stream.trim`.** Run `felixd init --grant-trim`
   to give it to the node role over the namespace's streams, and read the
   residual under [Grants](#grants) first: it lets any node erase any stream in
-  the namespace. Then mint the nodes new tokens. `stream.manage` includes
-  `stream.trim`, and Felix's control plane mints it into broker tokens only
-  after `head_trim` is finalized.
+  the namespace. Then mint the nodes new tokens, and if the mint names the
+  actions to request, add `stream.trim`. `stream.manage` includes `stream.trim`, and
+  Felix's control plane mints it into broker tokens only after `head_trim` is
+  finalized. A node whose token lacks it, for either reason, gets a refusal
+  that looks the same, so the warning names both steps.
 
-Without either, the holder logs one warning, naming the fix, and the workload
+Without either, the holder logs one warning, and the workload
 carries on with `.snap` and the merge log growing as before. After ten
 seconds, the first snapshot or resume tries again, so the deletion starts soon
 after the fleet finalizes the feature or the grant arrives, with no restart. A trim whose answer times

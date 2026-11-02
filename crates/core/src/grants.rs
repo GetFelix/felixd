@@ -139,10 +139,9 @@ fn is_felixd_subject(namespace: &str, subject: &str) -> bool {
 
 /// Checks what the control plane holds for `namespace` against
 /// [`policies`] and returns the rules still missing, plus [`trim_policy`] when
-/// `grant_trim`. Holding the trim rule is fine either way: an operator who
-/// turned it on keeps it when `init` runs without the flag. Any other rule
-/// under a felixd role that is not in [`policies`] (a wider one, or another
-/// role) is an error, and so is any grouping that makes a felixd role inherit another
+/// `grant_trim`. Holding the trim rule is fine either way: `init` without the
+/// flag does not take it back. Any other rule under a felixd role that is
+/// not in [`policies`] (a wider one, or another role) is an error, and so is any grouping that makes a felixd role inherit another
 /// role, or gives one principal two of the roles: the roles' separation
 /// holds only if nothing else adds to them.
 pub fn audit(
