@@ -138,6 +138,14 @@ pub(crate) enum Version {
 }
 
 impl Version {
+    /// The version number the interfaces carry.
+    pub(crate) const fn number(self) -> &'static str {
+        match self {
+            Version::V02 => "0.2.0",
+            Version::V03 => "0.3.0",
+        }
+    }
+
     /// The `step` and `state` interfaces a workload of this version exports.
     pub(crate) const fn interfaces(self) -> (&'static str, &'static str) {
         match self {

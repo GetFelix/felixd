@@ -74,6 +74,36 @@ fn an_input_is_behind_only_when_its_tail_is_below_the_position() {
     assert_eq!(problem.reason, OperatorReason::InputBehind);
 }
 
+/// A skipped output the stream does not hold at all, or holds as a claim, has
+/// nothing to digest; one it holds differently is told apart by its digest
+/// whoever wrote it.
+#[test]
+fn a_divergence_digests_what_the_stream_holds_and_what_the_run_produced() {
+    let at = OutputHeader {
+        input_offset: 2,
+        index: 0,
+    };
+    let held = output::encode(at, 1, b"held");
+    let replayed = output::encode(at, 5, b"replayed");
+    let found = Divergence::of(at, Some(1), (Some(&held), Some(&replayed)));
+    assert_eq!(
+        found.expected,
+        output::compared_digest(&output::encode(at, 0, b"held"))
+    );
+    assert_eq!(
+        found.actual,
+        output::compared_digest(&output::encode(at, 0, b"replayed"))
+    );
+    let ran_out = Divergence::of(at, None, (None, Some(&replayed)));
+    assert_eq!(ran_out.expected, None);
+    assert!(ran_out.actual.is_some());
+    let claim = output::encode_claim(1, "n");
+    assert_eq!(
+        Divergence::of(at, None, (Some(&claim), Some(&replayed))).expected,
+        None
+    );
+}
+
 /// Raising `keep_snapshots` on a merged workload leaves a kept snapshot below
 /// the last trim, whose merge entry Felix has dropped. That is a trim to keep,
 /// not an error that reaches the workload as lost history. Felix trimming

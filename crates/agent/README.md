@@ -66,7 +66,10 @@ Behaviour that matters:
   when it cannot read its drain mark (`blocked`).
 - **Failure.** A trap, running out of fuel or `poison` writes a failure record, then `failed` into
   the spec, and the workload stops. A rejection does not fail it. A component of the old contract
-  is left unclaimed rather than failed.
+  is left unclaimed rather than failed. When the failure is a replay that differs from the output
+  stream, the holder first appends a divergence record behind its epoch (best effort, and not at all
+  once deposed): where it differs, both digests, its node, snapshot and build. The failure stays
+  poison.
 - **Stuck.** An error from Felix is retried while the lease is held. Once attempts have failed for
   `--stuck-after-ms` with no progress in between (`stuck::retry`: no new input stepped, no record
   appended), the holder appends a degraded record behind its epoch, best effort, and deletes its

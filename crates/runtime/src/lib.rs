@@ -11,5 +11,5 @@ mod runtime;
 mod workload;
 
 pub use felixd_core::spec::Limits;
-pub use runtime::{Compiled, LoadError, Runtime};
+pub use runtime::{Compiled, LoadError, Runtime, WASMTIME_VERSION};
 pub use workload::{Failure, FailureKind, Input, Output, Stepped, Workload, WorkloadError};

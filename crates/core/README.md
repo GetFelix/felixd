@@ -13,7 +13,7 @@ It depends on no other felixd crate. `felixd-runtime` takes its `Limits` from it
 |---|---|
 | `names` | The caches (`workloads`, `leases`, `epochs`, `nodes`, `drains`, `modules`), the `sys.specs`, `sys.facts` and `sys.intake` streams, the `scheduler` and `admission` workload ids, and how a workload id maps to its `wl.<id>.out`, `wl.<id>.snap` and `wl.<id>.merge` streams |
 | `grants` | The Felix grants of felixd's node, admission and submitter roles, which `felixd init` writes |
-| `output` | Output stream records: outputs, claims, failures, rejections, needs-operator, trim and degraded records, with the name and key of each output |
+| `output` | Output stream records: outputs, claims, failures, rejections, needs-operator, trim, degraded and divergence records, with the name and key of each output, and the digest a divergence record holds of the bytes a comparison looked at |
 | `merge` | Merge log records of a workload with several inputs: entries, claims, the cursor and `reconcile` |
 | `snapshot` | Snapshot chunk and manifest records, `plan` (which chunks a new snapshot writes) and `read_chunk` (checks a chunk against its hash) |
 | `spec`, `lease`, `node` | The JSON values in the `workloads`, `leases`, `nodes` and `drains` caches, including `Limits`, and spec records on `sys.specs` with `History`, their fold for one workload |
@@ -22,8 +22,8 @@ It depends on no other felixd crate. `felixd-runtime` takes its `Limits` from it
 | `schedule` | The scheduler workload's fold (`Scheduler`), the node facts it reads from `sys.facts` and the assignments it writes |
 | `module` | How a module is identified (the hex sha256 of its bytes) and laid out in the `modules` cache (whole up to 8 MiB, above that a manifest and 4 MiB chunks, with the checks a reader makes), the snapshot layouts it declares in its `felixd.snapshot` custom section, and `can_restore`, which says whether one module may restore another's snapshots |
 | `resume` | `fold`, which says where a new owner restores from, where it subscribes, and which outputs the stream already holds |
-| `replay` | Where a replay starts and stops, and where it started from |
-| `status` | What `felixd ps` says about a workload: its state from the spec, lease and last output record (stopped, failed, needs operator, degraded, running, claiming or waiting), and its next step |
+| `replay` | Where a replay starts and stops, where it started from, and the divergence record the stream holds for an output a diff finds differing |
+| `status` | What `felixd ps` says about a workload: its state from the spec, lease and last output record (stopped, failed, needs operator, degraded, running, claiming or waiting), the divergence a failure followed, and its next step |
 | `check` | What is wrong with an output stream, measured against a replay, and with a merge log, measured against its inputs |
 
 Guarantees worth knowing:
