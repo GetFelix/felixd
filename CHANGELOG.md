@@ -150,20 +150,24 @@
   only after that. Running `init` without the flag later keeps the rules;
   remove them with the control plane's RBAC API. The flag also grants the node
   role `stream.trim` on `sys.facts` by exact name (#164), so the scheduler's
-  run can delete facts; without it the facts are kept.
+  run can delete facts; without it the facts are kept. A namespace that ran
+  `init --grant-trim` before this needs it run again and the nodes' tokens
+  re-minted, and an older felixd's `init` refuses a namespace that holds the
+  new rule.
 - Trimming `sys.facts` (#164). The one input that is deleted: a scheduler run
   with `--keep-snapshots` also deletes `sys.facts` below the floor its trim
   record names for that input, the same step that deletes `.snap` and the merge
-  log. Only the scheduler reads `sys.facts`, and `felixd run` and admission now
-  refuse a system stream as the input of any other workload (breaking: a
-  workload already running with one is not rechecked, and parks as needing an
-  operator once the scheduler trims). Every node appends to the stream, so a
+  log. Only the scheduler reads `sys.facts`, and `felixd run` now refuses a
+  system stream as the input of any other workload, as admission already did
+  (breaking for a workload submitted without admission: one already running
+  with a system stream is not rechecked, and parks as needing an operator once
+  the scheduler trims). Every node appends to the stream, so a
   refused tail is asked again at the one Felix reports, up to three more
   times, where `.snap` and the merge log give up. About `keep-snapshots x
   snapshot-every` facts stay, each about 150 bytes plus the ids of the
   workloads its node holds (3 bytes and the id each): about 1 MB for
-  `--keep-snapshots 3` at the default when nodes hold 8 workloads. `felixd replay` of the scheduler starts
-  from a snapshot and is unaffected. `felixd check` of a scheduler that has
+  `--keep-snapshots 3` at the default when nodes hold 8 workloads.
+  `felixd replay` of the scheduler starts from a snapshot and is unaffected. `felixd check` of a scheduler that has
   deleted history says which stream it needed and the oldest offset Felix
   holds, as it does for the merge log. `wl.scheduler.out` is not trimmed yet
   (#150).

@@ -1136,7 +1136,10 @@ namespace's streams, so a node's credential can then trim any stream in the
 namespace, not only the `.snap` and merge log it deletes from: inputs, other
 workloads' outputs and `wl.admission.out` included. The node's publish grant
 has the same reach, but publishing only appends, and a trim erases history for
-every reader and cannot be undone. That is why it is opt-in. A grant per
+every reader and cannot be undone. That is why it is opt-in. The rule on
+`sys.facts` adds one more: any node's token can trim it above the scheduler's
+floor, and the next scheduler resume then finds its history gone and needs an
+operator, which leaves placement at first claim wins until it is fixed. A grant per
 workload would need admission to write RBAC policies when it accepts a
 workload, and putting `.snap` and the merge log in a namespace of their own
 would rename every existing stream, so neither is done. Per-lease tokens
@@ -1336,7 +1339,8 @@ bytes. For example, `keep_snapshots 3` at the default keeps at most 3,000
 facts; if each node holds 8 workloads with 20-character ids, a fact is about
 330 bytes and the stream about 1 MB. A shorter `--snapshot-every-ms` keeps
 less: about nodes x (`keep_snapshots` x interval / `--facts-every-ms`) facts,
-so 10 nodes at the default 30 s and a 10-minute interval keep about 600.
+so 10 nodes with `keep_snapshots` 3 at the default 30 s and a 10-minute
+interval keep about 600.
 Without `keep_snapshots` on the scheduler nothing is deleted and the stream
 grows as under [Placement](#placement).
 
