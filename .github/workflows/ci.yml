@@ -135,8 +135,8 @@ jobs:
           java-version: "21"
       - run: TLC_WORKERS=4 scripts/check_tla.sh
 
-  # specs/Felixd.tla with trimming on, in its own job so the Felixd
-  # configurations do not take longer.
+  # specs/Felixd.tla with trimming on, in its own job so it does not add to
+  # the tla job's run time.
   tla-trim:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -148,8 +148,8 @@ jobs:
           java-version: "21"
       - run: TLA_MODULE=FelixdTrimming TLC_WORKERS=4 scripts/check_tla.sh
 
-  # specs/FelixdSpecs.tla, the spec history model, in its own job so the
-  # Felixd configurations keep the whole 30 minutes.
+  # specs/FelixdSpecs.tla, the spec history model, in its own job so it does
+  # not add to the tla job's run time.
   tla-specs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
