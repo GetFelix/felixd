@@ -1,0 +1,108 @@
+name: Scale
+
+# How many workloads one Felix cluster carries: create time, memory and
+# failover time with N workloads on three brokers and three agents. Run it by
+# hand from the Actions tab or with `gh workflow run scale.yml`. It never runs
+# on its own. The README's "Running the scale test" says how to read the result.
+on:
+  workflow_dispatch:
+    inputs:
+      counts:
+        description: Workload counts to measure, comma separated, smallest first
+        default: "1000,10000"
+      phase_secs:
+        description: How long each phase (running, first output, each failover) may take
+        default: "1200"
+      timeout_minutes:
+        description: Whole job timeout
+        default: "300"
+  # Temporary, so the branch can be measured before it reaches main.
+  push:
+    branches: [feat/20-scale]
+    paths:
+      - .github/workflows/scale.yml
+      - crates/felixd/tests/scale.rs
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '300') }}
+    env:
+      COUNTS: ${{ inputs.counts || '100,1000,10000' }}
+      PHASE_SECS: ${{ inputs.phase_secs || '1200' }}
+      FELIXD_REQUIRE_FELIX: "1"
+      FELIX_BROKERS: 127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300
+      FELIX_AUTH_TENANT: dev
+      FELIX_AUTH_TOKEN_FILE: /tmp/felix/client.jwt
+      FELIX_CA_FILE: /tmp/felix/broker-cert.pem
+      FELIX_CONTROLPLANE_URL: http://127.0.0.1:8443
+      FELIX_CONTROLPLANE_TOKEN_FILE: /tmp/felix/controlplane.jwt
+      FELIX_OPERATOR_TOKEN_FILE: /tmp/felix/operator.jwt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Runner
+        run: |
+          mkdir -p results
+          {
+            echo "cpus: $(nproc)"
+            free -m | sed -n 2p | awk '{print "memory_mb: " $2}'
+            df -Pm / | sed -n 2p | awk '{print "disk_mb: " $2 " total, " $4 " free"}'
+            docker --version
+          } | tee results/runner.txt
+      - name: Build the test
+        run: cargo test -p felixd --test scale --locked --no-run
+      - name: Measure
+        run: |
+          export FELIX_VERSION=$(sed -n 's/^version=//p' .felix-version)
+          cluster=tests/felix/cluster.yaml
+          failed=0
+          first=1
+          for n in ${COUNTS//,/ }; do
+            echo "::group::$n workloads"
+            # A fresh cluster for each count, so one run's streams do not
+            # weigh on the next.
+            docker compose -f $cluster down -v --remove-orphans
+            docker compose -f $cluster up -d --wait broker-1 broker-2 broker-3
+            docker compose -f $cluster run --rm felix-fleet
+            tests/felix/credentials.sh /tmp/felix cluster
+            if FELIXD_SCALE_COUNT=$n FELIXD_SCALE_OUT=$PWD/results \
+              FELIXD_SCALE_TIMEOUT_SECS=$PHASE_SECS FELIXD_CLUSTER=$PWD/$cluster \
+              timeout $((PHASE_SECS * 5))s \
+              cargo test -p felixd --test scale --locked -- --nocapture; then
+              ok=1
+            else
+              ok=0
+              failed=1
+            fi
+            pkill -f 'felixd agent' || true
+            docker ps -a --format '{{.Names}}  {{.Status}}' > results/containers-$n.txt
+            for b in broker-1 broker-2 broker-3 felix-controlplane; do
+              docker compose -f $cluster logs --no-color --tail 300 $b > results/log-$n-$b.txt 2>&1
+            done
+            echo "::endgroup::"
+            # A failure at the smallest count is a broken harness or cluster.
+            if [ $ok = 0 ] && [ $first = 1 ]; then break; fi
+            first=0
+          done
+          exit $failed
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Scale test"
+            echo
+            echo '```'; cat results/runner.txt; echo '```'
+            echo
+            echo "| Workloads | Streams | Create | All running | Broker memory | Control plane memory | First output | Agent failover | Broker failover | Leaders moved |"
+            echo "|---|---|---|---|---|---|---|---|---|---|"
+            cat results/scale-*.row.md 2>/dev/null
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scale-results
+          path: results/
