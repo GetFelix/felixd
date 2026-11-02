@@ -235,6 +235,12 @@ enum Command {
         /// single broker.
         #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
         replication_factor: u32,
+        /// Let nodes delete history under `--keep-snapshots`: grants the node
+        /// role `stream.trim` on every stream of the namespace, which can
+        /// erase any of them for good. Without it nodes record what could be
+        /// deleted and delete nothing.
+        #[arg(long)]
+        grant_trim: bool,
         /// The admission workload, a WebAssembly component.
         module: PathBuf,
     },
@@ -564,6 +570,7 @@ async fn main() -> Result<()> {
         Command::Init {
             connection,
             replication_factor,
+            grant_trim,
             module,
         } => {
             let bytes =
@@ -573,7 +580,7 @@ async fn main() -> Result<()> {
             felixd_agent::admin::refuse_legacy_streams(&settings).await?;
             let felix = Felix::connect(&settings).await?;
             felixd_agent::admin::ensure_namespace(&settings).await?;
-            felixd_agent::admin::ensure_grants(&settings).await?;
+            felixd_agent::admin::ensure_grants(&settings, grant_trim).await?;
             if let Lookup::Value(Some(found)) = felix
                 .cache_lookup(names::WORKLOADS, names::ADMISSION)
                 .await?

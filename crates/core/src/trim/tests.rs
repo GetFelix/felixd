@@ -150,6 +150,51 @@ fn a_downstream_passes_over_a_trim_record() {
     assert!(output::passed_over(&record, output::DEFAULT_NAME));
 }
 
+fn floors(snap_floor: u64, merge_floor: u64) -> Trim {
+    Trim {
+        snapshot: snap_floor,
+        step: merge_floor,
+        snap_floor,
+        merge_floor,
+        input_floors: vec![merge_floor],
+        first_spec: None,
+        claimed: None,
+    }
+}
+
+/// Only the workload's own streams are deleted: `.snap`, and the merge log
+/// when there is one. The input floors are never acted on.
+#[test]
+fn a_trim_deletes_the_snapshots_and_the_merge_log_only() {
+    let trim = floors(12, 40);
+    assert_eq!(
+        trim.deletions(true, Deleted::default()),
+        vec![(Owned::Snapshots, 12), (Owned::MergeLog, 40)]
+    );
+    assert_eq!(
+        trim.deletions(false, Deleted::default()),
+        vec![(Owned::Snapshots, 12)]
+    );
+}
+
+/// Deleting again below a floor already deleted to asks for nothing, so a
+/// resumed holder repairs only what a crash left.
+#[test]
+fn nothing_is_deleted_twice() {
+    let trim = floors(12, 40);
+    let done = Deleted {
+        snap_floor: 12,
+        merge_floor: 10,
+    };
+    assert_eq!(trim.deletions(true, done), vec![(Owned::MergeLog, 40)]);
+    let all = Deleted {
+        snap_floor: 12,
+        merge_floor: 40,
+    };
+    assert!(trim.deletions(true, all).is_empty());
+    assert!(floors(0, 0).deletions(true, Deleted::default()).is_empty());
+}
+
 fn trim_with(first_spec: Option<u64>, claimed: Option<u64>) -> Trim {
     Trim {
         snapshot: 7,

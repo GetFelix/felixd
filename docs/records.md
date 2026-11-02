@@ -157,10 +157,10 @@ before it, so upgrade every node before a workload can write them, or run the ne
 `--stuck-after-ms 0`, which stops it writing kind 8. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
-([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names, and
-`felixd replay` reads from the start while the records are there. Its holder appends it after
-a snapshot of its own when the spec sets `keep_snapshots`, with `publish_if` at the tail like an
-output. It continues with:
+([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names (by default only once the `.out` head is deleted), and
+`felixd replay` reads from the start while the records are there. Its holder appends it after a snapshot of its own
+when the spec sets `keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed
+deletes `.snap` and the merge log below the snapshot and merge log floors. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -192,8 +192,9 @@ uses of these fields:
 - The claimed spec stands in for the last claim when a reader walks back from the tail for the highest
   spec claimed, so a stale node is still refused when the claims are gone.
 
-Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's: an input
-shared with other readers is deleted only below all of theirs (#150).
+A holder that finds a trim whose floors are not yet deleted, as after a crash, deletes then. An input
+floor is one reader's and nothing acts on it: an input shared with other readers is deleted only below
+all of theirs (#150).
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
