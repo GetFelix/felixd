@@ -191,6 +191,10 @@ async fn counts(t: &TestFelix, output: &str) -> Vec<u64> {
 }
 
 /// Whether the counter's last total on `output` is `total`.
+///
+/// `total` must not be a multiple of the workload's `snapshot_every`: the
+/// snapshot taken right after that step lets `.out` be deleted through the
+/// step's own output, and no total is left to read.
 async fn stepped(t: &TestFelix, output: &str, total: u64) -> bool {
     counts(t, output).await.last() == Some(&total)
 }
@@ -242,7 +246,7 @@ async fn a_shared_input_is_deleted_only_below_the_lowest_floor() {
     )
     .await;
     let _agent = t.start_agent_with_faults(DELETE_SHARED);
-    t.publish_all(INPUT, (0..30).map(count)).await;
+    t.publish_all(INPUT, (0..32).map(count)).await;
     let (high, low) = eventually(
         "the slow workload to trim and the fast one to pass it",
         Duration::from_secs(90),
@@ -257,14 +261,14 @@ async fn a_shared_input_is_deleted_only_below_the_lowest_floor() {
         "both to step every input",
         Duration::from_secs(60),
         || async {
-            (stepped(&t, "wl.fast.out", 30).await && stepped(&t, "wl.slow.out", 30).await)
+            (stepped(&t, "wl.fast.out", 32).await && stepped(&t, "wl.slow.out", 32).await)
                 .then_some(())
         },
     )
     .await;
 
     // The fast workload snapshots again and finds the slow one's record.
-    t.publish_all(INPUT, (30..35).map(count)).await;
+    t.publish_all(INPUT, (32..37).map(count)).await;
     eventually(
         "the fast workload to trim again",
         Duration::from_secs(60),
@@ -441,9 +445,9 @@ async fn a_failover_after_the_trim_landed_finishes_deleting_out_and_the_input() 
     assert!(t.readable_from(INPUT).await <= second.input_floors[0]);
     assert!(t.readable_from(OUTPUT).await <= need);
 
-    t.publish_all(INPUT, (10..25).map(count)).await;
+    t.publish_all(INPUT, (10..27).map(count)).await;
     eventually("every output", Duration::from_secs(60), || async {
-        stepped(&t, OUTPUT, 25).await.then_some(())
+        stepped(&t, OUTPUT, 27).await.then_some(())
     })
     .await;
     // Stopped, so a later trim cannot delete what the check is reading.
@@ -470,7 +474,7 @@ async fn a_diff_of_an_output_with_a_cut_head_starts_after_the_oldest_snapshot() 
     )
     .await;
     let mut agent = t.start_agent_with_faults(DELETE_SHARED);
-    t.publish_all(INPUT, (0..30).map(count)).await;
+    t.publish_all(INPUT, (0..32).map(count)).await;
     eventually(
         "`.out` to lose its head",
         Duration::from_secs(90),
@@ -478,7 +482,7 @@ async fn a_diff_of_an_output_with_a_cut_head_starts_after_the_oldest_snapshot() 
     )
     .await;
     eventually("every output", Duration::from_secs(60), || async {
-        stepped(&t, OUTPUT, 30).await.then_some(())
+        stepped(&t, OUTPUT, 32).await.then_some(())
     })
     .await;
     // Stopped, so a later trim cannot delete what the replay is reading.
