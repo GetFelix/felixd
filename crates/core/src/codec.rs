@@ -21,6 +21,8 @@ pub enum DecodeError {
     RejectionIndex(u32),
     #[error("record has {0} bytes after its last field")]
     TrailingBytes(usize),
+    #[error("trim record flags are {0}, not 1, 2 or 3")]
+    InvalidTrimFlags(u8),
     #[error("snapshot flag is {0}, not 0 or 1")]
     InvalidSnapshotFlag(u8),
     #[error("digest is {0} bytes, not 0 or 32")]

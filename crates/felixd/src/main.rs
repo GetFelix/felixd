@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::admission;
 use felixd_agent::agent::AgentConfig;
-use felixd_agent::check::check;
+use felixd_agent::check::{Origin, check};
 use felixd_agent::drain;
 use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
@@ -111,7 +111,8 @@ enum Command {
     },
     /// Check output streams: replay each workload's module over its input and
     /// report gaps, duplicates, records out of order, epoch regressions and
-    /// outputs that differ. Exits with 1 if anything is found.
+    /// outputs that differ. A workload that trims its history is checked from
+    /// the oldest snapshot it keeps. Exits with 1 if anything is found.
     Check {
         #[command(flatten)]
         connection: Connection,
@@ -127,6 +128,16 @@ enum Command {
         /// reads, up the whole pipeline. Stages are checked upstream first.
         #[arg(long)]
         upstream: bool,
+        /// Replay from the first input. This is the default; it fails once
+        /// Felix has deleted history the replay needs.
+        #[arg(long, conflicts_with = "from_snapshot")]
+        from_start: bool,
+        /// Start after the oldest snapshot the last trim record keeps. The
+        /// snapshot's state is taken as given, and outputs below its tail
+        /// are not compared. Used by default only when Felix has deleted
+        /// the head of the output stream.
+        #[arg(long)]
+        from_snapshot: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
     /// what its `inspect` returns, or with `--diff` compare the outputs a
@@ -275,7 +286,9 @@ enum Command {
         /// in seconds, where admission runs.
         #[arg(long, default_value_t = 60)]
         wait_secs: u64,
-        /// The workload, a WebAssembly component.
+        /// The workload, a WebAssembly component of at most 64 MiB. One over
+        /// 8 MiB is stored in the `modules` cache as 4 MiB chunks and a
+        /// manifest, and nodes join and check it when they run it.
         module: PathBuf,
     },
 }
@@ -344,13 +357,23 @@ async fn main() -> Result<()> {
             ids,
             complete,
             upstream,
+            from_start,
+            from_snapshot,
         } => {
-            let reports = check(&connection.settings()?, &ids, complete, upstream).await?;
+            let origin = match (from_start, from_snapshot) {
+                (true, _) => Origin::Start,
+                (_, true) => Origin::Snapshot,
+                _ => Origin::Auto,
+            };
+            let reports = check(&connection.settings()?, &ids, complete, upstream, origin).await?;
             let mut found = false;
             for report in &reports {
                 if report.findings.is_empty() {
+                    let after = report.from_snapshot.map_or(String::new(), |input| {
+                        format!(", checked after the snapshot of input {input}")
+                    });
                     println!(
-                        "{}: {} records, ok, from {}",
+                        "{}: {} records, ok, from {}{after}",
                         report.output,
                         report.records,
                         report.inputs.join(", ")

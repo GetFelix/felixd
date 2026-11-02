@@ -9,7 +9,7 @@ name: felixd-test
 
 services:
   felix-controlplane:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     environment:
       FELIX_CONTROLPLANE_STORAGE_BACKEND: memory
       # Dev tokens let the bootstrap token mint a token for any principal. The
@@ -36,7 +36,7 @@ services:
   # caches `config` and `stats`, and writes the broker's and felixctl's tokens
   # to the felix-dev volume.
   felix-dev-auth:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     network_mode: "service:felix-controlplane"
     depends_on:
       felix-controlplane:
@@ -140,7 +140,7 @@ services:
         echo "felix-dev-auth: tenant dev, namespace default, stream orders, caches config and stats; tokens written"
 
   felix-broker:
-    image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.7.0-preview.2}
     depends_on:
       felix-dev-auth:
         condition: service_completed_successfully
@@ -153,6 +153,9 @@ services:
       FELIX_TLS_CERT_EXPORT: /var/lib/felix/broker-cert.pem
       # Durable streams, consumer groups and cache watches need a log on disk.
       FELIX_DURABLE_STORAGE_DIR: /var/lib/felix/data
+      # Store who published each record. Admission decides on it, and fails
+      # closed for a record with none.
+      FELIX_RECORD_PUBLISHERS: "true"
       RUST_LOG: info
     ports:
       - "127.0.0.1:5000-5003:5000-5003/udp"  # client QUIC, one port per listener

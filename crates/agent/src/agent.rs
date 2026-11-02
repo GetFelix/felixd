@@ -1578,8 +1578,14 @@ async fn record_divergence(
 ) -> Option<Ended> {
     let record = spec.record?;
     let detail = reason.lines().next().unwrap_or_default();
+    // Compiled already, since the workload ran. An empty name is a module the
+    // node can no longer read, which the record still describes.
+    let contract = match node.modules.compiled(&node.felix, &spec.module).await {
+        Ok(compiled) => compiled.contract(),
+        Err(_) => "",
+    };
     let abi = Abi {
-        contract: felixd_runtime::CONTRACT_VERSION.as_bytes(),
+        contract: contract.as_bytes(),
         wasmtime: felixd_runtime::WASMTIME_VERSION.as_bytes(),
         felixd: env!("CARGO_PKG_VERSION").as_bytes(),
     };

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
-    AckMode, BrokerError, CacheCondition, CacheConditionResult, ClientConfig, ClusterClient,
+    AckMode, BrokerError, CacheCondition, CacheConditionResult, Client, ClientConfig,
     ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy, StartPosition, StreamRecord,
     SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
@@ -26,8 +26,9 @@ const READY_WITHIN: Duration = Duration::from_secs(20);
 /// A connection to Felix, scoped to one tenant and namespace, and that
 /// namespace's system namespace for system streams. All streams here have a
 /// single shard.
+#[derive(Clone)]
 pub struct Felix {
-    client: Arc<ClusterClient>,
+    client: Arc<Client>,
     tenant: String,
     namespace: String,
 }
@@ -58,9 +59,13 @@ impl Felix {
             token_provider: Some(Arc::new(settings.token.clone())),
             // Time-based snapshot points come from input append times.
             timestamps: true,
+            // A step is given its record's publisher. Reads return it once the
+            // broker has stored one; the flag also asks for it on live events,
+            // so a live step and a replay see the same value.
+            publishers: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
-        let client = ClusterClient::connect_seeds(
+        let client = Client::connect_seeds(
             &settings.brokers,
             &settings.server_name,
             config,

@@ -1,6 +1,6 @@
 # counter
 
-An example workload of [contract 0.2](../../docs/contract.md). It counts its input records.
+An example workload of [contract 0.2](../../wit/0.2/workload.wit) (see [upgrading to 0.3](../../docs/contract.md#upgrading-from-02)). It counts its input records.
 
 It is not part of the main cargo workspace; see [../README.md](../README.md). It imports nothing and
 depends only on `wit-bindgen`.

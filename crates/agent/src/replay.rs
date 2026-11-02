@@ -9,6 +9,7 @@ use felixd_core::check::Produced;
 use felixd_core::module::{self, ModuleInfo, SectionError, Unreadable};
 use felixd_core::names;
 use felixd_core::replay::{self, Divergence, Initial, Recorded, Start};
+use felixd_core::snapshot::SnapshotHeader;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
@@ -135,7 +136,7 @@ pub async fn diff(
     .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, start) = start(&felix, id, &spec, module, from, from_start).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records).await?;
+    let (_, limits) = judged(&felix, id, &spec, &records, false).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
     let first = run_inputs(
@@ -243,9 +244,22 @@ async fn start(
     if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
         return Ok((workload, Start::Initial(Initial::Unreadable(why))));
     }
-    let snapshot = &found[index];
+    let header = restore(felix, &snap_stream, &found[index], &mut workload, swapped).await?;
+    Ok((workload, Start::Snapshot(header)))
+}
+
+/// Restores `snapshot`, read from `stream`, into `workload`, and returns its
+/// header. `swapped` says the workload runs another module than the one that
+/// took the snapshot, which changes what a failed restore is called.
+pub(crate) async fn restore(
+    felix: &Felix,
+    stream: &str,
+    snapshot: &Snapshot,
+    workload: &mut Workload,
+    swapped: bool,
+) -> Result<SnapshotHeader> {
     let header = snapshot.taken().header;
-    let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
+    let chunks = snapshots::chunks(felix, stream, snapshot)
         .await
         .map_err(snapshots::ReadError::into_anyhow)?;
     let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
@@ -257,7 +271,7 @@ async fn start(
             anyhow!(e).context(format!("restore the snapshot of input {offset}"))
         }
     })?;
-    Ok((workload, Start::Snapshot(header)))
+    Ok(header)
 }
 
 /// The module a replay tries, as its hash and bytes. `module` is the hash of

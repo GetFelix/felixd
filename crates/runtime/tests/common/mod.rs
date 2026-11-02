@@ -16,6 +16,7 @@ pub(crate) fn input(offset: u64, payload: &[u8]) -> Input<'_> {
         timestamp_micros: offset * 1000,
         key: None,
         payload,
+        publisher: None,
     }
 }
 

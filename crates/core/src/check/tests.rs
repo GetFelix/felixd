@@ -913,6 +913,184 @@ fn an_entry_naming_an_input_the_spec_lacks_is_its_own_finding() {
     );
 }
 
+fn a_trim(step: u64, first_spec: Option<u64>) -> Vec<u8> {
+    output::encode_trim(
+        1,
+        &crate::trim::Trim {
+            snapshot: 0,
+            step,
+            snap_floor: 0,
+            merge_floor: 0,
+            input_floors: vec![step],
+            first_spec,
+            claimed: first_spec,
+        },
+    )
+}
+
+/// The stream's first claim is gone. Its trim record says what the stream
+/// was written under, and so does a later claim once the head is cut.
+#[test]
+fn a_trim_record_names_the_spec_when_the_first_claim_is_gone() {
+    let out = |input| output::encode(header(input, 0), 1, b"x");
+    let from = |records: &[Vec<u8>], cut| lineage_of(records.iter().map(Vec::as_slice), cut);
+    let held = [out(5), a_trim(5, Some(3)), out(6)];
+    // Nothing at the head names a spec, which is only a stream with no claim
+    // unless the head was cut.
+    assert_eq!(from(&held, false), None);
+    assert_eq!(from(&held, true), Some(3));
+    // The trim record is the oldest one kept.
+    assert_eq!(from(&held[1..], false), Some(3));
+    // A needs-operator record ran nothing and is passed over.
+    let parked =
+        output::encode_needs_operator(1, 0, crate::class::OperatorReason::ModuleMissing, "");
+    assert_eq!(from(&[parked, a_trim(5, Some(3))], false), Some(3));
+    // A trim written before it carried a spec names none, and a claim that
+    // follows a cut head does.
+    let later = [
+        out(5),
+        a_trim(5, None),
+        output::encode_claim_under(2, 4, 4, "n"),
+    ];
+    assert_eq!(from(&later, true), Some(4));
+    assert_eq!(from(&later[1..], false), None);
+    // The first claim wins while it is there.
+    let whole = [output::encode_claim_under(1, 1, 1, "n"), a_trim(5, Some(1))];
+    assert_eq!(from(&whole, false), Some(1));
+    assert_eq!(specs_claimed(held.iter().map(Vec::as_slice)), [3]);
+}
+
+#[test]
+fn a_check_judges_a_cut_stream_under_the_spec_its_trim_carries() {
+    use crate::spec::{Limits, WorkloadSpec, WorkloadState};
+    let spec = |module: &str, fuel: u64| WorkloadSpec {
+        module: module.into(),
+        inputs: vec!["in".into()],
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        keep_snapshots: None,
+        state: WorkloadState::Running,
+        limits: Limits {
+            fuel_per_call: fuel,
+            ..Limits::default()
+        },
+        failure: None,
+        record: None,
+    };
+    let (written, refused) = (spec("aa", 100), spec("bb", 1));
+    let claimed = HashMap::from([(3, written.clone())]);
+    let records = [
+        output::encode(header(5, 0), 1, b"x"),
+        a_trim(5, Some(3)),
+        output::encode(header(6, 0), 1, b"x"),
+    ];
+    let (lineage, _) = judged_from(
+        &refused,
+        &claimed,
+        lineage_of(records.iter().map(Vec::as_slice), true),
+        records.iter().map(Vec::as_slice),
+    );
+    assert_eq!(lineage.module, "aa");
+    // Without the trim's spec, the cache's would decide.
+    let (lineage, _) = judged_from(&refused, &claimed, None, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.module, "bb");
+}
+
+/// A trim says every input up to its step was stepped, which sets where a
+/// later claim's limits begin once the outputs that showed it are gone.
+#[test]
+fn limits_after_a_trim_begin_past_its_step() {
+    let records = [a_trim(40, None), output::encode_claim_under(2, 9, 9, "n")];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(41, 9)]
+    );
+}
+
+/// A check that starts after a merge log entry sees what a check of the whole
+/// log sees after it: the same findings, with the cursor and the epoch taken
+/// from that entry.
+#[test]
+fn a_merge_log_checked_after_a_step_finds_what_the_whole_log_does() {
+    let entries = [(0, 0), (1, 1), (0, 1), (1, 3), (0, 2)];
+    let log = merge_log(1, &entries);
+    let all = inputs();
+    assert_eq!(check_merge(&at(&log), &all, true), []);
+    // Resume after the entry at offset 3, which merged orders@1 and payments@1.
+    let start = MergeStart::of(&log[3]).unwrap();
+    assert_eq!(start.next, [2, 2]);
+    let rest = &at(&log)[4..];
+    let from = |inputs: &[InputRecords<'static>]| {
+        inputs
+            .iter()
+            .zip(&start.next)
+            .map(|((name, records), &next)| {
+                (
+                    *name,
+                    records
+                        .iter()
+                        .copied()
+                        .filter(|&(o, _)| o >= next)
+                        .collect(),
+                )
+            })
+            .collect::<Vec<InputRecords<'static>>>()
+    };
+    assert_eq!(check_merge_from(rest, &from(&all), true, Some(&start)), []);
+
+    // The same planted fault is found either way: an entry that merges
+    // orders@2 a second time.
+    let mut bad = merge_log(1, &entries);
+    bad.push(merge::encode_entry(1, entry(0, 2), &mut [3, 4]));
+    let whole = check_merge(&at(&bad), &all, false);
+    let after = check_merge_from(&at(&bad)[4..], &from(&all), false, Some(&start));
+    assert!(!whole.is_empty());
+    assert_eq!(whole, after);
+    // An entry from an epoch the log never claimed is still one.
+    let mut other = merge_log(1, &entries);
+    other.push(merge::encode_entry(7, entry(0, 3), &mut [3, 4]));
+    assert!(
+        check_merge_from(&at(&other)[4..], &from(&all), false, Some(&start))
+            .iter()
+            .any(|f| matches!(f, Finding::MergeUnclaimed { epoch: 7, .. }))
+    );
+}
+
+/// The claims below a trim are gone, so its floor is what refuses a claim of
+/// an older spec that comes after it.
+#[test]
+fn a_trims_claimed_spec_refuses_an_older_spec_claimed_after_it() {
+    let records = [
+        a_trim(40, Some(3)),
+        // Refused by its owner, which stepped nothing: spec 2 is below 3.
+        output::encode_claim_under(2, 2, 2, "stale"),
+        output::encode(header(41, 0), 2, b"x"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        []
+    );
+}
+
+/// A record whose epoch is below one that came before the records checked is
+/// a regression, though the earlier record is not among them.
+#[test]
+fn an_epoch_below_the_one_before_the_records_checked_is_a_regression() {
+    let expected = replay(2);
+    let records = [record(0, 0, 3, &[0])];
+    let at = at(&records);
+    assert_eq!(check_after(&expected[..1], &at, false, None), []);
+    assert_eq!(
+        check_after(&expected[..1], &at, false, Some(5)),
+        [Finding::EpochRegression {
+            offset: 0,
+            epoch: 3,
+            previous: 5
+        }]
+    );
+}
+
 fn divergence_record(epoch: u64, spec: u64) -> Vec<u8> {
     use crate::output::{Abi, Diverged, encode_divergence};
     encode_divergence(

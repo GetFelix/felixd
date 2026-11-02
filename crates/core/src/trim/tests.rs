@@ -31,6 +31,8 @@ fn keeps_the_last_snapshots_and_what_they_read() {
             snap_floor: 12,
             merge_floor: 0,
             input_floors: vec![200],
+            first_spec: None,
+            claimed: None,
         }
     );
 }
@@ -57,9 +59,9 @@ fn the_oldest_kept_is_the_lowest_step_not_the_oldest_record() {
     assert_eq!(trim.snap_floor, 30);
 }
 
-/// Until the newest snapshot is the holder's own, an earlier holder can still
-/// append one, so a holder that has not written one trims nothing. A stale
-/// holder that finds a later holder's snapshot newest trims nothing either.
+/// A holder that has not written the newest snapshot trims nothing, and nor
+/// does a stale holder that finds a later holder's newest. The `.out` fence
+/// refuses the latter's trim anyway; this is a second guard.
 #[test]
 fn a_holder_trims_only_after_its_own_snapshot() {
     let newest = [kept(20, 2, 200, &[]), kept(10, 1, 100, &[])];
@@ -99,6 +101,8 @@ fn a_floor_never_goes_back() {
         snap_floor: 12,
         merge_floor: 0,
         input_floors: vec![201],
+        first_spec: None,
+        claimed: None,
     };
     let newest = [kept(40, 3, 300, &[11])];
     assert_eq!(
@@ -117,6 +121,8 @@ fn a_trim_record_round_trips_and_is_a_marker() {
         snap_floor: 3,
         merge_floor: 99,
         input_floors: vec![10, 20],
+        first_spec: None,
+        claimed: None,
     };
     let record = output::encode_trim(5, &trim);
     let decoded = output::decode(&record).unwrap();
@@ -125,9 +131,6 @@ fn a_trim_record_round_trips_and_is_a_marker() {
     assert_eq!(decoded.written(), None);
     assert!(matches!(decoded, Record::Trim { .. }));
     assert!(output::is_marker(&record));
-    let mut long = record.clone();
-    long.push(0);
-    assert_eq!(output::decode(&long), Err(DecodeError::TrailingBytes(1)));
 }
 
 /// A downstream reading this stream as its input passes over a trim record,
@@ -140,7 +143,97 @@ fn a_downstream_passes_over_a_trim_record() {
         snap_floor: 0,
         merge_floor: 0,
         input_floors: vec![1],
+        first_spec: None,
+        claimed: None,
     };
     let record = output::encode_trim(1, &trim);
     assert!(output::passed_over(&record, output::DEFAULT_NAME));
+}
+
+fn trim_with(first_spec: Option<u64>, claimed: Option<u64>) -> Trim {
+    Trim {
+        snapshot: 7,
+        step: 99,
+        snap_floor: 3,
+        merge_floor: 99,
+        input_floors: vec![10, 20],
+        first_spec,
+        claimed,
+    }
+}
+
+#[test]
+fn the_specs_a_trim_carries_round_trip() {
+    for (first_spec, claimed) in [
+        (None, None),
+        (Some(4), None),
+        (None, Some(9)),
+        (Some(0), Some(9)),
+    ] {
+        let trim = trim_with(first_spec, claimed);
+        let record = output::encode_trim(5, &trim);
+        assert_eq!(output::decode(&record).unwrap().trim(), Some(trim));
+    }
+}
+
+/// A trim record written before it carried specs ends at the input floors.
+/// It reads as carrying none, and a trim with none writes the same bytes.
+#[test]
+fn a_trim_record_without_specs_is_the_original_layout() {
+    let mut original = vec![4, 7, 0, 0, 0, 0, 0, 0, 0, 5];
+    for field in [7u64, 99, 3, 99] {
+        original.extend(field.to_be_bytes());
+    }
+    original.extend(2u16.to_be_bytes());
+    for floor in [10u64, 20] {
+        original.extend(floor.to_be_bytes());
+    }
+    assert_eq!(output::encode_trim(5, &trim_with(None, None)), original);
+    let decoded = output::decode(&original).unwrap();
+    assert_eq!(decoded.trim(), Some(trim_with(None, None)));
+}
+
+#[test]
+fn a_trim_record_with_unknown_flags_or_extra_bytes_is_refused() {
+    let base = output::encode_trim(5, &trim_with(None, None));
+    let with = |tail: &[u8]| [base.as_slice(), tail].concat();
+    // Flags that name nothing, or a field this build does not know.
+    assert_eq!(
+        output::decode(&with(&[0])),
+        Err(DecodeError::InvalidTrimFlags(0))
+    );
+    assert_eq!(
+        output::decode(&with(&[4, 0, 0, 0, 0, 0, 0, 0, 1])),
+        Err(DecodeError::InvalidTrimFlags(4))
+    );
+    // A field cut short, and bytes past the last field.
+    assert!(matches!(
+        output::decode(&with(&[1, 0, 0])),
+        Err(DecodeError::Truncated { .. })
+    ));
+    let mut long = output::encode_trim(5, &trim_with(Some(1), Some(2)));
+    long.push(0);
+    assert_eq!(output::decode(&long), Err(DecodeError::TrailingBytes(1)));
+}
+
+/// The first claim's spec is carried from one trim to the next, never
+/// replaced by what the next trim might read.
+#[test]
+fn a_plan_carries_the_first_spec_forward() {
+    let previous = Trim {
+        first_spec: Some(3),
+        claimed: Some(8),
+        snapshot: 20,
+        step: 50,
+        snap_floor: 1,
+        merge_floor: 0,
+        input_floors: vec![50],
+    };
+    let newest = [kept(400, 3, 300, &[399])];
+    let trim = plan(3, 1, &newest, one_input, Some(&previous)).unwrap();
+    assert_eq!((trim.first_spec, trim.claimed), (Some(3), None));
+    assert_eq!(
+        plan(3, 1, &newest, one_input, None).unwrap().first_spec,
+        None
+    );
 }
