@@ -3,7 +3,7 @@ name: Scale
 # How many workloads one Felix cluster carries: create time, memory and
 # failover time with N workloads on three brokers and three agents. Run it by
 # hand from the Actions tab or with `gh workflow run scale.yml`. It never runs
-# on its own. The README's "Running the scale test" says how to read the result.
+# on its own. CONTRIBUTING.md's "Running the scale test" says how to read the result.
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '300') }}
     env:
-      COUNTS: ${{ inputs.counts || '100,250,500,1000,1000:30,10000' }}
+      COUNTS: ${{ inputs.counts || '100,500,1000,10000' }}
       BUILD_SECS: ${{ inputs.build_secs || '1200' }}
       FAILOVER_SECS: ${{ inputs.failover_secs || '300' }}
       RUST_LOG: warn

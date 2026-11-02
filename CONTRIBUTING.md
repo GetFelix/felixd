@@ -54,7 +54,9 @@ gh workflow run scale.yml -R GetFelix/felixd -f counts=1000,10000
 ```
 
 Or use "Run workflow" on the Scale page of the Actions tab. `counts` lists the sizes to measure, smallest
-first, each on a fresh cluster. `phase_secs` bounds each phase, and the job gives up after `timeout_minutes`.
+first, each on a fresh cluster. `build_secs` bounds creating and starting the workloads, `failover_secs` bounds the first output and
+each failover, and the job gives up after `timeout_minutes`. A count can carry a lease TTL in seconds, as
+`1000:30`.
 
 When the run ends, its summary page shows one row per count, and the `scale-results` artifact holds
 `scale-<N>.json` with every figure (including the lease census while the workloads started, and memory at each
