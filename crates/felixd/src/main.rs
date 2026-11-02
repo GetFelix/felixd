@@ -263,7 +263,7 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         wait_secs: u64,
         /// The workload, a WebAssembly component of at most 64 MiB. One over
-        /// 4 MiB is stored in the `modules` cache as 4 MiB chunks and a
+        /// 8 MiB is stored in the `modules` cache as 4 MiB chunks and a
         /// manifest, and nodes join and check it when they run it.
         module: PathBuf,
     },

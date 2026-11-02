@@ -5,10 +5,14 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use felixd_core::module::{self, Corrupt, Head};
+use felixd_core::module::{self, CHUNK_BYTES, Corrupt, Head, Manifest};
 use felixd_core::names;
+use tokio::task::JoinSet;
 
 use crate::felix::Felix;
+
+/// How many chunks are in flight at once.
+const PARALLEL: usize = 4;
 
 /// What [`fetch`] found under a module's key.
 #[derive(Debug)]
@@ -24,7 +28,8 @@ pub enum Fetched {
 /// Stores `module` in the `modules` cache and returns its key. Chunks go
 /// first and the manifest last, so a key never names a chunk that was not
 /// written. Putting the same module again rewrites the same bytes, which
-/// repairs a chunk that was lost.
+/// repairs a chunk that was lost. Chunks are never deleted, so a put that
+/// fails part way leaves chunks no manifest names.
 pub async fn put(felix: &Felix, module: &[u8]) -> Result<String> {
     if let Some(why) = module::size_problem(module.len() as u64, module::MAX_MODULE_BYTES) {
         bail!(why);
@@ -33,10 +38,20 @@ pub async fn put(felix: &Felix, module: &[u8]) -> Result<String> {
     let parts = module::split(module);
     // A small value that is not WebAssembly would be stored but never read.
     module::read_head(&key, &parts.head)?;
-    for (chunk_key, chunk) in &parts.chunks {
-        felix
-            .cache_put(names::MODULES, chunk_key, Bytes::copy_from_slice(chunk))
-            .await?;
+    let mut writes = JoinSet::new();
+    let mut chunks = parts.chunks.iter();
+    loop {
+        while writes.len() < PARALLEL
+            && let Some((chunk_key, chunk)) = chunks.next()
+        {
+            let felix = felix.clone();
+            let (chunk_key, chunk) = (chunk_key.clone(), Bytes::copy_from_slice(chunk));
+            writes.spawn(async move { felix.cache_put(names::MODULES, &chunk_key, chunk).await });
+        }
+        match writes.join_next().await {
+            Some(done) => done??,
+            None => break,
+        }
     }
     felix
         .cache_put(names::MODULES, &key, Bytes::copy_from_slice(&parts.head))
@@ -55,21 +70,49 @@ pub async fn fetch(felix: &Felix, key: &str) -> Result<Fetched> {
         Ok(Head::Chunked(manifest)) => manifest,
         Err(corrupt) => return Ok(Fetched::Corrupt(corrupt)),
     };
-    let mut joined = Vec::with_capacity(manifest.bytes() as usize);
-    for n in 0..manifest.len() {
-        let Some(chunk) = felix
-            .cache_get(names::MODULES, &module::chunk_key(key, n))
-            .await?
-        else {
-            return Ok(Fetched::Missing(format!("chunk {n} of module {key}")));
-        };
-        if let Err(corrupt) = manifest.check_chunk(key, n, &chunk) {
-            return Ok(Fetched::Corrupt(corrupt));
-        }
-        joined.extend_from_slice(&chunk);
-    }
+    let joined = match fetch_chunks(felix, key, &manifest).await? {
+        Ok(joined) => joined,
+        Err(other) => return Ok(other),
+    };
     match module::verify(key, &joined) {
         Ok(()) => Ok(Fetched::Found(joined.into())),
         Err(corrupt) => Ok(Fetched::Corrupt(corrupt)),
+    }
+}
+
+/// The chunks of module `key`, checked one by one and joined. A few are read
+/// at a time; each lands at its own offset, so the order is the manifest's.
+/// The inner error is the first missing or wrong chunk to come back.
+async fn fetch_chunks(
+    felix: &Felix,
+    key: &str,
+    manifest: &Manifest,
+) -> Result<std::result::Result<Vec<u8>, Fetched>> {
+    let mut joined = vec![0u8; manifest.bytes() as usize];
+    let mut reads = JoinSet::new();
+    let mut next = 0;
+    loop {
+        while reads.len() < PARALLEL && next < manifest.len() {
+            let felix = felix.clone();
+            let n = next;
+            let chunk_key = module::chunk_key(key, n);
+            reads.spawn(async move {
+                let chunk = felix.cache_get(names::MODULES, &chunk_key).await;
+                (n, chunk)
+            });
+            next += 1;
+        }
+        let Some(done) = reads.join_next().await else {
+            return Ok(Ok(joined));
+        };
+        let (n, chunk) = done?;
+        let Some(chunk) = chunk? else {
+            return Ok(Err(Fetched::Missing(format!("chunk {n} of module {key}"))));
+        };
+        if let Err(corrupt) = manifest.check_chunk(key, n, &chunk) {
+            return Ok(Err(Fetched::Corrupt(corrupt)));
+        }
+        let at = n * CHUNK_BYTES;
+        joined[at..at + chunk.len()].copy_from_slice(&chunk);
     }
 }

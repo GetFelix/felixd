@@ -94,11 +94,11 @@ felixd run --id counter --input in --replication-factor 1 counter.wasm
 felixd agent
 ```
 
-`felixd run` stores the module in the `modules` cache (a module can be up to 64 MiB;
-one over 4 MiB goes in as 4 MiB chunks and a manifest, see [Modules](docs/design.md#modules)), creates the `wl.<id>.out` and
+`felixd run` stores the module in the `modules` cache, creates the `wl.<id>.out` and
 `wl.<id>.snap` streams (and `wl.<id>.merge` when `--input` is given more
 than once), appends the spec as a record to the `sys.specs` stream and points the `workloads` cache at it. `sys.specs` keeps every version of every
-spec. It creates felixd's caches and
+spec. A module can be up to 64 MiB. One over 8 MiB is stored as 4 MiB chunks
+and a manifest; see [Modules](docs/design.md#modules). It creates felixd's caches and
 streams with three `Quorum` replicas unless `--replication-factor` says
 otherwise; the single-broker test stack needs 1. The agent watches the
 `workloads` cache, checks each spec against its record, claims the lease of each

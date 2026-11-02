@@ -2,8 +2,10 @@
 //! snapshot layouts it declares.
 //!
 //! A module is identified by the sha256 of its bytes, in lowercase hex. A
-//! module of at most [`CHUNK_BYTES`] is stored whole under that key, as raw
-//! WebAssembly, which starts with `\0asm`. A larger one is cut into chunks of
+//! module of at most [`MAX_WHOLE_BYTES`] is stored whole under that key, as
+//! raw WebAssembly, which starts with `\0asm`. That is the most a build before
+//! chunking could store, so a module such a build could hold is never turned
+//! into a manifest it would misread. A larger one is cut into chunks of
 //! [`CHUNK_BYTES`] (the last may be shorter) stored under `<sha256>/<n>`, and
 //! the key holds a JSON [`Manifest`] naming each chunk's hash. A reader tells
 //! the two apart by the first bytes and checks every chunk and then the whole
@@ -24,10 +26,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wasmparser::{Parser, Payload};
 
-/// The largest value stored under one `modules` key. Felix takes a frame of
-/// 16 MiB, and a chunk of this size leaves room for the framing and for
-/// several to be in flight.
+/// The size of a chunk of a module stored in chunks. A cache value can be at
+/// most 16 MiB; this leaves room for framing and several in flight.
 pub const CHUNK_BYTES: usize = 4 << 20;
+
+/// The largest module stored as one value: one write to Felix.
+pub const MAX_WHOLE_BYTES: usize = crate::MAX_WRITE_BYTES;
 
 /// The largest module felixd stores: sixteen chunks. Admission's default
 /// policy allows up to this.
@@ -208,7 +212,7 @@ pub struct Parts<'a> {
 
 /// Cuts `module` into the values stored for it in the cache.
 pub fn split(module: &[u8]) -> Parts<'_> {
-    if module.len() <= CHUNK_BYTES {
+    if module.len() <= MAX_WHOLE_BYTES {
         return Parts {
             head: Cow::Borrowed(module),
             chunks: Vec::new(),
@@ -289,14 +293,11 @@ impl Manifest {
             hash: key.to_owned(),
             why,
         };
-        if self.format != FORMAT {
-            return Err(Corrupt::UnknownFormat {
-                hash: key.to_owned(),
-                format: self.format,
-            });
+        if self.bytes > MAX_MODULE_BYTES {
+            return Err(bad("is for a module over the size limit"));
         }
-        if self.bytes == 0 || self.bytes > MAX_MODULE_BYTES {
-            return Err(bad("has a length outside the limit"));
+        if self.bytes <= MAX_WHOLE_BYTES as u64 {
+            return Err(bad("is for a module that is stored whole"));
         }
         if self.chunks.len() as u64 != self.bytes.div_ceil(CHUNK_BYTES as u64) {
             return Err(bad("names the wrong number of chunks for its length"));
@@ -320,8 +321,23 @@ pub fn read_head(key: &str, value: &[u8]) -> Result<Head, Corrupt> {
         verify(key, value)?;
         return Ok(Head::Whole);
     }
-    let manifest: Manifest =
+    // The format comes first, so a manifest of a later shape is told from junk.
+    #[derive(Deserialize)]
+    struct Format {
+        format: u32,
+    }
+    let Format { format } =
         serde_json::from_slice(value).map_err(|_| Corrupt::NotAModule(key.to_owned()))?;
+    if format != FORMAT {
+        return Err(Corrupt::UnknownFormat {
+            hash: key.to_owned(),
+            format,
+        });
+    }
+    let manifest: Manifest = serde_json::from_slice(value).map_err(|_| Corrupt::Manifest {
+        hash: key.to_owned(),
+        why: "does not decode",
+    })?;
     manifest.check(key)?;
     Ok(Head::Chunked(manifest))
 }

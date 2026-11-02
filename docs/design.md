@@ -335,7 +335,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
-| `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 4 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
+| `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 8 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
 
@@ -402,14 +402,20 @@ record, is passed over.
 ### Modules
 
 A module is a WebAssembly component, named by the sha256 of its bytes. It can
-be up to 64 MiB (`MAX_MODULE_BYTES`). One write to Felix can hold at most 8 MiB
-and Felix refuses a frame over 16 MiB, so a large module cannot be one cache
-value. The `modules` cache stores it like this:
+be up to 64 MiB. Felix refuses a cache value that is too large (a 20 MiB one
+was refused, below), and felixd writes at most 8 MiB to Felix at once, so a
+large module cannot always be one cache value. The `modules` cache stores a
+module like this:
 
 | Module size | Under its sha256 key | Under `<sha256>/<n>` |
 |---|---|---|
-| up to 4 MiB | the module, raw | nothing |
-| over 4 MiB | a manifest: the length and the sha256 of each chunk | chunk `n`, 4 MiB each and a shorter last one |
+| up to 8 MiB | the module, raw | nothing |
+| over 8 MiB | a manifest: the length and the sha256 of each chunk | chunk `n`, 4 MiB each and a shorter last one |
+
+The 8 MiB line is the most a build from before chunking could store. Anything
+such a build could hold stays one raw value, so running `felixd run` again on
+a 6 MiB module with a new build cannot leave an older node a manifest it would
+read as a module that does not match its hash.
 
 A reader tells the two apart by the first bytes: WebAssembly starts with
 `\0asm` and a manifest is JSON. It checks every chunk's length and hash as it
@@ -418,20 +424,28 @@ error that names it (`chunk 2 of module <sha256> is not in the modules cache`)
 and a wrong one fails the workload as poison. Nothing runs on a module that
 fails a check. Every reader goes through `felixd_agent::module_store::fetch`:
 nodes starting a workload, `felixd check`, `felixd replay` and admission's
-projector.
+projector. It reads four chunks at a time.
 
 The writer, `module_store::put`, stores the chunks first and the manifest last,
 so a manifest never names a chunk that was not written. Putting the same
 module again rewrites the same bytes, which also repairs a chunk that was
-lost. A submitter needs write on `modules` as before; the chunks are keys in
-the same cache, so no grant changes.
+lost. Nothing deletes chunks, so a put that fails part way, or a module admission
+rejects, leaves chunks no manifest names. A submitter needs write on `modules`
+as before; the chunks are keys in the same cache, so no grant changes.
 
-Why 4 MiB and 64 MiB: a chunk at a quarter of the frame limit leaves room for
-framing and keeps one write small. 64 MiB is sixteen chunks. Reading costs
-about 70 ms per MiB (below), so a node that takes over a workload with a
-module of that size waits about 4.5 s before it can compile it, on top of
-the lease timing; the limit stops that wait growing without bound. Real
-components are far smaller, so this is headroom and not a target.
+Admission's projector, which records an accepted spec while it holds the lease,
+reads the whole module with `fetch`, so a large module costs it the full fetch
+once per accepted request. Cache keys cannot be probed without reading the
+value, and the hash check is what makes a skip record, which is permanent, a
+true statement: a spec whose module is missing or wrong is never recorded as
+runnable.
+
+Why 4 MiB chunks and 64 MiB: a chunk well under the largest value Felix took
+keeps one write small. 64 MiB is sixteen chunks. Reading one chunk after
+another cost about 70 ms per MiB (below), so a node that takes over a workload
+with a module of that size waits several seconds before it can compile it, on
+top of the lease timing; the limit stops that wait growing without bound.
+Real components are far smaller, so this is headroom and not a target.
 
 Admission's limit is `max_module_bytes` in its policy, 64 MiB by default and
 compiled into the admission module. An admission module built before this
@@ -440,19 +454,34 @@ limit rose still rejects modules over 8 MiB with `module_too_large` until
 
 Measured on a GitHub Actions runner with one broker and one replica, by
 `FELIXD_MEASURE_MODULES=1 cargo test -p felixd --test module_size --
---nocapture`. Times vary between runs; the first put into a new cache is slower
-than later ones (1 MiB was the first put).
+--nocapture`. Times vary between runs. The chunked rows read and wrote one
+chunk at a time; the build described above does four at a time, so it should
+be faster, but that was not re-measured.
 
-| Size | One cache value: put | get | Through `module_store`: put | fetch |
-|---|---|---|---|---|
-| 1 MiB | 1.7 to 2.2 s | 30 to 40 ms | 1.9 s | 55 ms |
-| 5 MiB | 0.20 to 0.33 s | 120 to 150 ms | 0.57 s | 0.35 s |
-| 20 MiB | refused after 0.7 to 1.1 s | | 2.2 s | 1.4 s |
-| 64 MiB | | | 7.2 s | 4.5 s |
+One cache value, written with a single put:
 
-A 20 MiB value does not store at all: Felix drops the connection instead of
-answering with a clear error ([#196](https://github.com/GetFelix/felixd/issues/196)).
-Chunking is therefore the only way to hold a module that large.
+| Size | put | get |
+|---|---|---|
+| 1 MiB | 1.7 to 2.2 s | 30 to 40 ms |
+| 5 MiB | 0.20 to 0.33 s | 120 to 150 ms |
+| 20 MiB | refused after 0.7 to 1.1 s | |
+
+The first put into a new cache pays for setting it up, which is why 1 MiB is
+slower than 5 MiB. The 20 MiB put started sending before the broker stopped it,
+so the refusal takes as long as it takes to push part of the value; Felix
+drops the connection instead of answering with a clear error
+([#196](https://github.com/GetFelix/felixd/issues/196)).
+
+A chunked module, through `module_store`:
+
+| Size | put | fetch |
+|---|---|---|
+| 20 MiB | 2.2 s | 1.4 s |
+| 64 MiB | 7.2 s | 4.5 s |
+
+Takeaway: values up to 5 MiB store in a fraction of a second, a 20 MiB value
+does not store at all, and a module of any size up to 64 MiB takes a few
+seconds to upload and about 70 ms per MiB to read back.
 
 ## Pipelines
 
@@ -1676,7 +1705,7 @@ now:
    Built: a separate credential a node is given, granted as in
    [Grants](#grants); binding it by name in the spec is #97.
 5. **Modules stay in the `modules` cache**, uploaded by hash, in chunks above
-   4 MiB ([Modules](#modules)). The store is content-addressed, so a submitter
+   8 MiB ([Modules](#modules)). The store is content-addressed, so a submitter
    cannot overwrite another's module, and binaries stay off the log. Admission
    verifies presence, size and hash, reading the chunks of a large module.
 6. **`felixd run` is a thin client:** it uploads the module, publishes the
@@ -1832,7 +1861,7 @@ chunk store (#77):
   per-tenant secret. Two tenants storing the same bytes get different
   addresses, so the store leaks no equality across tenants, and deleting a
   tenant's key and chunks removes its data.
-- Modules over 4 MiB are already cut into hashed chunks in the `modules` cache
+- Modules over 8 MiB are already cut into hashed chunks in the `modules` cache
   ([Modules](#modules), #21). This store would share those chunks across
   modules and free them by reference count.
 

@@ -305,14 +305,13 @@ needs an operator). A spec without `limits` gets the defaults. A failed spec
   A mark in a format this build does not know still counts as a drain.
 
 The `modules` cache holds the module bytes themselves, not this JSON. The key is the module's hex
-sha256. A module of at most 4 MiB is stored whole under it, raw WebAssembly, which starts with
+sha256. A module of at most 8 MiB, the most a build before chunking stored, is stored whole under it, raw WebAssembly, which starts with
 `\0asm`. A larger one is cut into chunks of 4 MiB (the last may be shorter) under `<sha256>/<n>`
 from `n` = 0, and the key holds a manifest, JSON that starts with `{`:
 `{"format": 1, "bytes": <module length>, "chunks": [<sha256 of each chunk>, ...]}`. A reader
 refuses a manifest of another format, of more than 64 MiB, or whose chunk count does not fit its
 length, then checks each chunk's length and hash, and the joined bytes against the key. A writer
-stores the chunks first and the manifest last. A whole value over 4 MiB, from a build before
-chunking, still reads.
+stores the chunks first and the manifest last. A manifest for a module of 8 MiB or less is refused, so each module has one representation.
 
 ## The resume fold
 

@@ -11,11 +11,14 @@ mod common;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use common::{ID, INPUT, OUTPUT, assert_uninterrupted, replication_factor, test_felix};
+use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, replication_factor, test_felix};
 use felixd_agent::admin::{StreamKind, ensure_cache, ensure_stream};
+use felixd_agent::felix::Lookup;
 use felixd_agent::module_store::{self, Fetched};
+use felixd_core::class::OperatorReason;
 use felixd_core::module::{self, CHUNK_BYTES, Corrupt};
 use felixd_core::names;
+use felixd_core::spec::{Limits, WorkloadSpec, WorkloadState};
 
 const MIB: usize = 1 << 20;
 
@@ -176,7 +179,7 @@ async fn a_corrupt_or_missing_chunk_is_an_error_and_a_re_put_repairs_it() {
     assert_eq!(module_store::put(felix, &module).await.unwrap(), key);
 
     // A manifest whose chunks were never written is missing them, not a panic.
-    let lone = counter_of(CHUNK_BYTES + 4000);
+    let lone = counter_of(2 * CHUNK_BYTES + 4000);
     let lone_key = module::hash(&lone);
     let parts = module::split(&lone);
     felix
@@ -221,5 +224,93 @@ async fn measure_stored_modules() {
         let get_took = started.elapsed();
         let intact = matches!(&fetched, Fetched::Found(found) if found[..] == module[..]);
         println!("MEASURE module {mib} MiB put {put_took:?} fetch {get_took:?} intact {intact}");
+    }
+}
+
+/// A workload spec running `module` on `INPUT`, with its streams created.
+async fn spec_for(t: &common::TestFelix, module: &[u8]) -> WorkloadSpec {
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    for stream in [INPUT, OUTPUT, SNAPSHOTS] {
+        ensure_stream(&t.settings, stream, kind).await.unwrap();
+    }
+    WorkloadSpec {
+        module: module::hash(module),
+        inputs: vec![INPUT.into()],
+        output: OUTPUT.into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        keep_snapshots: None,
+        state: WorkloadState::Running,
+        limits: Limits::default(),
+        failure: None,
+        record: None,
+    }
+}
+
+/// A chunk that is gone is the missing-module reason, which waits for an
+/// operator like a module that was never uploaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_leaves_a_module_with_a_missing_chunk_to_an_operator() {
+    let Some(t) = test_felix().await else { return };
+    // Another workload, so the caches exist.
+    t.submit_as("other", "window", &[]).await;
+    let module = counter_of(9 * MIB);
+    let key = module_store::put(&t.felix, &module).await.unwrap();
+    t.felix
+        .cache_delete(names::MODULES, &module::chunk_key(&key, 2))
+        .await
+        .unwrap();
+    t.put_spec(&spec_for(&t, &module).await).await;
+    let _agent = t.start_agent();
+    t.publish_all(INPUT, [count(0)]).await;
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::ModuleMissing
+    );
+    assert!(t.outputs(OUTPUT).await.is_empty());
+}
+
+/// A chunk that is wrong is not run: the workload fails, as for any module
+/// that does not match its hash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_fails_a_workload_whose_module_has_a_corrupt_chunk() {
+    let Some(t) = test_felix().await else { return };
+    t.submit_as("other", "window", &[]).await;
+    let module = counter_of(9 * MIB);
+    let key = module_store::put(&t.felix, &module).await.unwrap();
+    let mut flipped = module[CHUNK_BYTES..2 * CHUNK_BYTES].to_vec();
+    flipped[9] ^= 1;
+    t.felix
+        .cache_put(names::MODULES, &module::chunk_key(&key, 1), flipped.into())
+        .await
+        .unwrap();
+    t.put_spec(&spec_for(&t, &module).await).await;
+    let _agent = t.start_agent();
+    t.publish_all(INPUT, [count(0)]).await;
+    let why = t.failure().await;
+    assert!(why.contains("chunk 1 of module"), "{why}");
+    assert!(t.outputs(OUTPUT).await.is_empty());
+}
+
+/// `felixd run` refuses a module over the limit before it creates anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn felixd_run_refuses_a_module_over_the_limit_and_creates_nothing() {
+    let Some(t) = test_felix().await else { return };
+    ensure_stream(
+        &t.settings,
+        INPUT,
+        StreamKind {
+            replication_factor: replication_factor(),
+        },
+    )
+    .await
+    .unwrap();
+    let module = counter_of(module::MAX_MODULE_BYTES as usize + 1);
+    assert!(!t.run(ID, &module, INPUT, &[]).success());
+    for cache in [names::MODULES, names::WORKLOADS] {
+        let found = t.felix.cache_lookup(cache, ID).await.unwrap();
+        assert_eq!(found, Lookup::NoCache, "{cache} was created");
     }
 }

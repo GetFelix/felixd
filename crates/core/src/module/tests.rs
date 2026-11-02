@@ -271,7 +271,13 @@ fn read_back(key: &str, head: &[u8], chunks: &[(String, &[u8])]) -> Result<Vec<u
 
 #[test]
 fn a_module_up_to_one_chunk_is_stored_whole() {
-    for len in [4, 1000, CHUNK_BYTES - 1, CHUNK_BYTES] {
+    for len in [
+        4,
+        1000,
+        CHUNK_BYTES + 1,
+        MAX_WHOLE_BYTES - 1,
+        MAX_WHOLE_BYTES,
+    ] {
         let module = wasm(len);
         let laid = split(&module);
         assert!(laid.chunks.is_empty(), "{len}");
@@ -284,10 +290,10 @@ fn a_module_up_to_one_chunk_is_stored_whole() {
 fn a_module_over_one_chunk_is_split_and_joins_back() {
     // Just over, a full chunk and a sliver, and several chunks.
     for len in [
-        CHUNK_BYTES + 1,
-        2 * CHUNK_BYTES - 1,
-        2 * CHUNK_BYTES,
-        2 * CHUNK_BYTES + 1,
+        MAX_WHOLE_BYTES + 1,
+        3 * CHUNK_BYTES - 1,
+        3 * CHUNK_BYTES,
+        3 * CHUNK_BYTES + 1,
         5 * CHUNK_BYTES + 12345,
     ] {
         let module = wasm(len);
@@ -312,7 +318,7 @@ fn a_module_over_one_chunk_is_split_and_joins_back() {
 
 #[test]
 fn chunk_keys_are_the_module_key_and_an_index() {
-    let module = wasm(2 * CHUNK_BYTES + 1);
+    let module = wasm(MAX_WHOLE_BYTES + 1);
     let key = hash(&module);
     let keys: Vec<_> = split(&module).chunks.into_iter().map(|(k, _)| k).collect();
     assert_eq!(
@@ -325,7 +331,7 @@ fn chunk_keys_are_the_module_key_and_an_index() {
 fn a_manifest_is_told_from_wasm_by_its_first_bytes() {
     let small = wasm(100);
     assert_eq!(read_head(&hash(&small), &small), Ok(Head::Whole));
-    let big = wasm(CHUNK_BYTES + 1);
+    let big = wasm(MAX_WHOLE_BYTES + 1);
     let laid = split(&big);
     assert!(!laid.head.starts_with(b"\0asm"));
     assert!(matches!(
@@ -337,13 +343,13 @@ fn a_manifest_is_told_from_wasm_by_its_first_bytes() {
 #[test]
 fn a_whole_module_larger_than_a_chunk_still_reads() {
     // Written before chunking, up to the old 8 MiB limit.
-    let module = wasm(7 << 20);
+    let module = wasm(MAX_WHOLE_BYTES);
     assert_eq!(read_head(&hash(&module), &module), Ok(Head::Whole));
 }
 
 #[test]
 fn a_value_that_is_neither_is_corrupt() {
-    for value in [&b""[..], b"hello", b"{", b"[1,2]", b"{\"format\":1}"] {
+    for value in [&b""[..], b"hello", b"{", b"[1,2]", b"{}"] {
         assert!(matches!(
             read_head("abc", value),
             Err(Corrupt::NotAModule(_))
@@ -380,7 +386,7 @@ fn a_flipped_byte_in_a_chunk_is_found() {
 
 #[test]
 fn a_short_or_long_chunk_is_found_by_length() {
-    let module = wasm(2 * CHUNK_BYTES + 5);
+    let module = wasm(3 * CHUNK_BYTES + 5);
     let key = hash(&module);
     let laid = split(&module);
     let Ok(Head::Chunked(manifest)) = read_head(&key, &laid.head) else {
@@ -397,10 +403,10 @@ fn a_short_or_long_chunk_is_found_by_length() {
         })
     );
     assert_eq!(
-        manifest.check_chunk(&key, 2, laid.chunks[1].1),
+        manifest.check_chunk(&key, 3, laid.chunks[1].1),
         Err(Corrupt::ChunkLength {
             hash: key.clone(),
-            n: 2,
+            n: 3,
             found: CHUNK_BYTES,
             expected: 5
         })
@@ -409,7 +415,7 @@ fn a_short_or_long_chunk_is_found_by_length() {
 
 #[test]
 fn chunks_of_another_module_do_not_join_under_this_key() {
-    let a = wasm(2 * CHUNK_BYTES);
+    let a = wasm(3 * CHUNK_BYTES);
     let mut b = a.clone();
     b[CHUNK_BYTES + 1] ^= 0xff;
     let (la, lb) = (split(&a), split(&b));
@@ -432,16 +438,25 @@ fn a_manifest_that_lies_or_is_from_the_future_is_refused() {
     let key = hash(b"x");
     let bad = |json: &str| read_head(&key, json.as_bytes()).unwrap_err();
     assert!(matches!(
-        bad(r#"{"format":2,"bytes":5242880,"chunks":["a","b"]}"#),
+        bad(r#"{"format":2,"bytes":9437184,"chunks":["a","b","c"]}"#),
+        Corrupt::UnknownFormat { format: 2, .. }
+    ));
+    // A later format may change the shape; it is still told from junk.
+    assert!(matches!(
+        bad(r#"{"format":2,"parts":{"a":1}}"#),
         Corrupt::UnknownFormat { format: 2, .. }
     ));
     for json in [
         // Wrong chunk count for the length.
-        r#"{"format":1,"bytes":5242880,"chunks":["a"]}"#,
-        r#"{"format":1,"bytes":5242880,"chunks":["a","b","c"]}"#,
-        // Empty, and over the limit.
+        r#"{"format":1,"bytes":9437184,"chunks":["a","b"]}"#,
+        r#"{"format":1,"bytes":9437184,"chunks":["a","b","c","d"]}"#,
+        // For a module that is stored whole, and over the limit.
+        r#"{"format":1,"bytes":5242880,"chunks":["a","b"]}"#,
+        r#"{"format":1,"bytes":8388608,"chunks":["a","b"]}"#,
         r#"{"format":1,"bytes":0,"chunks":[]}"#,
         r#"{"format":1,"bytes":67108865,"chunks":[]}"#,
+        // The right format and the wrong shape.
+        r#"{"format":1}"#,
     ] {
         assert!(matches!(bad(json), Corrupt::Manifest { .. }), "{json}");
     }
