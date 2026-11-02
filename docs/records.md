@@ -45,7 +45,8 @@ that claim's owner refused its spec. A needs-operator record after the last clai
 to its spec record too, since it can be written with no claim. A degraded record does not. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
 judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
-run a spec whose module or input differ from the one the stream's first claim names, or whose
+run a spec whose module or input differ from the one the stream's first claim names (a trim
+record carries it once that claim is gone), or whose
 record is below the floor. Needs-operator records before the first claim, whatever their reason, ran nothing and are passed
 over when finding it. A failure, kind 5, continues with:
 
@@ -156,9 +157,10 @@ before it, so upgrade every node before a workload can write them, or run the ne
 `--stuck-after-ms 0`, which stops it writing kind 8. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
-([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start
-while the records are there. Its holder appends it after a snapshot of its own when the spec sets
-`keep_snapshots`, with `publish_if` at the tail like an output. It continues with:
+([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names, and
+`felixd replay` reads from the start while the records are there. Its holder appends it after
+a snapshot of its own when the spec sets `keep_snapshots`, with `publish_if` at the tail like an
+output. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -169,9 +171,29 @@ while the records are there. Its holder appends it after a snapshot of its own w
 | 2 | input count |
 | 8 each | per input, in the spec's order, this workload's floor: the record the step read with one input; the entry's `next`, lowered to the entry's own record, with several |
 
-Bytes after the last floor are refused. Readers pass over a trim like a claim, and only its epoch is
-checked. Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's:
-an input shared with other readers is deleted only below all of theirs (#150).
+The body may end there, or continue with what a deleted head of `.out` would take with it:
+
+| Bytes | Field |
+|---|---|
+| 1 | flags: 1 if a first spec follows, 2 if a claimed spec follows, 3 for both; no other value |
+| 8 | the first spec: the `sys.specs` offset the stream's first claim names, copied unchanged from the trim before it. Present only with flag 1 |
+| 8 | the claimed spec: the highest spec record claimed on the stream up to this record, the floor a claim written here would carry. Present only with flag 2 |
+
+A body that ends at the floors carries neither. The first trim writes the first spec, read from the
+first claim, and every later trim copies it; the claimed spec is read from the stream at each trim.
+A flags byte of 0 or above 3, and bytes past the fields the flags name, are refused, so a later layout is not misread as this one. Readers pass over a trim like a claim, and only its epoch is checked, apart from the two
+uses of these fields:
+
+- The first spec says what module and input the stream was written under once the first claim is
+  gone: the oldest record Felix keeps may then be a trim, or an output with a trim after it, and the
+  reader takes the first claim or trim it finds there (see "Spec lineage" in
+  [design.md](design.md#retention)). Every claim's spec has the first claim's module and input,
+  because an owner refuses one that differs.
+- The claimed spec stands in for the last claim when a reader walks back from the tail for the highest
+  spec claimed, so a stale node is still refused when the claims are gone.
+
+Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's: an input
+shared with other readers is deleted only below all of theirs (#150).
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,

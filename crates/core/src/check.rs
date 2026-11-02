@@ -220,6 +220,18 @@ pub enum Finding {
 /// order, against what a replay produced. `complete` says the stream should
 /// already hold every replayed output.
 pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) -> Vec<Finding> {
+    check_after(expected, records, complete, None)
+}
+
+/// As [`check`] for `records` that are the tail of the stream, after records
+/// whose highest epoch was `epoch_before`, so a regression at the first of
+/// them is found.
+pub fn check_after(
+    expected: &[Expected],
+    records: &[(u64, &[u8])],
+    complete: bool,
+    epoch_before: Option<u64>,
+) -> Vec<Finding> {
     let position: HashMap<OutputHeader, usize> = expected
         .iter()
         .enumerate()
@@ -229,7 +241,7 @@ pub fn check(expected: &[Expected], records: &[(u64, &[u8])], complete: bool) ->
     let mut findings = Vec::new();
     // The furthest replayed output found so far, and the last epoch.
     let mut furthest: Option<usize> = None;
-    let mut last_epoch: Option<u64> = None;
+    let mut last_epoch = epoch_before;
     for &(offset, record) in records {
         let decoded = match output::decode(record) {
             Ok(decoded) => decoded,
@@ -360,6 +372,26 @@ pub fn check_snapshots(
 /// for each record in offset order, its offset and append time.
 pub type InputRecords<'a> = (&'a str, Vec<(u64, u64)>);
 
+/// Where a merge log check that starts after a snapshot begins: the epoch
+/// that wrote the log record at the snapshot's step, and each input's next
+/// offset as of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeStart {
+    pub epoch: u64,
+    pub next: Vec<u64>,
+}
+
+impl MergeStart {
+    /// The start a merge log `record` gives, if it decodes.
+    pub fn of(record: &[u8]) -> Option<MergeStart> {
+        let decoded = merge::decode(record).ok()?;
+        Some(MergeStart {
+            epoch: decoded.epoch(),
+            next: decoded.next().to_vec(),
+        })
+    }
+}
+
 /// Checks a merge log, as `(offset, record)` in offset order, against
 /// `inputs`, read after the log. Every record of every input must be merged
 /// once, in its input's order, with its own append time; each record's next
@@ -371,12 +403,28 @@ pub fn check_merge(
     inputs: &[InputRecords<'_>],
     complete: bool,
 ) -> Vec<Finding> {
+    check_merge_from(records, inputs, complete, None)
+}
+
+/// As [`check_merge`] for a log checked from after a snapshot's step: with
+/// `start`, `records` are the ones after that step and each input's records
+/// are the ones from its next offset there on. The epoch at the step is
+/// taken to have claimed.
+pub fn check_merge_from(
+    records: &[(u64, &[u8])],
+    inputs: &[InputRecords<'_>],
+    complete: bool,
+    start: Option<&MergeStart>,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     // For each input, how many of its records are merged, and its next offset.
     let mut merged = vec![0; inputs.len()];
-    let mut next = vec![0; inputs.len()];
-    let mut last_epoch: Option<u64> = None;
-    let mut claimed: Option<u64> = None;
+    let mut next = match start {
+        Some(start) if start.next.len() == inputs.len() => start.next.clone(),
+        _ => vec![0; inputs.len()],
+    };
+    let mut last_epoch = start.map(|s| s.epoch);
+    let mut claimed = last_epoch;
     for &(offset, record) in records {
         let decoded = match merge::decode(record) {
             Ok(decoded) => decoded,
@@ -637,6 +685,14 @@ pub fn specs_applied<'a>(
                 if let Some(written) = found.written() {
                     next_input = next_input.max(written.header.input_offset + 1);
                 }
+                // Every input up to the trim's step was stepped, outputs or
+                // not, which matters once the records that show it are gone.
+                // Its floor stands in for the claims it was written after, which
+                // may be gone: a later claim of an older spec was refused.
+                if let Some(trim) = found.trim() {
+                    next_input = next_input.max(trim.step + 1);
+                    floor = floor.max(trim.claimed.unwrap_or(0));
+                }
             }
             Err(_) => {}
         }
@@ -660,18 +716,21 @@ pub fn judged_under<'a, R>(
 where
     R: IntoIterator<Item = &'a [u8]> + Clone,
 {
-    let first = records
-        .clone()
-        .into_iter()
-        .filter_map(|r| output::decode(r).ok())
-        .find(|r| !r.precedes_claims());
-    let lineage = match first {
-        Some(Record::Claim {
-            spec: Some(spec), ..
-        }) => claimed.get(&spec).cloned(),
-        _ => None,
-    }
-    .unwrap_or_else(|| cached.clone());
+    let lineage = lineage_of(records.clone(), false);
+    judged_from(cached, claimed, lineage, records)
+}
+
+/// As [`judged_under`], with the spec record the stream was written under
+/// given, as [`lineage_of`] finds it. `claimed` holds it too.
+pub fn judged_from<'a>(
+    cached: &WorkloadSpec,
+    claimed: &HashMap<u64, WorkloadSpec>,
+    lineage: Option<u64>,
+    records: impl IntoIterator<Item = &'a [u8]>,
+) -> (WorkloadSpec, Vec<(u64, Limits)>) {
+    let lineage = lineage
+        .and_then(|spec| claimed.get(&spec).cloned())
+        .unwrap_or_else(|| cached.clone());
     let ran = |spec: u64| {
         claimed
             .get(&spec)
@@ -684,13 +743,32 @@ where
     (lineage, limits)
 }
 
-/// Every spec the claims on an output stream name, in stream order, once each.
+/// The spec record the module and input of an output stream were set by: the
+/// first record that is not a needs-operator record, if it is a claim or a
+/// trim record that names one. With `cut`, the stream's head is gone and
+/// `records` start at the oldest one Felix keeps, so the first claim or trim
+/// record that names a spec stands in: owners refuse a spec with another
+/// module or input than the first claim's, so any claim's has the same.
+pub fn lineage_of<'a>(records: impl IntoIterator<Item = &'a [u8]>, cut: bool) -> Option<u64> {
+    let mut decoded = records
+        .into_iter()
+        .filter_map(|r| output::decode(r).ok())
+        .skip_while(Record::precedes_claims);
+    let first = decoded.next()?;
+    match first.names_spec() {
+        Some(spec) => Some(spec),
+        None if cut => decoded.find_map(|r| r.names_spec()),
+        None => None,
+    }
+}
+
+/// Every spec the claims on an output stream name, and a trim record's first
+/// claim's, in stream order, once each.
 pub fn specs_claimed<'a>(records: impl IntoIterator<Item = &'a [u8]>) -> Vec<u64> {
     let mut claimed = Vec::new();
     for record in records {
-        if let Ok(Record::Claim {
-            spec: Some(spec), ..
-        }) = output::decode(record)
+        if let Ok(found) = output::decode(record)
+            && let Some(spec) = found.names_spec()
             && !claimed.contains(&spec)
         {
             claimed.push(spec);
