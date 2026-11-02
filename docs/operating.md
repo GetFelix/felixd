@@ -53,12 +53,11 @@ export FELIX_BROKERS=10.0.0.11:5000 FELIX_AUTH_TENANT=acme \
 felixd agent --node-id node-1 --lease-ttl-ms 10000
 ```
 
-An agent runs until it is interrupted. On SIGINT (Ctrl-C) it stops its workloads and deletes
-its leases, so other nodes take over at once. It does not handle SIGTERM, which a container
-runtime ignores for a process running as PID 1 (so `docker stop` waits for its timeout and then
-kills it) and which systemd treats as a kill. Either way its leases wait out the TTL. Either
-[drain](#upgrade-or-retire-a-node) the node first, or make your supervisor send SIGINT
-(`stop_signal: SIGINT` in Compose, `KillSignal=SIGINT` in systemd).
+An agent runs until it is stopped. On SIGINT (Ctrl-C) or SIGTERM, which `docker stop` and
+`systemctl stop` send, it stops its workloads and deletes its leases, so other nodes take over
+at once. A SIGKILL, or a supervisor timeout that ends in one, skips that, and the leases wait
+out the TTL. [Drain](#upgrade-or-retire-a-node) the node first if you want its workloads moved
+before the process goes.
 
 If the agent exits, restart it. A restarted agent does not adopt the leases it held before,
 which makes two processes with the same `--node-id` safe; it waits for them to expire.
@@ -174,15 +173,19 @@ elsewhere in about one TTL, plus up to `--claim-delay-ms` and the replay since t
 capacity when one fails: the survivors must have room for its workloads, or they stay
 `waiting`. Keep the sum of the survivors' caps above the total.
 
-**Cluster size.** The scale test measures how many workloads a cluster carries; see
-[Scale](design.md#scale).
+**Cluster size.** Plan for hundreds of workloads on a three-broker cluster, not thousands. The
+numbers differ by Felix version, so read [Scale](design.md#scale) for yours before you go
+past a few hundred.
 
 **Replication.** Use `--replication-factor 3` on `run` and `init` against three brokers. The
 default is 3; 1 is for a single broker.
 
 **Snapshots.** `run --snapshot-every` (1000 inputs by default) and `--snapshot-every-ms` bound
 how much a new owner replays after a failover. `--keep-snapshots K` lets the history before the
-oldest of K snapshots be trimmed.
+oldest of K snapshots be deleted. Deleting needs a Felix fleet that has finalized `head_trim`
+and node tokens with `stream.trim`, which is off by default because it lets any node erase any
+stream in the namespace: run `felixd init --grant-trim` to turn it on
+([design.md](design.md#retention)). Without it the workload runs on and keeps its history.
 
 **Modules.** A module can be up to 64 MiB; one over 8 MiB is stored in chunks
 ([design.md](design.md#modules)).
