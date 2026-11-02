@@ -406,8 +406,8 @@ async fn a_replay_of_admission_matches_and_lists_what_a_policy_change_decides_ot
     );
 
     // A policy that lists other requesters decides every recorded request
-    // differently, because the replay gives it each request's stored
-    // publisher.
+    // differently. That the replay hands a policy each request's stored
+    // publisher is shown by the default-policy diff above matching.
     let listed = felixd_testkit::workload("admission-requesters");
     let hash = module::hash(&listed);
     t.felix
