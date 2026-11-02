@@ -5,9 +5,11 @@
 //! hold them all, and then kills an agent and a broker in turn.
 //!
 //! Skipped unless `FELIXD_SCALE_COUNT` is set; the `Scale` workflow sets it.
-//! `FELIXD_SCALE_OUT` is the directory for `scale-<N>.json` and
-//! `scale-<N>.row.md` (default `.`) and `FELIXD_SCALE_TIMEOUT_SECS` bounds
-//! each phase (default 1200). It also needs what `cluster.rs` needs:
+//! `FELIXD_SCALE_OUT` is the directory for `scale-<N>-ttl<T>.json` and
+//! `scale-<N>-ttl<T>.row.md` (default `.`). `FELIXD_SCALE_TIMEOUT_SECS` bounds
+//! creating and starting the workloads (default 1200), `FELIXD_SCALE_FAILOVER_SECS`
+//! each later phase (default 300), and `FELIXD_SCALE_LEASE_TTL_SECS` is the
+//! agents' lease TTL (default 10). It also needs what `cluster.rs` needs:
 //! `FELIXD_CLUSTER` and `FELIX_OPERATOR_TOKEN_FILE`.
 
 mod common;
@@ -15,8 +17,8 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -25,7 +27,7 @@ use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::felix::Felix;
 use felixd_agent::settings::Settings;
 use felixd_agent::submit::{Submission, submit};
-use felixd_core::lease::{DEFAULT_TTL, Lease};
+use felixd_core::lease::{DEFAULT_TTL, Lease, decode_epoch};
 use felixd_core::{names, output};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -52,6 +54,8 @@ fn secs(since: Instant) -> f64 {
 struct Report {
     dir: PathBuf,
     n: usize,
+    /// Names the result files.
+    tag: String,
     body: serde_json::Map<String, Value>,
     peak: BTreeMap<String, f64>,
 }
@@ -90,10 +94,10 @@ impl Report {
     }
 
     fn save(&self) {
-        let path = self.dir.join(format!("scale-{}.json", self.n));
+        let path = self.dir.join(format!("scale-{}.json", self.tag));
         let text = serde_json::to_string_pretty(&self.body).unwrap();
         std::fs::write(path, text + "\n").unwrap();
-        let path = self.dir.join(format!("scale-{}.row.md", self.n));
+        let path = self.dir.join(format!("scale-{}.row.md", self.tag));
         std::fs::write(path, self.row()).unwrap();
     }
 
@@ -119,8 +123,9 @@ impl Report {
             max.map_or("no".to_owned(), |mb| format!("{mb:.0} MiB"))
         };
         format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {}s | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             self.n,
+            get("lease_ttl_secs").map_or("no".to_owned(), |v| v.to_string()),
             get("streams.total").map_or("no".to_owned(), |v| v.to_string()),
             number("create.secs", " s"),
             number("running.secs", " s"),
@@ -142,6 +147,14 @@ struct Memory {
     agents: BTreeMap<String, f64>,
     /// Space in use on the runner's disk, in MiB.
     disk_used_mb: Option<f64>,
+    /// Each container's processor use since docker's last reading, in percent
+    /// of one processor.
+    container_cpu: BTreeMap<String, f64>,
+    /// Each agent's processor use since the previous sample, in percent of
+    /// one processor.
+    agent_cpu: BTreeMap<String, f64>,
+    /// The runner's one-minute load average.
+    load: Option<f64>,
 }
 
 impl Memory {
@@ -150,6 +163,8 @@ impl Memory {
             "containers": self.containers,
             "agents": self.agents,
             "disk_used_mb": self.disk_used_mb,
+            "cpu_percent": {"containers": self.container_cpu, "agents": self.agent_cpu},
+            "load": self.load,
         })
     }
 }
@@ -213,23 +228,31 @@ fn sample_memory(agents: &[Agent]) -> Memory {
             "stats",
             "--no-stream",
             "--format",
-            "{{.Name}}|{{.MemUsage}}",
+            "{{.Name}}|{{.MemUsage}}|{{.CPUPerc}}",
         ])
         .output();
-    let mut containers = BTreeMap::new();
+    let (mut containers, mut container_cpu) = (BTreeMap::new(), BTreeMap::new());
     if let Ok(out) = stats {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Some((name, usage)) = line.split_once('|') else {
+            let mut fields = line.split('|');
+            let (Some(name), Some(usage), Some(cpu)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
                 continue;
             };
             let used = usage.split('/').next().and_then(parse_size);
+            let cpu = cpu.trim().trim_end_matches('%').parse::<f64>().ok();
             if let (Some(service), Some(mb)) = (service_of(name), used) {
-                containers.insert(service, mb);
+                containers.insert(service.clone(), mb);
+                container_cpu.extend(cpu.map(|c| (service, c)));
             }
         }
     }
-    let mut resident = BTreeMap::new();
+    let (mut resident, mut agent_cpu) = (BTreeMap::new(), BTreeMap::new());
     for agent in agents {
+        if let Some(cpu) = process_cpu(agent.pid()) {
+            agent_cpu.insert(format!("agent-{}", agent.node_id), cpu);
+        }
         let out = Command::new("ps")
             .args(["-o", "rss=", "-p", &agent.pid().to_string()])
             .output();
@@ -248,11 +271,34 @@ fn sample_memory(agents: &[Agent]) -> Memory {
         let text = String::from_utf8_lossy(&o.stdout).into_owned();
         text.lines().nth(1)?.split_whitespace().nth(2)?.parse().ok()
     });
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|l| l.split_whitespace().next()?.parse().ok());
     Memory {
         containers,
         agents: resident,
         disk_used_mb,
+        container_cpu,
+        agent_cpu,
+        load,
     }
+}
+
+/// A process's processor use since this was last called for it, in percent
+/// of one processor. Linux only, and `None` the first time.
+fn process_cpu(pid: u32) -> Option<f64> {
+    static LAST: Mutex<BTreeMap<u32, (Instant, u64)>> = Mutex::new(BTreeMap::new());
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields 14 and 15 are user and system time in clock ticks (100 a second);
+    // the command name in field 2 may hold spaces, so count from its end.
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace().skip(11);
+    let ticks: u64 = fields.next()?.parse::<u64>().ok()? + fields.next()?.parse::<u64>().ok()?;
+    let now = Instant::now();
+    let before = LAST.lock().unwrap().insert(pid, (now, ticks))?;
+    let seconds = now.duration_since(before.0).as_secs_f64();
+    let percent = (ticks - before.1) as f64 / seconds;
+    Some((percent * 10.0).round() / 10.0)
 }
 
 /// The runner: processors and memory in MiB.
@@ -270,7 +316,10 @@ fn runner() -> Value {
 
 /// Every shard assignment of the test's namespaces.
 async fn assignments(t: &TestFelix) -> Result<Vec<Value>> {
-    let url = format!("{}/v1/shard-assignments", t.settings.controlplane_url);
+    let url = format!(
+        "{}/v1/shard-assignments/snapshot",
+        t.settings.controlplane_url
+    );
     let file = std::env::var("FELIX_OPERATOR_TOKEN_FILE")?;
     let token = std::fs::read_to_string(file)?.trim().to_owned();
     let body: Value = tokio::task::spawn_blocking(move || -> Result<Value> {
@@ -527,19 +576,40 @@ impl Run<'_> {
     }
 }
 
+/// The lease TTL the agents run with: `FELIXD_SCALE_LEASE_TTL_SECS`, the
+/// default 10 s if unset.
+fn lease_ttl() -> Duration {
+    std::env::var("FELIXD_SCALE_LEASE_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(DEFAULT_TTL, Duration::from_secs)
+}
+
 fn start(t: &TestFelix, node: &str, max: usize) -> Agent {
     let max = max.to_string();
     let args = ["--max-workloads", &max];
-    t.start_node_with_args(node, "", DEFAULT_TTL, &args)
+    t.start_node_with_args(node, "", lease_ttl(), &args)
+}
+
+fn seconds_from(name: &str, default: u64) -> Duration {
+    let secs = std::env::var(name).ok().and_then(|s| s.parse().ok());
+    Duration::from_secs(secs.unwrap_or(default))
+}
+
+/// The sum of every workload's last lease epoch, which is how many claims
+/// have won so far.
+async fn claims(felix: &Felix) -> Result<u64> {
+    let mut total = 0;
+    for (_, value) in felix.entries(names::EPOCHS).await? {
+        total += decode_epoch(&value)?;
+    }
+    Ok(total)
 }
 
 async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
-    let phase = Duration::from_secs(
-        std::env::var("FELIXD_SCALE_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1200),
-    );
+    // Creating and starting every workload, then each later phase.
+    let build = seconds_from("FELIXD_SCALE_TIMEOUT_SECS", 1200);
+    let phase = seconds_from("FELIXD_SCALE_FAILOVER_SECS", 300);
     let ids: Vec<String> = (0..n).map(|i| format!("w{i}")).collect();
     let module = felixd_testkit::workload("counter");
     let felix = Arc::new(Felix::connect(&t.settings).await?);
@@ -569,7 +639,8 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
     )));
 
     let (mut created, mut running) = (None, None);
-    let mut curve: Vec<(f64, usize)> = Vec::new();
+    let mut curve: Vec<(f64, usize, Option<u64>)> = Vec::new();
+    let (mut full_polls, mut polls, mut claimed) = (0, 0, None);
     let mut last_sample = Instant::now();
     let mut held = 0;
     loop {
@@ -595,15 +666,22 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
         match census(&felix).await {
             Ok(c) => {
                 held = c.held;
-                curve.push((secs(started), held));
-                if held >= n && running.is_none() {
-                    running = Some(secs(started));
+                polls += 1;
+                if polls % 5 == 1 {
+                    claimed = claims(&felix).await.ok();
+                }
+                curve.push((secs(started), held, claimed));
+                // Three polls in a row, so a workload that is lost and
+                // claimed again does not count as running.
+                full_polls = if held >= n { full_polls + 1 } else { 0 };
+                if full_polls == 3 && running.is_none() {
+                    running = Some(secs(started) - 2.0 * POLL.as_secs_f64());
                 }
             }
             Err(error) => eprintln!("lease census: {error:#}"),
         }
         eprintln!(
-            "{:.0}s: {} submitted, {held} running",
+            "{:.0}s: {} submitted, {held} running, {claimed:?} claims",
             secs(started),
             submitted.load(Ordering::Relaxed)
         );
@@ -614,10 +692,10 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
         if created.is_some() && running.is_some() {
             break;
         }
-        if started.elapsed() > phase {
+        if started.elapsed() > build {
             report.note(format!(
                 "after {}s, {} of {n} workloads were submitted and {held} running",
-                phase.as_secs(),
+                build.as_secs(),
                 submitted.load(Ordering::Relaxed)
             ));
             if let Some(creator) = creator.take() {
@@ -696,9 +774,17 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
     found["killed"] = json!(broker);
     found["led"] = json!(share);
     found["publish_secs"] = json!(accepted);
+    let recovered = found["outputs_secs"].is_number();
     report.set("broker_failover", found);
     report.memory("broker_failover", &sample_memory(&agents));
     compose(&["up", "-d", "--wait", &broker])?;
+    if !recovered {
+        // Did the workloads come back once the broker did?
+        let restarted = Instant::now();
+        let mut found = run.recovery(restarted, input, None, None).await;
+        found["after_broker_restart"] = json!(true);
+        report.set("after_restart", found);
+    }
     Ok(())
 }
 
@@ -715,6 +801,7 @@ async fn many_workloads() {
     let mut report = Report {
         dir,
         n,
+        tag: format!("{n}-ttl{}", lease_ttl().as_secs()),
         body: serde_json::Map::new(),
         peak: BTreeMap::new(),
     };
@@ -729,7 +816,7 @@ async fn many_workloads() {
         json!(std::env::var("FELIX_VERSION").unwrap_or_else(|_| "unknown".into())),
     );
     report.set("runner", runner());
-    report.set("lease_ttl_secs", json!(DEFAULT_TTL.as_secs()));
+    report.set("lease_ttl_secs", json!(lease_ttl().as_secs()));
     report.set("replicas", json!(replication_factor()));
     let result = measure(&t, n, &mut report).await;
     if let Err(error) = &result {

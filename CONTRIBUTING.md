@@ -43,6 +43,35 @@ cargo test -p felixd --test cluster --test fence
 plus the other `FELIX_*` variables the README lists. With Podman, set `COMPOSE` and `FELIXD_COMPOSE` to
 `podman compose`. The test leaves the killed broker running again at the end.
 
+## Running the scale test
+
+The `Scale` workflow measures how many workloads one Felix cluster carries. It starts three Felix brokers and
+three felixd agents on the runner, creates N counter workloads, and reports how long that took, how much memory
+the brokers use, and how long recovery takes when an agent and then a broker is killed. It never runs on its own.
+
+```
+gh workflow run scale.yml -R GetFelix/felixd -f counts=1000,10000
+```
+
+Or use "Run workflow" on the Scale page of the Actions tab. `counts` lists the sizes to measure, smallest
+first, each on a fresh cluster. `phase_secs` bounds each phase, and the job gives up after `timeout_minutes`.
+
+When the run ends, its summary page shows one row per count, and the `scale-results` artifact holds
+`scale-<N>.json` with every figure (including the lease census while the workloads started, and memory at each
+phase), plus the end of each container's log. The columns:
+
+- **Streams**: shards created for the namespace (two per workload, plus the shared ones).
+- **Create**: time for N `felixd run` calls, 16 at a time.
+- **All running**: time from the first call until every workload's lease is held by an agent.
+- **First output**: time for every workload to answer one input.
+- **Agent failover**: time from killing the agent holding the most workloads until every workload has answered
+  an input published right after the kill.
+- **Broker failover**: the same, killing the broker that leads the most shards. **Leaders moved** is when the
+  control plane had no shard left on it.
+
+The measurements and what they showed are in [docs/design.md](docs/design.md#scale). The harness is
+`crates/felixd/tests/scale.rs`; it skips unless `FELIXD_SCALE_COUNT` is set, so `cargo test` does not run it.
+
 ## Comments and docs
 
 - Only comment where the code is unclear, such as a constraint the code can't show.
