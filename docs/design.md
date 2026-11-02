@@ -390,6 +390,45 @@ claim covers it: a claim's spec applies from the input after the last output
 before it. A claim its owner refused, under another module or an older
 record, is passed over.
 
+### Modules
+
+A module is a WebAssembly component, named by the sha256 of its bytes. It can
+be up to 64 MiB (`MAX_MODULE_BYTES`). One write to Felix can hold at most 8 MiB
+and Felix refuses a frame over 16 MiB, so a large module cannot be one cache
+value. The `modules` cache stores it like this:
+
+| Module size | Under its sha256 key | Under `<sha256>/<n>` |
+|---|---|---|
+| up to 4 MiB | the module, raw | nothing |
+| over 4 MiB | a manifest: the length and the sha256 of each chunk | chunk `n`, 4 MiB each and a shorter last one |
+
+A reader tells the two apart by the first bytes: WebAssembly starts with
+`\0asm` and a manifest is JSON. It checks every chunk's length and hash as it
+reads it, then the joined bytes against the key, so a missing chunk is an
+error that names it (`chunk 2 of module <sha256> is not in the modules cache`)
+and a wrong one fails the workload as poison. Nothing runs on a module that
+fails a check. Every reader goes through `felixd_agent::module_store::fetch`:
+nodes starting a workload, `felixd check`, `felixd replay` and admission's
+projector.
+
+The writer, `module_store::put`, stores the chunks first and the manifest last,
+so a manifest never names a chunk that was not written. Putting the same
+module again rewrites the same bytes, which also repairs a chunk that was
+lost. A submitter needs write on `modules` as before; the chunks are keys in
+the same cache, so no grant changes.
+
+Why 4 MiB and 64 MiB: a chunk well under the frame limit leaves room for
+framing and keeps one slow write small. 64 MiB is sixteen chunks, far above
+the largest module felixd's examples need and about 20 times the size of the
+largest module measured to compile (TBD).
+
+Admission's limit is `max_module_bytes` in its policy, 64 MiB by default and
+compiled into the admission module. An admission module built before this
+limit rose still rejects modules over 8 MiB with `module_too_large` until
+`felixd init` runs with a newer one.
+
+MEASURED
+
 ## Pipelines
 
 A pipeline is workloads that read each other's `.out`. Nothing about a stage

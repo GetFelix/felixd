@@ -187,3 +187,26 @@ async fn a_module_over_the_limit_is_refused_before_anything_is_stored() {
         "the module is 67108865 bytes, not 1 to 67108864"
     );
 }
+
+/// Times `module_store::put` and `fetch` of modules of several sizes, which
+/// are chunked above 4 MiB. Skipped unless `FELIXD_MEASURE_MODULES` is set.
+#[tokio::test(flavor = "multi_thread")]
+async fn measure_stored_modules() {
+    if std::env::var_os("FELIXD_MEASURE_MODULES").is_none() {
+        eprintln!("skipping: FELIXD_MEASURE_MODULES is not set");
+        return;
+    }
+    let Some(t) = test_felix().await else { return };
+    for (n, mib) in [1, 5, 20, 64].into_iter().enumerate() {
+        let mut module = noise(mib * MIB, 10 + n as u8).to_vec();
+        module[..4].copy_from_slice(b"\0asm");
+        let started = Instant::now();
+        let key = module_store::put(&t.felix, &module).await.unwrap();
+        let put_took = started.elapsed();
+        let started = Instant::now();
+        let fetched = module_store::fetch(&t.felix, &key).await.unwrap();
+        let get_took = started.elapsed();
+        let intact = matches!(&fetched, Fetched::Found(found) if found[..] == module[..]);
+        println!("MEASURE module {mib} MiB put {put_took:?} fetch {get_took:?} intact {intact}");
+    }
+}

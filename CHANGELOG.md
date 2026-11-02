@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Modules over 8 MiB (#21). A module over 4 MiB is stored in the `modules`
+  cache as 4 MiB chunks under `<sha256>/<n>` with a JSON manifest under the
+  module's own key, chunks first and manifest last. Readers (nodes,
+  `felixd check`, `felixd replay`, admission's projector) join the chunks and
+  check each chunk and then the whole against the hash; a missing chunk is the
+  `module missing` needs-operator reason and a wrong one fails the workload
+  as poison. A module up to 4 MiB is stored as before, and an older whole
+  value of any size still reads. Admission's default `max_module_bytes` and
+  `felixd run`'s limit are now 64 MiB, up from 8 MiB. Upgrade every node
+  before submitting a module over 4 MiB, since an older node reads the manifest
+  as a module that does not match its hash. An admission module already
+  running keeps the 8 MiB limit it was built with; the new one is a policy
+  change (replay it with `--diff --module`). New `felixd_agent::module_store`
+  and `felixd_core::module` items; `felixd-testkit` gains `padded`.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and
