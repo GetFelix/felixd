@@ -31,6 +31,7 @@ use crate::module_store::{self, Fetched};
 use crate::output::OutputLog;
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
+use crate::stuck::Progress;
 
 /// A node's runtime, the modules it has compiled, by hash, and the limits on
 /// blocking work.
@@ -321,7 +322,7 @@ fn read_error(error: ReadError) -> anyhow::Error {
 /// Nothing is written once `fence` stops holding.
 ///
 /// An `Err` is a problem with Felix. Calling this again resumes from what is on
-/// the streams.
+/// the streams. `progress` notes each step it takes.
 pub(crate) async fn run_workload(
     felix: &Felix,
     runtime: &Modules,
@@ -329,13 +330,22 @@ pub(crate) async fn run_workload(
     spec: &WorkloadSpec,
     fence: &Fence,
     claim_from: &mut Option<u64>,
+    progress: &Progress,
 ) -> Result<Outcome> {
     // The first input a snapshot may be tried at again after one ran out of
     // fuel. Without it the run that resumes would retry at its first live
     // input and replay the whole gap each time.
     let mut hold = 0;
     let error = loop {
-        let running = run(felix, runtime, id, spec, fence, claim_from, &mut hold);
+        let running = run(
+            felix,
+            runtime,
+            id,
+            spec,
+            fence,
+            claim_from,
+            (&mut hold, progress),
+        );
         match faults::scoped(id, running).await {
             Ok(never) => match never {},
             Err(error) if error.is::<SnapshotSkipped>() => continue,
@@ -388,7 +398,7 @@ async fn run(
     spec: &WorkloadSpec,
     fence: &Fence,
     claim_from: &mut Option<u64>,
-    hold: &mut u64,
+    (hold, progress): (&mut u64, &Progress),
 ) -> Result<Infallible> {
     let spec_version = spec_version(felix, id, spec).await?;
     let spec_record = spec.record.context("the spec names no spec record")?;
@@ -540,6 +550,7 @@ async fn run(
         last_trim,
         metrics: workload_metrics,
         positions,
+        progress,
     };
     match &merge {
         None => steps.position(0, resume.next_input),
@@ -896,6 +907,7 @@ struct Steps<'a> {
     last_trim: Option<Trim>,
     metrics: Option<Arc<WorkloadMetrics>>,
     positions: Vec<Arc<InputMetrics>>,
+    progress: &'a Progress,
 }
 
 impl Steps<'_> {
@@ -960,7 +972,16 @@ impl Steps<'_> {
                 "input {offset} produced {bytes} bytes of output, more than the {MAX_WRITE_BYTES} one write may hold"
             )));
         }
+        let wrote = !batch.is_empty();
         self.log.append(batch).await?;
+        self.progress
+            .stepped(offset, offset >= self.resume.stepped_to(), wrote);
+        if wrote && faults::fail_after_append() {
+            anyhow::bail!("injected: a transient failure after an append");
+        }
+        if faults::fail_after_first_step(offset) {
+            anyhow::bail!("injected: a transient failure after a step");
+        }
 
         self.since_snapshot += 1;
         let due = interval || self.since_snapshot >= self.spec.snapshot_every;

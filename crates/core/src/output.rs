@@ -23,6 +23,10 @@
 //! - Needs operator: `spec (8) | reason code (2) | detail`. No node can run
 //!   the spec record at `spec` until an operator acts. It is the last record
 //!   of that run, and an owner of that spec record that finds it stops.
+//! - Degraded: `spec (8) | class (1) | node length (1) | node | detail`. The
+//!   holder on `node` released the workload after it stayed stuck on an
+//!   error of that class while running the spec record at `spec`. It is an
+//!   observation: nothing stops, and any node may claim after it.
 //! - A rejection: `input_offset (8) | index (4, always 0) | code (4) |
 //!   detail`. It is that input's only output, and is matched, skipped and
 //!   compared like one.
@@ -46,6 +50,7 @@ const CLAIM_UNDER: u8 = 4;
 const CLASSED_FAILURE: u8 = 5;
 const NEEDS_OPERATOR: u8 = 6;
 const TRIM: u8 = 7;
+const DEGRADED: u8 = 8;
 
 /// The name an output gets when the workload gives none, and the one a
 /// downstream workload reads unless its spec says otherwise.
@@ -135,6 +140,16 @@ pub enum Record<'a> {
     /// longer read ([`crate::trim`]). It holds no output. `body` decodes with
     /// [`Record::trim`].
     Trim { epoch: u64, body: &'a [u8] },
+    /// The owner at `epoch`, on node `node`, released the workload because it
+    /// stayed stuck on an error of `class` while running spec record `spec`.
+    /// It holds no output, and no node is kept from claiming after it.
+    Degraded {
+        epoch: u64,
+        spec: u64,
+        class: ErrorClass,
+        node: &'a [u8],
+        detail: &'a [u8],
+    },
 }
 
 impl<'a> Record<'a> {
@@ -145,7 +160,8 @@ impl<'a> Record<'a> {
             Record::Claim { epoch, .. }
             | Record::Failure { epoch, .. }
             | Record::NeedsOperator { epoch, .. }
-            | Record::Trim { epoch, .. } => *epoch,
+            | Record::Trim { epoch, .. }
+            | Record::Degraded { epoch, .. } => *epoch,
         }
     }
 
@@ -175,7 +191,8 @@ impl<'a> Record<'a> {
             Record::Claim { .. }
             | Record::Failure { .. }
             | Record::NeedsOperator { .. }
-            | Record::Trim { .. } => None,
+            | Record::Trim { .. }
+            | Record::Degraded { .. } => None,
         }
     }
 
@@ -191,14 +208,31 @@ impl<'a> Record<'a> {
         }
     }
 
-    /// The spec record a needs-operator record names. Such a record may be
-    /// written with no claim before it, so code that looks for the first
-    /// claim passes over it, and the highest spec claimed counts it.
+    /// The spec record a needs-operator record names. Its writer passed the
+    /// refusals a claimer does, so the highest spec claimed counts it.
     pub fn needs_operator_spec(&self) -> Option<u64> {
         match self {
             Record::NeedsOperator { spec, .. } => Some(*spec),
             _ => None,
         }
+    }
+
+    /// The class, if this records that the holder let go of spec record
+    /// `spec` for being stuck.
+    pub fn degraded_under(&self, spec: u64) -> Option<ErrorClass> {
+        match self {
+            Record::Degraded {
+                spec: found, class, ..
+            } if *found == spec => Some(*class),
+            _ => None,
+        }
+    }
+
+    /// Whether the record can be written with no claim before it, so code
+    /// that looks for the first claim passes over it: a needs-operator
+    /// record, or a holder's degraded record when its claim never landed.
+    pub fn precedes_claims(&self) -> bool {
+        matches!(self, Record::NeedsOperator { .. } | Record::Degraded { .. })
     }
 
     /// The output, unless this is another kind of record.
@@ -325,6 +359,32 @@ pub fn encode_needs_operator(
     out
 }
 
+/// Builds the record a holder at `epoch` on `node` appends when it releases
+/// the workload for being stuck on an error of `class` under spec record
+/// `spec`. A node id past 255 bytes is cut there, at a character boundary.
+pub fn encode_degraded(
+    epoch: u64,
+    spec: u64,
+    class: ErrorClass,
+    node: &str,
+    detail: &str,
+) -> Vec<u8> {
+    let mut end = node.len().min(usize::from(u8::MAX));
+    while !node.is_char_boundary(end) {
+        end -= 1;
+    }
+    let node = &node[..end];
+    let mut out = Vec::with_capacity(20 + node.len() + detail.len());
+    out.extend([VERSION, DEGRADED]);
+    out.extend(epoch.to_be_bytes());
+    out.extend(spec.to_be_bytes());
+    out.push(class.code());
+    out.push(node.len() as u8);
+    out.extend(node.as_bytes());
+    out.extend(detail.as_bytes());
+    out
+}
+
 /// Builds the trim record an owner at `epoch` appends.
 pub fn encode_trim(epoch: u64, trim: &Trim) -> Vec<u8> {
     let mut out = vec![VERSION, TRIM];
@@ -384,6 +444,19 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
             reason: OperatorReason::from_code(u16::from_be_bytes(r.array()?))?,
             detail: r.rest(),
         }),
+        DEGRADED => {
+            let spec = r.u64()?;
+            let class = ErrorClass::from_code(r.u8()?)?;
+            let node_len = r.u8()?;
+            let node = r.bytes(node_len.into())?;
+            Ok(Record::Degraded {
+                epoch,
+                spec,
+                class,
+                node,
+                detail: r.rest(),
+            })
+        }
         TRIM => {
             let body = r.rest();
             crate::trim::decode_body(body)?;
@@ -453,7 +526,7 @@ fn kind_after(version: u8, r: &mut Reader<'_>) -> Result<u8, DecodeError> {
     if !matches!(kind, OUTPUT | CLAIM | FAILURE)
         && !(matches!(
             kind,
-            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM
+            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM | DEGRADED
         ) && version == VERSION)
     {
         return Err(DecodeError::UnknownKind(kind));
@@ -473,14 +546,14 @@ fn kind_of(record: &[u8]) -> Result<u8, DecodeError> {
     kind_after(version, &mut r)
 }
 
-/// Whether `record` is a claim, a failure, a needs-operator or a trim record, which
-/// no step produced, judged by its version and kind bytes only. The
-/// owner's own checks pass over them; rejections are not passed over, since
-/// they stand in for an input's outputs.
+/// Whether `record` is a claim, a failure, a needs-operator, a trim or a
+/// degraded record, which no step produced, judged by its version and kind
+/// bytes only. The owner's own checks pass over them; rejections are not
+/// passed over, since they stand in for an input's outputs.
 pub fn is_marker(record: &[u8]) -> bool {
     matches!(
         kind_of(record),
-        Ok(CLAIM | CLAIM_UNDER | FAILURE | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM)
+        Ok(CLAIM | CLAIM_UNDER | FAILURE | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM | DEGRADED)
     )
 }
 
@@ -488,6 +561,18 @@ pub fn is_marker(record: &[u8]) -> bool {
 /// alone, so a record whose reason this build does not know still counts.
 pub fn needs_operator_spec_of(record: &[u8]) -> Option<u64> {
     if kind_of(record).ok()? != NEEDS_OPERATOR {
+        return None;
+    }
+    let mut r = Reader::new(record);
+    r.bytes(2).ok()?;
+    r.u64().ok()?;
+    r.u64().ok()
+}
+
+/// The spec record a degraded record names, read from its header alone, so
+/// a record whose class this build does not know still counts.
+pub fn degraded_spec_of(record: &[u8]) -> Option<u64> {
+    if kind_of(record).ok()? != DEGRADED {
         return None;
     }
     let mut r = Reader::new(record);

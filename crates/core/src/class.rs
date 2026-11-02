@@ -11,7 +11,9 @@ use crate::DecodeError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorClass {
-    /// Retried while the lease is held, such as a broker that is down.
+    /// Retried while the lease is held, such as a broker that is down. A
+    /// holder that has retried for `--stuck-after-ms` with no progress
+    /// gives up and records it as degraded.
     Transient,
     /// No node of this build can run the workload until an operator acts,
     /// and it is not the workload's fault.

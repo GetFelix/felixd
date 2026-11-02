@@ -39,8 +39,17 @@ use crate::output::{self as output_log, Recorded, record_failure};
 use crate::runner::{LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload};
 use crate::settings::{Settings, TokenSource};
 use crate::specs;
+use crate::stuck::{self, Progress};
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// How long a workload may keep failing on a transient error, with no
+/// progress in between, before its holder lets it go.
+pub const DEFAULT_STUCK_AFTER: Duration = Duration::from_secs(60);
+
+/// How long a node that let a workload go for being stuck waits before it
+/// claims that workload again.
+pub const DEFAULT_DEGRADED_BACKOFF: Duration = Duration::from_secs(120);
 
 /// How long opening a watch may take. Right after a broker dies, a client
 /// whose routing still names it can wait on it with no error.
@@ -60,6 +69,10 @@ const READ_DRAIN_EVERY: Duration = Duration::from_secs(1);
 
 /// How long shutdown waits for workloads to release their leases.
 const RELEASE_WITHIN: Duration = Duration::from_secs(2);
+
+/// How many times a holder tries to write a degraded record before it
+/// releases the lease without one.
+const RECORD_DEGRADED_TRIES: u32 = 3;
 
 /// How often a node leaving a workload to its assignee checks that the
 /// assignee is still up.
@@ -83,6 +96,13 @@ pub struct AgentConfig {
     /// How often this node appends its facts for the scheduler when they
     /// have not changed.
     pub facts_every: Duration,
+    /// How long a held workload may keep failing on a transient error, with
+    /// no progress in between, before the node records it as degraded and
+    /// releases the lease. At least the lease TTL, or zero for never.
+    pub stuck_after: Duration,
+    /// How long the node leaves a workload it released that way to other
+    /// nodes before it claims it again.
+    pub degraded_backoff: Duration,
     /// The broker token of admission's credential, which admission's
     /// projector writes `sys.specs` with. The node's own token when left
     /// out. A node runs admission only with a control plane token too.
@@ -126,6 +146,8 @@ struct Node {
     /// It cannot read its drain mark, so it claims nothing.
     blocked: AtomicBool,
     facts_every: Duration,
+    stuck_after: Duration,
+    degraded_backoff: Duration,
     /// The workloads this node holds, for its facts.
     holding: std::sync::Mutex<BTreeSet<String>>,
     /// What this node last read of each assignee's `nodes` entry.
@@ -177,18 +199,32 @@ struct Task {
     spec: WorkloadSpec,
 }
 
-/// Runs until `shutdown` completes, then releases the leases it holds.
-pub async fn run(
-    settings: &Settings,
-    config: AgentConfig,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
+/// Refuses a configuration the node cannot run with.
+fn check(config: &AgentConfig) -> Result<()> {
     felixd_core::schedule::check_fact_fits(&config.node_id, config.placement.max_workloads)?;
     anyhow::ensure!(
         config.lease.ttl >= MIN_TTL,
         "the lease TTL must be at least {} ms",
         MIN_TTL.as_millis()
     );
+    // A workload failing for less than a lease TTL may only be waiting out
+    // a broker that is changing leader. Zero turns the bound off.
+    anyhow::ensure!(
+        config.stuck_after.is_zero() || config.stuck_after >= config.lease.ttl,
+        "--stuck-after-ms ({} ms) must be 0 or at least the lease TTL ({} ms)",
+        config.stuck_after.as_millis(),
+        config.lease.ttl.as_millis()
+    );
+    Ok(())
+}
+
+/// Runs until `shutdown` completes, then releases the leases it holds.
+pub async fn run(
+    settings: &Settings,
+    config: AgentConfig,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    check(&config)?;
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -229,6 +265,8 @@ pub async fn run(
         assignments: Assignments::new(),
         blocked: AtomicBool::new(false),
         facts_every: config.facts_every,
+        stuck_after: config.stuck_after,
+        degraded_backoff: config.degraded_backoff,
         holding: std::sync::Mutex::new(BTreeSet::new()),
         entries: std::sync::Mutex::new(HashMap::new()),
     });
@@ -651,7 +689,17 @@ async fn own(
     let Some(mut pending) = before_claim(&node, &id, &spec, &mut stop).await else {
         return;
     };
+    // Until when this node leaves the workload alone after releasing it for
+    // being stuck. Kept here, so a new spec record, which restarts the task,
+    // gives the workload a fresh start.
+    let mut backoff: Option<tokio::time::Instant> = None;
     loop {
+        if let Some(until) = backoff.take() {
+            tokio::select! {
+                () = tokio::time::sleep_until(until) => {}
+                _ = stop.wait_for(|stop| *stop) => return,
+            }
+        }
         if !node
             .wait_for_chance(&id, spec.record, &mut lease, &mut stop)
             .await
@@ -775,6 +823,13 @@ async fn own(
                         metrics::handoff(Handoff::Drained);
                         lease::release(&node.felix, &held).await;
                         tracing::info!(workload = %id, "released for the drain");
+                    }
+                    Ended::Degraded { class } => {
+                        metrics::degraded(class);
+                        metrics::handoff(Handoff::Degraded);
+                        lease::release(&node.felix, &held).await;
+                        tracing::warn!(workload = %id, %class, backoff = ?node.degraded_backoff, "released after being stuck, leaving it to other nodes");
+                        backoff = Some(tokio::time::Instant::now() + node.degraded_backoff);
                     }
                     Ended::Lost => metrics::handoff(Handoff::Lost),
                 }
@@ -1112,6 +1167,11 @@ enum Ended {
     Drained,
     Lost,
     NeedsOperator(NeedsOperator),
+    /// The workload stayed stuck on an error of this class. The lease is to
+    /// be released, and the node leaves the workload alone for a while.
+    Degraded {
+        class: ErrorClass,
+    },
 }
 
 /// Runs the workload, and records its failure if it fails, while renewing the
@@ -1129,7 +1189,7 @@ async fn run_held(
 ) -> Ended {
     let Run {
         spec,
-        mut claim_from,
+        claim_from,
         pending,
     } = run;
     let (deadline, fence) = held.fence();
@@ -1152,32 +1212,49 @@ async fn run_held(
         w.set_inputs(&spec.inputs, *shared);
         AbortOnDrop(tokio::spawn(sample_tails(node.clone(), w.clone())))
     });
+    let progress = Progress::default();
     let work = async {
         if let Some(problem) = pending {
             return record_needs_operator(node, id, spec, problem, &fence, &confirmer).await;
         }
-        let outcome = loop {
-            if faults::fail_workload() {
-                break Outcome::Failed("injected failure".to_owned());
-            }
-            match run_workload(
-                &node.felix,
-                &node.modules,
-                id,
-                spec,
-                &fence,
-                &mut claim_from,
-            )
-            .await
-            {
-                Ok(outcome) => break outcome,
-                Err(error) => {
-                    tracing::warn!(workload = %id, error = %format!("{error:#}"), "retrying");
-                    if let Some((w, _)) = &workload_metrics {
-                        w.restarted();
-                    }
-                    tokio::time::sleep(RETRY_DELAY).await;
+        let retried = {
+            // The claim record's tail is read once, so it is handed to each
+            // attempt and taken back after, whatever the attempt returns.
+            let claim_cell = std::sync::Mutex::new(claim_from);
+            let (claim_from, fence, progress) = (&claim_cell, &fence, &progress);
+            let attempt = || async move {
+                if faults::fail_workload() {
+                    return Ok(Outcome::Failed("injected failure".to_owned()));
                 }
+                if faults::fail_transient() {
+                    anyhow::bail!("injected: a transient failure");
+                }
+                let mut from = *claim_from.lock().unwrap_or_else(|e| e.into_inner());
+                let ran = run_workload(
+                    &node.felix,
+                    &node.modules,
+                    id,
+                    spec,
+                    fence,
+                    &mut from,
+                    progress,
+                )
+                .await;
+                *claim_from.lock().unwrap_or_else(|e| e.into_inner()) = from;
+                ran
+            };
+            let retrying = |error: &anyhow::Error| {
+                tracing::warn!(workload = %id, error = %format!("{error:#}"), "retrying");
+                if let Some((w, _)) = &workload_metrics {
+                    w.restarted();
+                }
+            };
+            stuck::retry(node.stuck_after, RETRY_DELAY, progress, attempt, retrying).await
+        };
+        let outcome = match retried {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return record_degraded(node, id, spec, &error, &fence, &confirmer).await;
             }
         };
         // The failure record's epoch. It is the later epoch found when epochs
@@ -1356,6 +1433,8 @@ async fn record_needs_operator(
         .await;
         match recorded {
             Ok(Recorded::NeedsOperator) => return Ended::NeedsOperator(problem.clone()),
+            // Only a degraded record's own writer gets this.
+            Ok(Recorded::Degraded) => return Ended::Lost,
             Ok(Recorded::Superseded(epoch)) => {
                 tracing::warn!(workload = %id, epoch, "a later owner has written, not recording");
                 return Ended::Lost;
@@ -1379,6 +1458,93 @@ async fn record_needs_operator(
         }
     }
     Ended::Lost
+}
+
+/// Records that the holder is letting go of a workload that stayed stuck on
+/// `error`: a degraded record on its output stream, fenced like a failure, so
+/// it lands behind everything of earlier epochs and before any later owner's
+/// claim. It is an observation, not spec state, and does not stop another
+/// node from claiming. Best effort: a record that cannot be written is
+/// logged, and the lease is released all the same. Only a lost lease, or a
+/// later owner, which means there is nothing to release, ends it as
+/// [`Ended::Lost`].
+async fn record_degraded(
+    node: &Node,
+    id: &str,
+    spec: &WorkloadSpec,
+    error: &anyhow::Error,
+    fence: &Fence,
+    confirmer: &Confirmer,
+) -> Ended {
+    let class = ErrorClass::Transient;
+    let detail = format!("{error:#}");
+    let detail = detail.lines().next().unwrap_or_default();
+    let (epoch, node_id) = (fence.epoch(), fence.node());
+    tracing::warn!(workload = %id, epoch, node = node_id, %class, %detail, "stuck, recording it and releasing the lease");
+    let released = Ended::Degraded { class };
+    let Some(record) = spec.record else {
+        tracing::warn!(workload = %id, "the spec names no spec record, not recording that it is stuck");
+        return released;
+    };
+    for _ in 0..RECORD_DEGRADED_TRIES {
+        if !fence.holds() {
+            return Ended::Lost;
+        }
+        let version = match node.felix.cache_get_versioned(names::WORKLOADS, id).await {
+            Ok(Some(found)) if WorkloadSpec::decode(&found.value).as_ref() == Ok(spec) => {
+                found.version
+            }
+            // Stopped, edited, or a stale read: the watch restarts or stops
+            // the task, which decides again.
+            Ok(_) => return Ended::Lost,
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not read the spec, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+        };
+        if !confirmer.confirm().await || !fence.holds() {
+            tracing::warn!(workload = %id, "the lease is lost, not recording that it is stuck");
+            return Ended::Lost;
+        }
+        let recorded = output_log::record_degraded(
+            &node.felix,
+            &spec.output,
+            fence,
+            fence.epoch(),
+            (version, record),
+            (class, detail),
+        )
+        .await;
+        match recorded {
+            Ok(Recorded::Degraded) => return released,
+            Ok(Recorded::Superseded(epoch)) => {
+                tracing::warn!(workload = %id, epoch, "a later owner has written, not recording that it is stuck");
+                return Ended::Lost;
+            }
+            Ok(Recorded::Failed {
+                spec_version,
+                failure,
+            }) => {
+                tracing::error!(workload = %id, reason = %failure.detail, "the output stream records a failure");
+                return if write_failed(&node.felix, id, spec_version, &failure).await {
+                    Ended::Failed
+                } else {
+                    Ended::Lost
+                };
+            }
+            // Parked by an operator record already, which the next claimer
+            // finds. Nothing to add.
+            Ok(Recorded::NeedsOperator) => return Ended::Lost,
+            Err(error) if error.is::<LostLease>() => return Ended::Lost,
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not record that it is stuck, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+    }
+    tracing::warn!(workload = %id, "could not record that it is stuck, releasing the lease anyway");
+    released
 }
 
 /// Records that the workload failed: a failure record on its output stream,
@@ -1429,7 +1595,7 @@ async fn mark_failed(
                 spec_version,
                 failure,
             })) => return write_failed(felix, id, spec_version, &failure).await,
-            Ok(Ok(Recorded::NeedsOperator)) => return false,
+            Ok(Ok(Recorded::NeedsOperator | Recorded::Degraded)) => return false,
             Ok(Ok(Recorded::Superseded(epoch))) => {
                 tracing::warn!(workload = %id, epoch, "a later owner has written, not failing");
                 return false;
