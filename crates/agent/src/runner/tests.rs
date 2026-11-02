@@ -91,6 +91,8 @@ fn a_merge_entry_below_the_last_trim_is_not_an_error() {
         snap_floor: 15,
         merge_floor: 9,
         input_floors: vec![4, 5],
+        first_spec: None,
+        claimed: None,
     };
     assert_eq!(
         below_the_trim(Err(trimmed(9).into()), Some(&last)).unwrap(),

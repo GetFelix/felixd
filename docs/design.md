@@ -897,7 +897,9 @@ on three brokers.
 
 `felixd check` runs each workload's module over its whole input stream, from
 its initial state, and lines the outputs it produces up with the records on
-the output stream by their headers. Each record should match the next
+the output stream by their headers. Once Felix has deleted the head of the
+output stream, it starts from the oldest snapshot the workload keeps instead
+([Retention](#checking-from-a-snapshot)). Each record should match the next
 replayed output. It reports:
 
 - a gap: a replayed output missing from the stream while a later one is there;
@@ -1237,15 +1239,62 @@ call.
   ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
   workload's floor. Until then the input floors in the record are advice
   nothing acts on.
-- `.out` is not trimmed. It is every downstream's input, it holds the first
-  claim that spec lineage reads, and `felixd check` lines records up with
-  claims from the start of the stream (#150).
+- `.out` is not trimmed. It is every downstream's input, so it can be cut only
+  below every downstream's floor (#150). It also holds the first claim that
+  spec lineage reads.
 
-### `check` and `replay`
+### Spec lineage
+
+An owner refuses a spec whose module or input differs from the one the
+stream's first claim names, so everything on `.out` was written under that
+module and input. `felixd run`, the agent's spec checks and `felixd check`
+read that claim to learn it. A cut head would take it away, so a trim record
+carries the first claim's spec record forward unchanged from the trim before
+it, and the first trim takes it from the claim itself. When Felix has deleted
+the head of `.out`, a reader asks the oldest record it keeps. If that is a
+claim or a trim, it names the spec. If it is an output, the reader goes on to
+the first claim or trim after it: any claim's spec has the first claim's
+module and input.
+
+A trim record also carries the highest spec record claimed so far. The check
+that refuses a stale node walks back from the tail to the last claim for its
+floor, and stops at a trim record instead when that is nearer, so it never
+needs a claim that has been deleted. Trim records written before these fields
+existed carry neither, and read as if they named no spec.
+
+### Checking from a snapshot
+
+`felixd check` replays from the first input. That is the whole check, and it
+stays the default while Felix holds the head of `.out`.
+
+When the last trim record on `.out` names an oldest kept snapshot, the check
+can start there instead: it restores the snapshot, steps the inputs after it,
+and lines them up with the records on `.out` from the snapshot's output tail
+on. With several inputs it starts the merge log check at the entry for the
+snapshot's step, with each input's next offset from there. It does so by
+default only when Felix has deleted the head of `.out`, since the first input
+can no longer be replayed. `--from-snapshot` asks for it while the head is
+still there, and `--from-start` refuses it.
+
+A check from a snapshot verifies less. The snapshot's state is taken as given,
+so a snapshot that does not hold what replaying the inputs before it would
+give is not noticed. Records below its output tail are not compared, so a gap,
+a duplicate or a misplaced record down there is not reported; an epoch below
+the highest one below the tail is, at the first record compared. What follows
+the snapshot gets the same verdict as a check from the start, and a record for
+an input the snapshot covers that was written after it is found, as an output
+the replay did not produce. If Felix keeps nothing of `.out` below an offset
+above the snapshot's output tail, the check fails saying so, rather than
+reporting the missing outputs as findings. `--from-start` fails the same way
+once Felix has deleted history that replay needs, and says which stream and
+which offset it still holds.
+
+### `check` and `replay` after a deletion
 
 `felixd check` and `felixd replay` read `.snap` from the oldest offset Felix
-holds, so they work on a workload that has deleted its old snapshots. A
-replay to an offset restores the nearest snapshot that is still there and whole.
+holds, so they work on a workload that has deleted its old snapshots, and
+`felixd replay` otherwise reads each stream from the start while the records
+are there. A replay to an offset restores the nearest snapshot that is still there and whole.
 A snapshot that survives but shares a chunk with an older one that was deleted
 is passed over. A merged workload's surviving snapshot whose step is below the
 merge log's floor is not: replay picks it and then fails reading the merge log,
@@ -1253,8 +1302,8 @@ with the message below. A replay to an offset older than every snapshot left
 starts from the initial state and replays the input, which works while the
 input is still whole.
 
-A merge log that has been trimmed is a different matter: `check` needs every
-entry from the start, and a replay before the oldest kept snapshot needs the
+A merge log that has been trimmed is a different matter: `check` from the start needs every
+entry, and a replay before the oldest kept snapshot needs the
 entries it deleted. They stop and say which stream they needed, the offset
 they asked for and the oldest offset Felix holds, for example:
 
@@ -1263,7 +1312,9 @@ felixd check needs wl.orders.merge from offset 0, but Felix holds it only from
 offset 412: the history before was trimmed
 ```
 
-Checking from the oldest kept snapshot instead comes with #150.
+A check that starts from the oldest kept snapshot, as it does by default once
+Felix has deleted the head of `.out`, needs only the merge log entries from that
+snapshot's step on, which the trim keeps.
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)
@@ -1273,7 +1324,9 @@ rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
 and a crash between the record and the deletion. `tests/trim.rs` and
 `tests/merge.rs` also resume with every read below the floors refused (the
 `enforce-trim-floors` fault), and the `skip-deletion` fault writes the records
-and deletes nothing, for tests that read a whole stream.
+and deletes nothing, for tests that read a whole stream. The
+`enforce-trim-floors` fault also refuses reads of `.out` below the oldest kept
+snapshot's output tail, where a cut of the head would leave it.
 
 ## Build order
 
