@@ -71,6 +71,19 @@ async fn a_needs_operator_record_counts_toward_the_floor() {
     assert_eq!(floor_of(vec![marker(4), claim]).await, Some(0));
 }
 
+/// A degraded record is an observation: a node still on an older spec runs.
+#[tokio::test]
+async fn a_degraded_record_does_not_count_toward_the_floor() {
+    use felixd_core::class::ErrorClass;
+    let degraded = output::encode_degraded(1, 9, ErrorClass::Transient, "node-a", "x");
+    let claim = output::encode_claim_under(1, 2, 2, "a");
+    assert_eq!(
+        floor_of(vec![claim.clone(), degraded.clone()]).await,
+        Some(2)
+    );
+    assert_eq!(floor_of(vec![degraded]).await, None);
+}
+
 fn output_at(input: u64) -> Vec<u8> {
     output::encode(
         output::OutputHeader {
@@ -216,6 +229,17 @@ async fn the_first_claim_says_what_the_stream_was_written_under() {
     assert_eq!(written(0, held).await, Some(4));
 }
 
+/// A degraded record can be written before any claim and ran nothing.
+#[tokio::test]
+async fn a_degraded_record_before_the_first_claim_names_nothing() {
+    use felixd_core::class::ErrorClass;
+    let degraded = output::encode_degraded(1, 9, ErrorClass::Transient, "node-a", "x");
+    let held = vec![degraded.clone(), output::encode_claim_under(1, 4, 4, "n")];
+    assert_eq!(written(0, held).await, Some(4));
+    let held = vec![degraded, output_at(40), trim_claiming(Some(7))];
+    assert_eq!(written(100, held).await, Some(0));
+}
+
 /// The head is gone and the oldest record kept is a trim record, which
 /// carries the first claim's spec.
 #[tokio::test]
@@ -293,6 +317,31 @@ fn a_needs_operator_record_with_an_unknown_reason_is_not_the_first_run() {
 async fn a_needs_operator_record_with_an_unknown_reason_counts_toward_the_floor() {
     let claim = output::encode_claim_under(1, 0, 0, "a");
     assert_eq!(floor_of(vec![claim, unreadable_marker(4)]).await, Some(4));
+}
+
+/// As a newer build writes it: a class this build has no name for.
+fn unreadable_degraded(spec: u64) -> Vec<u8> {
+    use felixd_core::class::ErrorClass;
+    let mut record = output::encode_degraded(1, spec, ErrorClass::Transient, "node-a", "x");
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(output::decode(&record).is_err());
+    record
+}
+
+#[test]
+fn a_degraded_record_is_not_the_first_run_whatever_its_class() {
+    use felixd_core::class::ErrorClass;
+    let readable = output::encode_degraded(1, 3, ErrorClass::Transient, "node-a", "x");
+    assert!(!ran_something(&readable));
+    assert!(!ran_something(&unreadable_degraded(3)));
+}
+
+#[test]
+fn a_degraded_record_this_build_cannot_read_is_an_unreadable_park() {
+    use felixd_core::class::ErrorClass;
+    assert!(unreadable_park(&unreadable_degraded(3)));
+    let readable = output::encode_degraded(1, 3, ErrorClass::Transient, "node-a", "x");
+    assert!(!unreadable_park(&readable));
 }
 
 #[test]

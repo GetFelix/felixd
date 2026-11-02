@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use felixd_core::class::OperatorReason;
+use felixd_core::class::{ErrorClass, OperatorReason};
 
 pub use serve::start;
 
@@ -87,6 +87,21 @@ fn reason_label(reason: OperatorReason) -> &'static str {
     }
 }
 
+/// Every error class, in the order its series are written.
+const CLASSES: [ErrorClass; 3] = [
+    ErrorClass::Transient,
+    ErrorClass::NeedsOperator,
+    ErrorClass::Poison,
+];
+
+fn class_label(class: ErrorClass) -> &'static str {
+    match class {
+        ErrorClass::Transient => "transient",
+        ErrorClass::NeedsOperator => "needs_operator",
+        ErrorClass::Poison => "poison",
+    }
+}
+
 /// How a lease claim ended.
 #[derive(Clone, Copy)]
 pub(crate) enum Claim {
@@ -104,6 +119,8 @@ pub(crate) enum Handoff {
     Drained,
     /// The lease was lost: not renewed in time, or taken.
     Lost,
+    /// The workload stayed stuck on an error, so the node let it go.
+    Degraded,
 }
 
 /// A histogram with fixed buckets.
@@ -272,8 +289,9 @@ pub(crate) struct Metrics {
     draining: AtomicBool,
     leases_held: AtomicI64,
     claims: [AtomicU64; 3],
-    handoffs: [AtomicU64; 2],
+    handoffs: [AtomicU64; 3],
     needs_operator: [AtomicU64; REASONS.len()],
+    degraded: [AtomicU64; CLASSES.len()],
     failures: AtomicU64,
     snapshots_written: AtomicU64,
     snapshots_skipped: AtomicU64,
@@ -292,6 +310,7 @@ pub(crate) fn enable(node: &str, max_workloads: usize) -> &'static Metrics {
         claims: Default::default(),
         handoffs: Default::default(),
         needs_operator: Default::default(),
+        degraded: Default::default(),
         failures: AtomicU64::new(0),
         snapshots_written: AtomicU64::new(0),
         snapshots_skipped: AtomicU64::new(0),
@@ -326,6 +345,13 @@ pub(crate) fn needs_operator(reason: OperatorReason) {
     if let Some(m) = get() {
         let at = REASONS.iter().position(|&r| r == reason).unwrap_or(0);
         m.needs_operator[at].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn degraded(class: ErrorClass) {
+    if let Some(m) = get() {
+        let at = CLASSES.iter().position(|&c| c == class).unwrap_or(0);
+        m.degraded[at].fetch_add(1, Ordering::Relaxed);
     }
 }
 

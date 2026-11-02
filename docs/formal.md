@@ -529,3 +529,7 @@ composition.
   that comes with the code.
 - Trimming an input shared with other readers, which is deleted only below every reader's floor
   (#150). The models check one workload's floors.
+
+A degraded record is a fenced append that every reader passes over. It stops no node and
+raises no floor, and the release after it is a holder stopping and deleting its lease, which the
+models already cover as `Crash` followed at once by `Expire`. None has an action for it.

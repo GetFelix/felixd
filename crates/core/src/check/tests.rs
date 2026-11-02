@@ -1,4 +1,5 @@
 use super::*;
+use crate::class::ErrorClass;
 
 fn header(input_offset: u64, index: u32) -> OutputHeader {
     OutputHeader {
@@ -606,6 +607,79 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
     let (lineage, limits) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
     assert_eq!(lineage.inputs, ["in"]);
     assert_eq!(limits, [(0, r1.limits)]);
+}
+
+/// A degraded record is the stream's first record, because its holder never
+/// got its claim on. r1 then claims and writes. The check runs r1's module,
+/// not the cache's r2.
+#[test]
+fn a_degraded_record_before_the_first_claim_is_passed_over() {
+    use crate::spec::{WorkloadSpec, WorkloadState};
+    let spec = |input: &str| WorkloadSpec {
+        module: "aa".into(),
+        inputs: vec![input.into()],
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        keep_snapshots: None,
+        state: WorkloadState::Running,
+        limits: Default::default(),
+        failure: None,
+        record: None,
+    };
+    let claimed = HashMap::from([(1, spec("in"))]);
+    let records = [
+        output::encode_degraded(0, 1, ErrorClass::Transient, "node-a", "gone"),
+        output::encode_claim_under(1, 1, 1, "x"),
+        output::encode(header(0, 0), 1, b"x"),
+    ];
+    let cached = WorkloadSpec {
+        record: Some(2),
+        ..spec("other")
+    };
+    let (lineage, _) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.inputs, ["in"]);
+}
+
+/// Unlike a needs-operator record, a degraded one says nothing about which
+/// specs are refused, so a claim below its spec record still runs.
+#[test]
+fn a_degraded_record_does_not_raise_the_floor() {
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        output::encode(header(0, 0), 1, b"x"),
+        output::encode_degraded(2, 13, ErrorClass::Transient, "node-a", "gone"),
+        output::encode_claim_under(3, 12, 12, "c"),
+        output::encode(header(1, 0), 3, b"x"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(0, 10), (1, 12)]
+    );
+}
+
+#[test]
+fn a_degraded_record_between_outputs_is_not_a_finding() {
+    let expected = replay(5);
+    let mut records = vec![output::encode_claim(1, "")];
+    records.extend(clean(&expected[..3]));
+    records.push(output::encode_degraded(
+        1,
+        0,
+        ErrorClass::Transient,
+        "node-a",
+        "lost the broker",
+    ));
+    records.push(output::encode_claim(2, ""));
+    records.extend(expected[3..].iter().map(|e| encode(e, 2)));
+    assert_eq!(run(&expected, &records, true), []);
+    // Its epoch is checked like any record's.
+    records[4] = output::encode_degraded(5, 0, ErrorClass::Transient, "node-a", "x");
+    assert!(
+        run(&expected, &records, true)
+            .iter()
+            .any(|f| matches!(f, Finding::EpochRegression { .. }))
+    );
 }
 
 /// A needs-operator record for r13 raises the floor like a claim: a stale

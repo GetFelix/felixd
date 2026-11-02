@@ -34,15 +34,22 @@ Flags of `run`: `--id`, `--input` (up to 64), `--snapshot-every` (1000), `--snap
 `--wait-secs` (60), how long to wait for admission's decision and spec record.
 The limits are stored in the spec, so every node runs the workload under the same ones.
 
-Flags of `agent`: `--node-id` (`FELIXD_NODE_ID`; host name and process id by default),
-`--lease-ttl-ms` (10000, at least 2000; use the same value on every node), `--max-workloads` (64;
-refused above about 125,000, where a node's facts would not fit in one record),
-`--claim-delay-ms` (1000), `--assignment-bound-ms` (15000), the longest a free workload is left to
-another node it is assigned to that can take it, `--assignment-grace-ms` (2000), the longest an
-unassigned one waits for a healthy scheduler to read its spec, and `--facts-every-ms` (three lease
-TTLs), how often the node appends its facts for the scheduler when they have not changed, and
-`--admission-token-file` (`FELIXD_ADMISSION_TOKEN_FILE`), the broker token of admission's
-credential, which the node's own token stands in for when left out.
+Flags of `agent`:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--node-id` (`FELIXD_NODE_ID`) | host name and process id | This node's name in its leases. Each agent needs its own. |
+| `--lease-ttl-ms` | 10000, at least 2000 | How long a lease lives without renewal. Use the same value on every node. |
+| `--max-workloads` | 64 | The most workloads the node holds at once. Refused above about 125,000, where a node's facts would not fit in one record. |
+| `--claim-delay-ms` | 1000 | The longest random wait before claiming a free workload. |
+| `--assignment-bound-ms` | 15000 | The longest a free workload is left to the node the scheduler assigned it to, if that node can take it. |
+| `--assignment-grace-ms` | 2000 | The longest an unassigned workload waits for a healthy scheduler to read its spec. |
+| `--facts-every-ms` | three lease TTLs | How often the node appends its facts for the scheduler when they have not changed. |
+| `--stuck-after-ms` | 60000, or the lease TTL if longer | How long a held workload may keep failing on a transient error, with no new input stepped and no record appended, before the node records it as `degraded` and releases the lease. At least the lease TTL. 0 turns it off, which a rolling upgrade from a build that predates the record needs. |
+| `--degraded-backoff-ms` | 120000 | How long a node that released a workload as degraded leaves it to other nodes. |
+| `--metrics-bind` (`FELIXD_METRICS_BIND`) | off | Serves Prometheus metrics at `/metrics` on this address. |
+| `--metrics-max-workloads` | 100 | The most workloads with series of their own. Needs `--metrics-bind`. |
+| `--admission-token-file` (`FELIXD_ADMISSION_TOKEN_FILE`) | the node's own token | The broker token of admission's credential. |
 
 Flags of `check`: `--id` (repeat for several; every workload by default), `--complete`, which
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every

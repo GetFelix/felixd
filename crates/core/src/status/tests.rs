@@ -102,3 +102,81 @@ fn the_next_step_is_past_the_later_of_the_last_output_and_the_snapshot() {
     assert_eq!(next_step(Some(written(4)), Some(snap(9))), 10);
     assert_eq!(next_step(Some(written(12)), Some(snap(9))), 13);
 }
+
+#[test]
+fn a_degraded_record_for_this_spec_record_shows_until_the_next_claim() {
+    let running = spec(WorkloadState::Running, Some(3));
+    let ours = output::encode_degraded(2, 3, ErrorClass::Transient, "node-a", "the broker is gone");
+    let (claimed, held) = (Lease::claim("b"), Lease::held("b", 3));
+    let found = |lease, last| Found {
+        spec: &running,
+        lease,
+        last_record: last,
+    };
+    let degraded = State::Degraded(Degraded {
+        class: "transient".into(),
+        node: "node-a".into(),
+        detail: "the broker is gone".into(),
+    });
+    assert_eq!(state(found(None, Some(&ours))), degraded);
+    assert_eq!(
+        state(found(None, Some(&ours))).to_string(),
+        "degraded (transient) on node-a: the broker is gone"
+    );
+    // A node that holds the lease but has written nothing yet changes nothing.
+    assert_eq!(state(found(Some(&claimed), Some(&ours))), degraded);
+    assert_eq!(state(found(Some(&held), Some(&ours))), degraded);
+    // Its claim is the last record once it has run.
+    let claim = output::encode_claim_under(3, 3, 3, "b");
+    assert_eq!(state(found(Some(&held), Some(&claim))), State::Running);
+    // A record for an earlier spec record was cleared by the new one.
+    let older = output::encode_degraded(2, 1, ErrorClass::Transient, "node-a", "x");
+    assert_eq!(state(found(None, Some(&older))), State::Waiting);
+}
+
+#[test]
+fn a_class_this_build_cannot_read_still_shows_as_degraded() {
+    let mut newer = output::encode_degraded(1, 7, ErrorClass::Transient, "node-a", "x");
+    newer[18] = 99;
+    assert!(degraded(&newer, 7).is_some());
+    assert_eq!(degraded(&newer, 8), None);
+    assert_eq!(degraded(&output::encode_claim(1, "n"), 7), None);
+}
+
+#[test]
+fn degraded_comes_after_the_spec_state_and_a_needs_operator_record() {
+    let degraded_record = output::encode_degraded(2, 3, ErrorClass::Transient, "node-a", "x");
+    let mut failed = spec(WorkloadState::Failed, Some(3));
+    failed.failure = Some(Failure {
+        class: ErrorClass::Poison,
+        detail: "trap".into(),
+    });
+    let found = Found {
+        spec: &failed,
+        lease: None,
+        last_record: Some(&degraded_record),
+    };
+    assert_eq!(state(found).to_string(), "failed (poison): trap");
+    let stopped = spec(WorkloadState::Stopped, Some(3));
+    assert_eq!(
+        state(Found {
+            spec: &stopped,
+            ..found
+        }),
+        State::Stopped
+    );
+    // Only the last record counts, so one parks the spec or the other shows.
+    let parks = output::encode_needs_operator(2, 3, OperatorReason::ModuleMissing, "");
+    let running = spec(WorkloadState::Running, Some(3));
+    let found = Found {
+        spec: &running,
+        lease: None,
+        last_record: Some(&parks),
+    };
+    assert!(matches!(state(found), State::NeedsOperator(_)));
+    let found = Found {
+        last_record: Some(&degraded_record),
+        ..found
+    };
+    assert!(matches!(state(found), State::Degraded(_)));
+}

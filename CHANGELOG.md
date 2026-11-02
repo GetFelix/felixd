@@ -12,6 +12,25 @@
   ([felix#1760](https://github.com/GetFelix/felix/issues/1760),
   [felix#1761](https://github.com/GetFelix/felix/issues/1761),
   [felix#1009](https://github.com/GetFelix/felix/issues/1009)).
+- Degraded workloads (#73). A workload that keeps failing on a transient
+  error, such as a stream its node cannot read, used to be retried for ever
+  on that node, out of sight. Now `felixd ps` shows it as `degraded` with the
+  error, and another node takes it. The holder gives up when attempts have
+  failed for `--stuck-after-ms` (default 60000, or the lease TTL if longer;
+  the agent refuses a value between 0 and the TTL) with no progress in
+  between, meaning no new input stepped and no record appended. It appends a
+  `degraded` record (output record kind 8: spec record, error class, node id,
+  detail) fenced by epoch, deletes its lease so another
+  node can claim it, and leaves the workload alone for
+  `--degraded-backoff-ms` (default 120000). The spec stays `running`, so
+  nothing has to be done. `felixd_degraded_total{class}` counts releases.
+  A build from before kind 8 refuses the record: it fails a workload whose
+  last record it is, never claims one whose first record it is, and a
+  downstream workload reading the stream needs an operator. During a rolling
+  upgrade run the new build with `--stuck-after-ms 0`, which turns the bound
+  off, until no old node is left. Counting degraded records across nodes and
+  blocking claims is #99.
+
 - Modules over 8 MiB (#21). A module over 8 MiB is stored in the `modules`
   cache as 4 MiB chunks under `<sha256>/<n>` with a JSON manifest under the
   module's own key, chunks first and manifest last. A module of 8 MiB or less,
