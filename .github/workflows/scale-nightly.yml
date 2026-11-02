@@ -1,0 +1,65 @@
+# The scale test at 1000 workloads (about 2010 replicated streams) against the
+# Felix images built from main each night, so a Felix change that slows lease
+# renewals at this size shows up the day it lands (GetFelix/felix#1760). The
+# integration tests' nightly is felix-nightly.yml; this one is separate because
+# it takes most of an hour.
+#
+# A failed or timed-out scheduled run opens an issue labelled
+# `felix-nightly-scale`, or comments on the open one; a green one closes it.
+name: Scale nightly
+
+on:
+  schedule:
+    # After Felix's nightly build (04:41 UTC) and after felix-nightly.yml (13:27).
+    - cron: "7 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scale:
+    uses: ./.github/workflows/scale.yml
+    with:
+      counts: "1000"
+      build_secs: "1500"
+      failover_secs: "300"
+      timeout_minutes: "120"
+      felix_image_tag: nightly
+
+  report:
+    needs: scale
+    # !cancelled() rather than the result: a job that hits its timeout reports
+    # as cancelled, and a hung pull or compose step is a failure worth an issue.
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open, update or close the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.scale.result }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create felix-nightly-scale --repo "$REPO" --color d93f0b \
+            --description "The nightly scale run against Felix main failed" 2>/dev/null || true
+          open=$(gh issue list --repo "$REPO" --label felix-nightly-scale --state open --json number --jq '.[0].number // empty')
+          if [ "$RESULT" = success ]; then
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --repo "$REPO" --body "Green again: $RUN_URL"
+              gh issue close "$open" --repo "$REPO"
+            fi
+            exit 0
+          fi
+          body=$(printf 'Run: %s\n\nThe scale run at 1000 workloads against the Felix `:nightly` images failed (result: %s). The usual cause is that the workloads did not all start; a missing image, a compose or build failure, or a timeout fails it too. The run summary has the row and the `scale-results` artifact has `scale-1000-ttl10.json` and the broker logs. CONTRIBUTING.md ("Running the scale test") says how to read them. This issue closes itself when a nightly run gets all 1000 running.\n' "$RUN_URL" "$RESULT")
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --label felix-nightly-scale \
+              --title "Nightly scale run against Felix main fails" --body "$body"
+          fi

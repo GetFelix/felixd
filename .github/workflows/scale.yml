@@ -2,9 +2,28 @@ name: Scale
 
 # How many workloads one Felix cluster carries: create time, memory and
 # failover time with N workloads on three brokers and three agents. Run it by
-# hand from the Actions tab or with `gh workflow run scale.yml`. It never runs
-# on its own. CONTRIBUTING.md's "Running the scale test" says how to read the result.
+# hand from the Actions tab or with `gh workflow run scale.yml`; scale-nightly.yml
+# also runs it at 1000 workloads against Felix main every night.
+# CONTRIBUTING.md's "Running the scale test" says how to read the result.
 on:
+  workflow_call:
+    inputs:
+      counts:
+        type: string
+        default: "100,500,1000,10000"
+      build_secs:
+        type: string
+        default: "1200"
+      failover_secs:
+        type: string
+        default: "300"
+      timeout_minutes:
+        type: string
+        default: "300"
+      felix_image_tag:
+        description: "Felix image tag to run; empty runs the release in .felix-version"
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       counts:
@@ -19,6 +38,9 @@ on:
       timeout_minutes:
         description: Whole job timeout
         default: "300"
+      felix_image_tag:
+        description: "Felix image tag to run, such as nightly; empty runs the release in .felix-version"
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,6 +53,7 @@ jobs:
       COUNTS: ${{ inputs.counts || '100,500,1000,10000' }}
       BUILD_SECS: ${{ inputs.build_secs || '1200' }}
       FAILOVER_SECS: ${{ inputs.failover_secs || '300' }}
+      FELIX_IMAGE_TAG: ${{ inputs.felix_image_tag }}
       RUST_LOG: warn
       FELIXD_REQUIRE_FELIX: "1"
       FELIX_BROKERS: 127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300
@@ -56,7 +79,8 @@ jobs:
         run: cargo test -p felixd --test scale --locked --no-run
       - name: Measure
         run: |
-          export FELIX_VERSION=$(sed -n 's/^version=//p' .felix-version)
+          export FELIX_VERSION=${FELIX_IMAGE_TAG:-$(sed -n 's/^version=//p' .felix-version)}
+          echo "felix images: $FELIX_VERSION" | tee -a results/runner.txt
           cluster=tests/felix/cluster.yaml
           failed=0
           first=1

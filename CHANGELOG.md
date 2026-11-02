@@ -10,6 +10,9 @@
   once, holds new claims back for up to TTL/3 while its renewals are slow, and waits before
   claiming a workload it lost again (TTL/12 to TTL/6, doubling per loss in a row up to one TTL).
   Lease and epoch rules are unchanged; these only delay claims and writes.
+- Nightly scale run against Felix main (GetFelix/felix#1760). `scale-nightly.yml` runs the scale test at 1000
+  workloads on the `:nightly` Felix images every night and opens an issue labelled `felix-nightly-scale` when they
+  do not all start. `Scale` takes a `felix_image_tag` input and can be called from another workflow.
 - Fewer control plane requests per `felixd run` (GetFelix/felix#1760). Since the read back
   after a 409 (#149), each submit sent about nine extra requests to the control plane. A 409
   that says the stream or cache already exists is no longer read back; any other 409 still
