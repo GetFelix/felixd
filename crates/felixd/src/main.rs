@@ -320,11 +320,11 @@ async fn main() -> Result<()> {
             let admission_token = admission_token_file
                 .map(TokenSource::from_file)
                 .transpose()?;
+            let shutdown = shutdown_signal();
             let node_id = node_id.unwrap_or_else(default_node_id);
             if let Some(bind) = metrics_bind {
                 felixd_agent::metrics::start(bind, &node_id, metrics_max_workloads).await?;
             }
-            let shutdown = shutdown_signal();
             let config = AgentConfig {
                 node_id,
                 lease: LeaseTiming {
@@ -594,22 +594,34 @@ async fn main() -> Result<()> {
 
 /// Resolves on Ctrl-C or, on Unix, SIGTERM, which is what `docker stop` and
 /// `systemctl stop` send. Either way the agent stops its workloads and
-/// releases their leases.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let Ok(mut term) = signal(SignalKind::terminate()) else {
-            let _ = tokio::signal::ctrl_c().await;
-            return;
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+/// releases their leases. The handlers are installed here, not when the
+/// future is first polled, so a signal during startup is not lost to the
+/// default action.
+#[cfg(unix)]
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut int = signal(SignalKind::interrupt());
+    let mut term = signal(SignalKind::terminate());
+    async move {
+        match (&mut int, &mut term) {
+            (Ok(int), Ok(term)) => {
+                tokio::select! {
+                    _ = int.recv() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            _ => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
         }
     }
-    #[cfg(not(unix))]
-    let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    async {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn parse_target(to: &str) -> Result<Target, String> {
