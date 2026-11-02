@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Operator docs (#24). `docs/operating.md` covers running a cluster: what to start, the
+  configuration of every command, the grants each role needs, sizing the lease TTL, what failover
+  and replay guarantee, a three-node failover walkthrough, what each `ps` state asks of an
+  operator, and how to upgrade a node.
 - Scale test (#20). The manually run `Scale` workflow starts three Felix brokers and three agents, creates N
   workloads and reports create time, memory, and how long recovery takes when an agent and then a broker is
   killed (`crates/felixd/tests/scale.rs`, `.github/workflows/scale.yml`; see CONTRIBUTING.md). The numbers
