@@ -176,7 +176,7 @@ where
     F: FnMut(u64, u64) -> Fut,
     Fut: Future<Output = Result<Page>>,
 {
-    let (first, cut) = first_held(0, tail, is_run_record, &mut read).await?;
+    let (first, cut) = first_held(0, tail, ran_something, &mut read).await?;
     let Some((offset, record)) = first else {
         return Ok(None);
     };
@@ -196,19 +196,16 @@ fn spec_named(record: &[u8]) -> Result<Option<u64>, felixd_core::DecodeError> {
     Ok(output::decode(record)?.names_spec())
 }
 
-/// Whether `record` is not a needs-operator record. One can be written before
-/// any claim and ran nothing, so it never says what the stream was written
-/// under.
-fn is_run_record(record: &[u8]) -> bool {
-    output::decode(record).map_or(true, |found| found.needs_operator_spec().is_none())
-}
-
 /// The first record on `stream` that Felix still holds and that is not a
-/// needs-operator record, with its offset.
+/// needs-operator record, with its offset. A needs-operator record can be
+/// written before any claim and ran nothing, so it never says what the stream
+/// was written under. It is judged from its header, so a reason this build
+/// cannot read counts too: a newer build may have written it, and the way out
+/// is to submit a new spec.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
     let tail = felix.tail(stream).await?;
     let read = |from, end| page_of(felix, stream, from, end);
-    Ok(first_held(0, tail, is_run_record, read).await?.0)
+    Ok(first_held(0, tail, ran_something, read).await?.0)
 }
 
 /// A page of `(offset, payload)` records and the offset the next one starts at.
@@ -259,6 +256,18 @@ where
     Ok((None, cut))
 }
 
+/// Whether `record` is anything but a needs-operator record. Judged from its
+/// header alone, so a reason this build does not know still counts as one.
+fn ran_something(record: &[u8]) -> bool {
+    output::needs_operator_spec_of(record).is_none()
+}
+
+/// Whether `record` is a needs-operator record that this build cannot read,
+/// as a newer build writes one with a reason this build has no name for.
+fn unreadable_park(record: &[u8]) -> bool {
+    output::decode(record).is_err() && output::needs_operator_spec_of(record).is_some()
+}
+
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
 /// was written under another module or input, which `spec` would not
 /// reproduce, or when the floor ([`claim_floor`]) is above `spec`'s record,
@@ -287,6 +296,16 @@ pub(crate) async fn refuse_stale_or_foreign(
     let ours = spec.record.context("the spec names no spec record")?;
     let stream = names::output_stream(id);
     let tail = felix.tail(&stream).await?;
+    // The claim would take this record for poison and fail the spec, which
+    // never ran. A node of the build that wrote it takes the workload instead.
+    if let Some(last) = felix.last_record(&stream, tail).await?
+        && unreadable_park(&last.payload)
+    {
+        bail!(
+            "{stream}:{}: a needs-operator record with a reason this build cannot read",
+            last.offset
+        );
+    }
     if let Some(floor) = claim_floor(felix, &stream, tail)
         .await?
         .filter(|&floor| floor > ours)
@@ -339,7 +358,8 @@ where
                     }
                     recorded = recorded.max(found.needs_operator_spec());
                 }
-                Err(_) => {}
+                // A reason this build cannot read still names the spec it parks.
+                Err(_) => recorded = recorded.max(output::needs_operator_spec_of(record.as_ref())),
             }
         }
         if ended {
