@@ -17,26 +17,45 @@ nothing on its own disk that matters, so a node can lose its disk and rejoin. A 
 - **One `felixd agent` per machine.** Each agent claims workloads, runs them and writes their
   output to Felix. Several agents on one machine are not independent failure domains.
 - **The `felixd` command line**, run from anywhere that can reach Felix, to submit workloads
-  (`run`), look at the cluster (`ps`, `check`, `replay`) and move work (`drain`, `undrain`).
+  (`run`), set up a namespace (`init`), look at the cluster (`ps`, `check`, `replay`) and move
+work (`drain`, `undrain`).
+
+Each workload is held by one node at a time through a lease: an entry in a Felix cache that names
+the node allowed to run the workload, with an expiry and an epoch (a number that grows each time
+the workload changes hands). A node that stops renewing its lease loses the workload, and the
+epoch lets Felix refuse writes from the old holder (the fence). Every so often a node also saves
+the workload's state as a snapshot, so a new holder replays only the inputs since the last one
+instead of starting over. When a node takes a workload it first writes a claim record on the
+workload's output stream.
 
 The agents never talk to each other. They find out about each other, and about the work to be
 done, by reading Felix.
 
 ## Before you start
 
-- A Felix cluster of the release felixd is built on. `.felix-version` in the repository names it
-  (0.7.0-preview.2 at the time of writing), and the container image and the compose files use it.
-  The [Felix docs](https://docs.getfelix.dev/) cover installing brokers and a control plane.
-- A tenant and a namespace for felixd (`default` unless you set `FELIX_NAMESPACE`). Felix's docs
-  also cover creating a tenant and getting tokens for a principal.
+- A Felix cluster of the release felixd is built on. `.felix-version` in the repository names it,
+  and the container image and the compose files use it. The [Felix docs](https://docs.getfelix.dev/)
+  cover installing brokers and a control plane.
+- A tenant for felixd. `felixd init` creates the namespace (`default` unless you set
+  `FELIX_NAMESPACE`). Felix's docs also cover creating a tenant and getting tokens for a principal.
 - For a three-broker cluster, the Felix features failover needs, finalized once by a Felix
   operator: `generation_start`, `majority_ack`, `lease_free_reads` and `fenced_caches`.
   `deploy/compose.yaml` shows the calls in its `felix-fleet` service.
+- For admission (see [Who may do what](#who-may-do-what)), brokers that record who published each
+  record: `FELIX_RECORD_PUBLISHERS=true` on a single broker, or the `publisher_principal` feature
+  in a cluster. Finalizing it is one-way and older brokers then refuse to open the data, so take a
+  backup and read [Felix's upgrades page](https://docs.getfelix.dev/deployment/upgrades/) first.
+  Without it admission rejects every request as `no_requester`.
+- Felix will not reuse the name of a deleted stream or cache until `stream_incarnations` and
+  `cache_incarnations` are finalized (a new cluster does this when its first broker registers;
+  brokers need `FELIX_NODE_ID`). Until then, create a workload under a new `--id` instead of
+  reusing one.
 - A token for each role below, in a file.
 
 ## Run a node
 
-Install a release binary ([README](../README.md#install)) or build the container image:
+Set up roles and admission first ([Who may do what](#who-may-do-what)); an agent needs a node
+token. Install a release binary ([README](../README.md#install)) or build the container image:
 
 ```
 docker build -f deploy/felixd.Dockerfile -t localhost/felixd:local .
@@ -48,10 +67,14 @@ settings in [Configuration](#configuration), at least the brokers, the tenant, a
 control plane URL; here they are environment variables:
 
 ```
-export FELIX_BROKERS=10.0.0.11:5000 FELIX_AUTH_TENANT=acme \
+export FELIX_BROKERS=felix-1.example.com:5000 FELIX_AUTH_TENANT=acme \
+  FELIX_SERVER_NAME=felix-1.example.com FELIX_CA_FILE=/etc/felixd/ca.pem \
   FELIX_AUTH_TOKEN_FILE=/etc/felixd/node.jwt FELIX_CONTROLPLANE_URL=http://felix-controlplane:8443
 felixd agent --node-id node-1 --lease-ttl-ms 10000
 ```
+
+`FELIX_SERVER_NAME` must be a name on the brokers' certificate. It defaults to `localhost`, so
+set it (and `FELIX_CA_FILE` for a private CA) when you reach the brokers by another name or an IP.
 
 An agent runs until it is stopped. On SIGINT (Ctrl-C) or SIGTERM, which `docker stop` and
 `systemctl stop` send, it stops its workloads and deletes its leases, so other nodes take over
@@ -60,7 +83,8 @@ out the TTL. [Drain](#upgrade-or-retire-a-node) the node first if you want its w
 before the process goes.
 
 If the agent exits, restart it. A restarted agent does not adopt the leases it held before,
-which makes two processes with the same `--node-id` safe; it waits for them to expire.
+which keeps a crashed process and its replacement with the same `--node-id` from both running a
+workload; it waits for the old leases to expire. Two live nodes must still not share an id.
 
 ## Configuration
 
@@ -105,7 +129,9 @@ The agent's own flags, all optional:
 ## Who may do what
 
 Felix decides, with RBAC policies on each token. felixd needs a different set for each job, so use
-a different principal for each. The node, admission and submitter roles are broker tokens
+a different principal for each. Each command uses the token file you give it, so point
+`FELIX_AUTH_TOKEN_FILE` (and `FELIX_CONTROLPLANE_TOKEN_FILE`) at the right principal's token for
+that command: the operator's for `init`, the node's for `agent`, the submitter's for `run`. The node, admission and submitter roles are broker tokens
 (`--token-file`). The operator rights are the control plane token (`--controlplane-token-file`).
 
 | Principal | Used by | May |
@@ -113,7 +139,7 @@ a different principal for each. The node, admission and submitter roles are brok
 | Node | `felixd agent` | Read every stream and cache of the namespace and its system namespace; publish to workload streams and `sys.facts`; write `leases`, `epochs`, `nodes` and `workloads` |
 | Admission | the one node that runs admission, with `--admission-token-file` and a control plane token | The only role that writes `sys.specs`; creates the streams of accepted workloads |
 | Submitter | `felixd run` through admission | Put modules, publish requests on `sys.intake`, read decisions and specs |
-| Viewer | `felixd ps`, `check`, `replay` | Read everything. `check` and `replay` also probe a stream's tail with a conditional publish, so they need publish on the streams they read |
+| Viewer | `felixd ps`, `check`, `replay` | Read everything. `check` and `replay` append no records, but probe a stream's tail with a conditional publish, so they need publish on the streams they read |
 | Operator | `felixd init`, `drain`, `run` without admission | Create namespaces, streams and caches. `init` also needs `rbac.view` over the whole tenant and `rbac.policy.manage`. `run` without admission also writes `workloads`, `sys.specs` and `modules`. `drain` and `undrain` write the `drains` cache |
 
 [design.md](design.md#grants) has the exact rules. To set them up:
@@ -131,7 +157,9 @@ submit anything:
    spec. Running it again changes nothing.
 3. Assign each principal to its role with `felixctl`, using a control plane token with
    `rbac.policy.manage`. Every principal gets one role; the admission principal must not also be a
-   node:
+   node. `felixctl` is Felix's command line and takes its connection settings the same way.
+   A principal gets the role with the next token Felix issues it, so mint new tokens for the
+   principals afterwards:
 
    ```
    felixctl rbac grouping add p:node-1 role:felixd.default.node
@@ -151,7 +179,16 @@ submitted directly before `init` stops running after it, because nodes now want 
 decision, so run `init` first or submit it again. Without admission, an operator submits
 directly with a control plane token and `felixd run`.
 
-Today a node can write any workload's output stream. The fence keeps the output correct, but a
+Submit a workload with the submitter's token (the input stream must already exist, and
+`counter.wasm` is an example workload at `/usr/local/share/felixd/counter.wasm` in the container
+image; the README's [Try it](../README.md#try-it) builds it):
+
+```
+felixd run --id counter --input in --replication-factor 3 counter.wasm
+```
+
+Today a node can write any workload's output stream. The fence (see
+[What runs where](#what-runs-where)) keeps the output correct, but a
 compromised node could write garbage. Per-lease tokens, which narrow a node to the workloads it
 holds, wait on Felix ([#74](https://github.com/GetFelix/felixd/issues/74)).
 
@@ -184,8 +221,8 @@ default is 3; 1 is for a single broker.
 how much a new owner replays after a failover. `--keep-snapshots K` lets the history before the
 oldest of K snapshots be deleted. Deleting needs a Felix fleet that has finalized `head_trim`
 and node tokens with `stream.trim`, which is off by default because it lets any node erase any
-stream in the namespace: run `felixd init --grant-trim` to turn it on
-([design.md](design.md#retention)). Without it the workload runs on and keeps its history.
+stream in the namespace: run `felixd init --grant-trim` to turn it on, then mint the nodes new
+tokens ([design.md](design.md#retention)). Finalizing `head_trim` is a one-way step. Without it the workload runs on and keeps its history.
 
 **Modules.** A module can be up to 64 MiB; one over 8 MiB is stored in chunks
 ([design.md](design.md#modules)).
@@ -240,7 +277,9 @@ What it does not promise:
 The [README](../README.md#try-it-on-three-nodes) walks through `deploy/compose.yaml`, which starts
 three Felix brokers, a control plane and three felixd nodes with development credentials, under
 Docker or Podman. Run it once before you build a real cluster. It does these things, in order,
-and each is something you will do in production too:
+and each is something you will do in production too. It submits with `felixd run` under
+development operator credentials and does not run `init`, admission or roles, so for the setup
+see [Who may do what](#who-may-do-what), not this run:
 
 1. Starts three nodes with a 4 s lease TTL, so a failover shows within seconds.
 2. Submits the `counter` workload and a producer that feeds it ten records a second.
@@ -249,7 +288,7 @@ and each is something you will do in production too:
    epoch.
 4. Drains a node (`felixd drain node-2 --wait`) to move its workloads without a failure, then
    undrains it.
-5. Stops the producer and runs `felixd check --complete`. It writes nothing, and `--complete` also
+5. Stops the producer and runs `felixd check --complete`. It appends no records, and `--complete` also
    reports outputs missing from the end of the stream, which is what you want once the workload has
    caught up.
 
@@ -284,19 +323,21 @@ Stop a workload by deleting its entry in the `workloads` cache:
 felixctl cache del workloads counter
 ```
 
-This needs a broker token with write on the `workloads` cache, such as an operator's. Its streams stay. felixd has no stop command yet ([#101](https://github.com/GetFelix/felixd/issues/101)).
+This needs a broker token with write on the `workloads` cache, such as an operator's. Its streams
+stay. felixd has no stop command yet ([#101](https://github.com/GetFelix/felixd/issues/101)).
 
 ## Upgrade or retire a node
 
 Drain first. `felixd drain node-1 --wait` makes the node release each workload so others carry
-on at once, and returns when it holds nothing. It exits 1 after `--timeout-secs` (300), which is also what happens for a node of an older build, since it never acknowledges the mark. Then stop it,
+on at once, and returns when it holds nothing. It exits 1 after `--timeout-secs` (300), which is
+also what happens for a node of an older build, since it never acknowledges the mark. Then stop it,
 replace the binary, start it and `felixd undrain node-1`. Do the nodes one at a time, and let
 `ps` show every workload running before you move to the next.
 
-From this build on, a node that meets a record from a newer build leaves that workload alone and never fails it.
-Upgrade every node before you rely on a feature of the new build.
+Builds after 0.1.0-preview.1 leave a workload alone when they meet a record from a newer build,
+instead of failing it. Upgrade every node before you rely on a feature of the new build.
 
-A build from before the degraded record cannot read it and fails the workload as poison, so
+A node on 0.1.0-preview.1 cannot read the degraded record and fails the workload as poison, so
 while any such node is left, start the new agents with `--stuck-after-ms 0`. The new nodes then
 retry a stuck workload for ever and write no record. Restart them without it once every node is
 new.
