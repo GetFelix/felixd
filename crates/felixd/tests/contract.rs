@@ -554,16 +554,29 @@ async fn a_restore_that_runs_out_of_fuel_is_left_for_an_operator() {
     t.put_spec(&spec).await;
     let _second = t.start_agent();
     t.publish_all(INPUT, inputs(&["y"])).await;
+    // The second agent claims only after the first one's lease has expired
+    // and its own claim delay has passed, so wait for the record, not a
+    // fixed time.
+    assert_eq!(
+        t.needs_operator_recorded().await,
+        OperatorReason::RestoreFuel
+    );
+    eventually("the lease released", Duration::from_secs(30), || async {
+        t.lease(ID).await.is_none().then_some(())
+    })
+    .await;
+    let records = t.read_all(OUTPUT).await.len();
     tokio::time::sleep(LEASE_TTL * 2).await;
-    assert!(t.lease(ID).await.is_none(), "the workload was held");
+    assert!(t.lease(ID).await.is_none(), "the workload was held again");
+    assert_eq!(
+        t.read_all(OUTPUT).await.len(),
+        records,
+        "a node claimed it again or recorded it twice"
+    );
     assert_eq!(
         t.outputs(OUTPUT).await.len(),
         outputs,
         "something was written"
-    );
-    assert_eq!(
-        t.needs_operator_recorded().await,
-        OperatorReason::RestoreFuel
     );
     let spec = t.spec().await;
     assert_eq!(spec.state, WorkloadState::Running);

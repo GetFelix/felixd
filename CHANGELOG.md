@@ -2,32 +2,26 @@
 
 ## Unreleased
 
-- The requester (#182). Workload contract 0.3 adds `publisher` to `record-in`:
-  the principal the broker authenticated an input record's write from, `none`
-  when the broker stored none and for another workload's output. felixd runs
-  0.3 and 0.2 workloads side by side, chosen by the interfaces a component
-  exports; a 0.2 workload is unchanged and never sees the publisher, and
-  `wit/workload.wit` moved to `wit/0.2/workload.wit` beside the new
-  `wit/0.3/workload.wit`. The agent asks the broker for publishers and passes
-  the stored value on every path (live, takeover, resume, merge, `check`,
-  `replay`). Admission is built on 0.3 and records the requester in each
-  decision (`requester`, left out when none). Breaking: a request whose
-  publisher the broker did not record is rejected as `no_requester`, so a
-  deployment that brings up the 0.3 admission needs a broker that stores
-  publishers, `FELIX_RECORD_PUBLISHERS=true` on a lone broker or the
-  `publisher_principal` fleet feature finalized in a cluster (one-way: storage
-  format v6, which older brokers refuse), before `felixd init`. A deployment
-  that already runs admission keeps its 0.2 module, which records no requester,
-  until module upgrades exist: a workload's module cannot change once it has
-  written output, and admission's id is fixed. Upgrade every node and the CLI
-  before submitting a 0.3 module or running the 0.3 admission: a felixd from
-  this release on leaves a module of a newer contract to an operator, and
-  earlier builds fail the workload; an older `felixd run` cannot read the new
-  reasons. Decision `reason` now tolerates a code a newer build wrote
-  (`unknown`). New `Policy::requesters` limits who may ask (`not_permitted`; the
-  `admission-requesters` example). `felixd_runtime::Input` and
-  `felixd_core::admission::decide` take the publisher. The test stacks turn
-  recording on.
+- Upgrade check from a snapshot (#29). `felixd replay --diff --module` and
+  `replay --to ... --module` start the new module from the workload's nearest
+  snapshot (before `--from` for a diff, before the end of the range for `--to`)
+  when the new module's `felixd.snapshot` custom section says it reads the
+  layout the workload's module wrote, and from the initial state when it does
+  not, saying which and why on stderr. The section is optional JSON,
+  `{"format": "<id>", "reads": ["<id>", ...]}`, additive to contract 0.2
+  (docs/contract.md, "Snapshot layouts"); a module without one is readable only
+  by itself. A new module that declares the layout and traps or runs out of
+  fuel restoring it is reported as "snapshot not readable by the new module",
+  not as a divergence. A section that does not parse is an error when it is
+  read, and the message points at `--from-start`. New `--from-start` always
+  replays from the initial state. `--module` takes a component file as well as
+  the hash of one in the `modules` cache. The `--to` form now prints two lines
+  on stderr, `started from ...` and `ran N more of the inputs below E`, where
+  it printed one. In `felixd_agent::replay`, `replay` and `diff` take
+  `from_start`, `Replayed` carries a `Start` in place of `restored` and `Diffed`
+  gains `start` (breaking for library users). The `counter` example declares
+  its layout and has cargo features that build the variants the tests replay
+  against it; `felixd_testkit::workload_with` builds one.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and
@@ -92,6 +86,32 @@
   with every log at trace level, then scans every record, cache entry, metric,
   log line and refused-credential error for the token bytes. Per-lease tokens
   wait on scoped token minting in Felix (GetFelix/felix#1625).
+- The requester (#182). Workload contract 0.3 adds `publisher` to `record-in`:
+  the principal the broker authenticated an input record's write from, `none`
+  when the broker stored none and for another workload's output. felixd runs
+  0.3 and 0.2 workloads side by side, chosen by the interfaces a component
+  exports; a 0.2 workload is unchanged and never sees the publisher, and
+  `wit/workload.wit` moved to `wit/0.2/workload.wit` beside the new
+  `wit/0.3/workload.wit`. The agent asks the broker for publishers and passes
+  the stored value on every path (live, takeover, resume, merge, `check`,
+  `replay`). Admission is built on 0.3 and records the requester in each
+  decision (`requester`, left out when none). Breaking: a request whose
+  publisher the broker did not record is rejected as `no_requester`, so a
+  deployment that brings up the 0.3 admission needs a broker that stores
+  publishers, `FELIX_RECORD_PUBLISHERS=true` on a lone broker or the
+  `publisher_principal` fleet feature finalized in a cluster (one-way: storage
+  format v6, which older brokers refuse), before `felixd init`. A deployment
+  that already runs admission keeps its 0.2 module, which records no requester,
+  until module upgrades exist: a workload's module cannot change once it has
+  written output, and admission's id is fixed. Upgrade every node and the CLI
+  before submitting a 0.3 module or running the 0.3 admission: a felixd from
+  this release on leaves a module of a newer contract to an operator, and
+  earlier builds fail the workload; an older `felixd run` cannot read the new
+  reasons. Decision `reason` now tolerates a code a newer build wrote
+  (`unknown`). New `Policy::requesters` limits who may ask (`not_permitted`; the
+  `admission-requesters` example). `felixd_runtime::Input` and
+  `felixd_core::admission::decide` take the publisher. The test stacks turn
+  recording on.
 - A scheduler that is itself a felixd workload (#60). Submit
   `scheduler.wasm` (in the container image) as `felixd run --id scheduler
   --input sys.specs --input sys.facts`. It reads spec records and node facts

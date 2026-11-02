@@ -143,12 +143,53 @@ restores the nearest snapshot at or before that point on a fresh instance, runs 
 `inspect` returns. `--diff` replays a range (`--from`, `--to`, by default every
 input with a recorded output) and compares each output with the one on the
 stream, reporting the first divergence with the node, epoch, input offset and
-both digests, and exits with 1 if it finds one. `--module <hash>` runs another
-module from the `modules` cache over the recorded inputs instead, so
-`--diff --module` checks an upgrade before it goes live. Replay writes nothing,
+both digests, and exits with 1 if it finds one. Replay writes nothing,
 but until Felix can report a stream's tail to a reader
 ([Felix #1621](https://github.com/GetFelix/felix/issues/1621)) it needs publish
 grants on the streams it reads, as `felixd check` does.
+
+To check an upgrade before it goes live, run the new version of a module over
+the recorded inputs and compare its outputs with the recorded ones. This builds
+a changed `counter`, which counts by two once the total reaches ten, and checks
+it against the `counter` workload from above. Submit that workload with
+`--snapshot-every 5` and give it 12 inputs first:
+
+```
+cargo build --manifest-path workloads/Cargo.toml --release --target wasm32-unknown-unknown --package counter --features changed
+wasm-tools component new workloads/target/wasm32-unknown-unknown/release/counter.wasm -o counter-changed.wasm
+felixd replay --id counter --diff --from 5 --module counter-changed.wasm
+```
+
+It runs the new module from input 5 and prints the first input whose output
+differs, then exits with 1:
+
+```
+first divergence at input 10 output 0: recorded by node <node> at epoch 1 with sha256 <recorded>, replayed with sha256 <replayed>
+```
+
+A new module that behaves the same prints
+`inputs from 5 below 12: 7 outputs match` and exits with 0. `--module` takes a
+component file, as here, or the sha256 of a module already in the `modules`
+cache. `sha256sum counter-changed.wasm` gives the hash of a file, and `felixd
+run` stores the module it submits in that cache.
+
+Before it runs input 5, the new module needs the state the workload had there.
+Stderr says where it got it from. Here it says `started from the snapshot of
+input 4`: the new module restored the snapshot the old module saved after input
+4, which is quick. The alternative is to start from the initial state and run
+every earlier input, which takes as long as the history is long.
+
+A new module can restore the old module's snapshot only if it says it
+understands the snapshot's layout, the format of the saved state. It says so in
+a custom section of its component named `felixd.snapshot`, which names the
+layout it writes and the others it can restore. The `counter` example declares
+one ([Snapshot layouts](docs/contract.md#snapshot-layouts)). When the new module
+declares none, or not that layout, the command starts from the initial state
+and says why. `--from-start` does that on purpose. A diff starts at input 0
+unless `--from` says otherwise, and there is no snapshot before input 0, so
+pass a `--from` after a snapshot. [Checking an
+upgrade](docs/design.md#checking-an-upgrade) lists every case.
+
 `felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
 workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input
@@ -420,7 +461,11 @@ are still planned.
   through it.
 - **Checking an upgrade before it goes live.** Run a new version of a module
   against recorded inputs and compare its outputs with what the current
-  version produced, before switching it on.
+  version produced, before switching it on. `felixd replay --id orders --diff
+  --from 120000 --module orders-next.wasm` runs the new version from the
+  snapshot before input 120000, if it declares it can read that snapshot, and
+  reports the first input whose output differs, or that every output matches.
+  [Try it](#try-it) has a runnable example.
 
 A worked example: a payments team runs a fraud-scoring workload per merchant.
 A node dies during a traffic spike. Within one lease TTL, its workloads are
@@ -488,7 +533,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain` and metrics done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics and the upgrade check done |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates

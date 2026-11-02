@@ -266,6 +266,109 @@ boundaries (by key range, say) lets the host write only the chunks that
 changed: the host hashes each chunk and does not write one whose sha256 the
 previous snapshot already holds.
 
+## Snapshot layouts
+
+A workload's snapshot is the state it saved after some input. Its snapshot
+layout is the format of that state: how it is split into chunks and what the
+bytes of each chunk mean. A new version of a module can start from the old
+version's snapshot only if it understands the old layout.
+
+A module says which layouts it knows in a custom section of its component
+named `felixd.snapshot`. The section is optional. `felixd replay --module`
+reads it to start a new module from a recorded snapshot instead of replaying
+the whole history ([design.md, Checking an upgrade](design.md#checking-an-upgrade)).
+
+### Declaring layouts
+
+The section holds UTF-8 JSON with two fields:
+
+```json
+{"format": "counter.2", "reads": ["counter"]}
+```
+
+| Field | Meaning |
+|---|---|
+| `format` | The layout of the snapshots this module writes. |
+| `reads` | Other layouts this module's `restore` accepts. A module always reads its own `format`, so `reads` may be left out. |
+
+Here the module writes layout `counter.2` and can also restore snapshots of
+layout `counter`, which an earlier version wrote.
+
+A layout id is 1 to 128 bytes of printable ASCII without spaces. `reads`
+lists at most 64. The section appears once and has no other fields.
+
+### Adding the section
+
+In Rust, a static with a `link_section` puts its bytes in a custom section of
+the core module. The array length is the length of the JSON:
+
+```rust
+#[used]
+#[unsafe(link_section = "felixd.snapshot")]
+static SNAPSHOT_LAYOUT: [u8; 42] = *br#"{"format":"counter.2","reads":["counter"]}"#;
+```
+
+Build the core module and wrap it into a component as usual, with
+`cargo build --release --target wasm32-unknown-unknown` and `wasm-tools
+component new`. The wrapping keeps the section, inside the component's core
+module. `strings counter.wasm | grep felixd.snapshot` prints the section's name
+and JSON when it is there. The `counter` example in
+[workloads/counter](../workloads/counter/README.md) wraps the static in a small
+macro and builds the variants the tests use. Any toolchain that can add a
+custom section to the core module or to the component will do.
+
+### What a declaration promises
+
+Two modules are involved: the one that wrote the snapshots, and the one that
+restores them.
+
+- The module that wrote a snapshot promises that the `format` it names is the
+  layout of its snapshots. Two modules that name the same `format` promise that
+  chunks of it mean the same state to both.
+- The module that restores lists the layout in `reads` (or names it as its own
+  `format`). It promises that `restore` on chunks of that layout gives the
+  state the writing module had, and that `step` carries on from there.
+- A module with no section writes a layout only the exact same module, by hash,
+  can read. A recorded module that declares nothing therefore has no snapshot
+  another module can start from.
+
+The WIT is unchanged and a module without a section is still a valid 0.2
+workload.
+
+### What the host does with it
+
+The host does not check the promise. It runs a workload without looking at the
+section, and a workload resumes from its own module's snapshots.
+
+`felixd replay --module` reads the section of the workload's module and of the
+new module, but only when the new module is not the workload's own and a
+snapshot lies before the replay's first input. It then starts the new module
+from that snapshot if the layout of the snapshot is the new module's `format`
+or in its `reads`, and from the initial state otherwise, saying why. With no
+`--module`, with the workload's own module, with `--from-start`, or when no
+snapshot qualifies (`--from 0`, the default, has none), the section is never
+read.
+
+If the new module declares the layout and then traps or runs out of fuel
+restoring a snapshot, the command stops with "snapshot not readable by the new
+module" and the snapshot's input offset. That is not reported as a divergence
+of outputs. A module that restores a layout but misreads it shows up as
+outputs that differ, so a declaration is worth no more than the tests behind
+it.
+
+A section that does not parse, in either module, is an error when it is read.
+The message names the module and says that `--from-start` replays without
+reading it. The module still runs.
+
+### Limits
+
+- The host takes the section from any core module or component inside the file.
+  A composed component that holds two workloads with sections fails with "more
+  than one `felixd.snapshot` section".
+- A replay with another module reads and decodes the whole snapshot stream to
+  find the nearest snapshot, as any replay does. A snapshot record that does
+  not decode fails it even with `--from 0`.
+
 ## Records
 
 The output stream moves to version 4 and the snapshot stream to version 3.
@@ -414,6 +517,7 @@ design.md fixes the outline. These are the choices this note adds:
 6. The default output name is `out`, and a downstream workload reads one
    named output. Reading several outputs at once waits for the determinism
    work in #62.
+<<<<<<< HEAD
 7. The host serves 0.2 and 0.3 side by side, chosen by the exported interface
    names, instead of ending 0.2. A workload that does not need the publisher
    should not have to be rebuilt and resubmitted as new code.
@@ -422,3 +526,8 @@ design.md fixes the outline. These are the choices this note adds:
    not published by anyone.
 9. The publisher of another workload's output is always `none`, so a
    pipeline's downstream does not depend on which node wrote the record.
+=======
+7. Snapshot compatibility is declared in an optional custom section, not in the
+   WIT, so declaring it needs no new contract version and a module without it
+   stays valid.
+>>>>>>> origin/main

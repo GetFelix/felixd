@@ -50,6 +50,7 @@ cargo test -p felixd-runtime
 cargo test -p felixd-runtime --test example_workloads   # counter and window
 cargo test -p felixd-runtime --test limits              # fuel, traps, memory (faulty)
 cargo test -p felixd-runtime --test contract            # the contract's rules (faulty)
+cargo test -p felixd-runtime --test snapshot_layouts    # snapshots across counter's variants
 ```
 
 See [docs/contract.md](../../docs/contract.md) for the interface and what each side guarantees.

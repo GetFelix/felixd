@@ -10,6 +10,8 @@ dev-dependency of `felixd-runtime` and `felixd`. It depends on no other felixd c
   core module into a component with `wit-component`. It returns the component's bytes and panics
   if the build fails. It builds into `$CARGO_TARGET_DIR/workloads`, or `target/workloads` when that
   is unset, and takes a lock so tests in one process do not build at once.
+- `workload_with(name, features)` is the same with the workload crate's cargo features turned on.
+  `counter` has features that build the variants an upgrade check is tested with.
 - `contract_01_component()` returns a small component of the old contract, 0.1, which the host
   must refuse. `newer_contract_component()` returns one that exports a contract version the host
   does not know, which it must leave to an operator.
