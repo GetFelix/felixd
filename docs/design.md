@@ -863,11 +863,8 @@ divergence is reported with the input offset, the epoch of the record, the node
 its epoch's claim names and both digests, and the command exits with 1. That
 checks determinism; CI runs it on every example workload after a takeover.
 
-The same comparison with a different module (`--module <hash>`, a module in
-the `modules` cache) checks an upgrade before it goes live: the new version
-runs over the recorded inputs from its initial state, since the snapshots hold
-the old version's state, and the diff shows where its outputs differ (#29).
-`--module` without `--diff` prints the new version's state at `--to`.
+With `--module`, the same comparison checks an upgrade; see
+[Checking an upgrade](#checking-an-upgrade).
 
 Replay needs no lease and writes nothing. It should run anywhere with read
 grants, but it reads the input and snapshot streams' tails with a refused
@@ -875,6 +872,70 @@ conditional write, so for now it needs publish grants on those streams too
 (Felix #1621). `felixd check` has the same gap. A node reads its input's tail
 with a read past the end instead, which Felix refuses with the tail, so a node
 needs only read on its inputs.
+
+### Checking an upgrade
+
+To see whether a new version of a workload's module still produces the outputs
+on the stream, run it over the recorded inputs:
+
+```
+felixd replay --id orders --diff --from 120000 --module orders-next.wasm
+```
+
+`--module` takes a component file, or the sha256 of one in the `modules`
+cache. The diff runs the new module from input 120000 on and compares each
+output with the recorded one. If none differs it prints
+`inputs from 120000 below 150000: 30000 outputs match` and exits with 0.
+Otherwise it prints the first input whose output differs, with the node, the
+epoch and both digests, and exits with 1. `--all` lists every input that
+differs.
+
+Before it can run input 120000, the new module needs the state the workload had
+there. There are two ways to get it. The replay can restore a snapshot, which
+is quick. Or it can start from the initial state and run every input before
+120000, which takes as long as the history is long. Stderr says which, for
+example for a workload that snapshots every 1000 inputs:
+
+```
+started from the snapshot of input 119999
+```
+
+**When a snapshot can be used.** A snapshot is the state the workload saved
+after some input. Its layout is the format of that state: how it is split into
+chunks and what the bytes mean. A new module can restore a snapshot only if it
+understands the layout the old module wrote. A module says what it understands
+in a custom section of its component named `felixd.snapshot`, which names the
+layout it writes and the other layouts it can restore
+([contract.md, Snapshot layouts](contract.md#snapshot-layouts)).
+
+Every snapshot on the stream was written by the module in the spec. A workload
+runs one module for its life: `felixd run` refuses a new module once the output
+or snapshot stream has a record. So the question is only whether the new module
+understands that one module's layout.
+
+| The replay finds | It starts from | stderr says |
+|---|---|---|
+| `--from-start` | the initial state | `started from the initial state, as asked` |
+| no snapshot before `--from` (always so with `--from 0`, the default) | the initial state | `started from the initial state` |
+| a snapshot, and the new module is the workload's own or understands its layout | the nearest snapshot before `--from` | `started from the snapshot of input N` |
+| a snapshot, and the new module does not understand its layout | the initial state | `started from the initial state, since ...` and the reason |
+| a snapshot the new module says it understands, but its `restore` traps or runs out of fuel | nowhere: the command stops | `snapshot not readable by the new module` and the snapshot's input offset |
+
+The reason in the fourth row is one of three. The module the workload runs
+declares no layout, so only it can read its snapshots. The new module declares
+no layout. Or the layout of the snapshots is neither the new module's `format`
+nor in its `reads`.
+
+The last row is an error, not a divergence of outputs. It exits with 1, as
+every error and every divergence does, so tell them apart by the output: a
+divergence is on stdout, and this is only on stderr. `--from-start` runs the
+check without reading the snapshot.
+
+A diff starts at input 0 unless `--from` says otherwise, and no snapshot is
+before input 0. To check from a snapshot, pass a `--from` after one.
+
+`--module` without `--diff` prints the new module's state at `--to`. It
+restores the nearest snapshot before the end of the replay, by the same rules.
 
 ## Grants
 
@@ -1011,7 +1072,7 @@ workload carries on.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
