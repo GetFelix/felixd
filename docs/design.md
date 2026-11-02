@@ -1302,14 +1302,16 @@ with the message below. A replay to an offset older than every snapshot left
 starts from the initial state and replays the input, which works while the
 input is still whole.
 
-A merge log that has been trimmed is a different matter: `check` from the start needs every
-entry, and a replay before the oldest kept snapshot needs the
-entries it deleted. They stop and say which stream they needed, the offset
-they asked for and the oldest offset Felix holds, for example:
+A merge log that has been trimmed is a different matter: `check` from the
+start needs every entry, and a replay before the oldest kept snapshot needs
+the entries it deleted. They stop and say which stream they needed, the offset
+they asked for and the oldest offset Felix holds. `check` adds the way out,
+`--from-snapshot`, for example:
 
 ```
 felixd check needs wl.orders.merge from offset 0, but Felix holds it only from
-offset 412: the history before was trimmed
+offset 412: the history before was trimmed; `felixd check --from-snapshot`
+starts after a snapshot instead
 ```
 
 A check that starts from the oldest kept snapshot, as it does by default once

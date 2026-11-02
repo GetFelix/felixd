@@ -112,7 +112,7 @@ fixes it. That includes kinds 5 and 6 read by a build from before them, so upgra
 a workload can write them. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
-([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names, and
+([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names (by default only once the `.out` head is deleted), and
 `felixd replay` reads from the start while the records are there. Its holder appends it after a snapshot of its own
 when the spec sets `keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed
 deletes `.snap` and the merge log below the snapshot and merge log floors. It continues with:

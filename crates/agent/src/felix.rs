@@ -631,10 +631,15 @@ impl Trimmed {
         match Trimmed::of(&error) {
             Some(t) => anyhow::anyhow!(
                 "{command} needs {} from offset {}, but Felix holds it only from offset {}: \
-                 the history before was trimmed",
+                 the history before was trimmed{}",
                 t.stream,
                 t.requested,
-                t.oldest
+                t.oldest,
+                if command == "felixd check" {
+                    "; `felixd check --from-snapshot` starts after a snapshot instead"
+                } else {
+                    ""
+                }
             ),
             None => error,
         }

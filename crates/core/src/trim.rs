@@ -2,7 +2,8 @@
 //!
 //! A trim record on `.out` says below which offsets of the snapshot stream,
 //! the merge log and each input this workload's resume reads nothing.
-//! `felixd check` starts at the oldest kept snapshot the last trim names;
+//! `felixd check --from-snapshot` starts at the oldest kept snapshot the last
+//! trim names, and does so by default once the `.out` head is deleted;
 //! `felixd replay` reads from the start while records are there.
 //!
 //! The record also carries what a head cut off `.out` would take with it:

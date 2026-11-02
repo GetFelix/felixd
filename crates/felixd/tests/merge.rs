@@ -586,6 +586,7 @@ async fn a_failover_after_the_merge_log_is_trimmed_loses_nothing() {
         error.contains(&format!("needs {MERGE} from offset 0")),
         "{error}"
     );
+    assert!(error.contains("--from-snapshot"), "{error}");
 }
 
 /// Waits for `records` outputs, then checks every input record was stepped
