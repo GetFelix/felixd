@@ -19,8 +19,30 @@ use crate::felix::Felix;
 const PAUSE: Duration = Duration::from_secs(10);
 
 static PAUSED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static FACTS_PAUSED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static WARNED_NOT_ENABLED: AtomicBool = AtomicBool::new(false);
 static WARNED_NO_GRANT: AtomicBool = AtomicBool::new(false);
+static WARNED_NO_FACTS_GRANT: AtomicBool = AtomicBool::new(false);
+
+/// Which kind of stream is being trimmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// One the workload owns, `.snap` or the merge log.
+    Owned,
+    /// `sys.facts`, which every node appends to and whose trim grant is
+    /// separate, so a node that lacks it still deletes the owned streams.
+    Facts,
+}
+
+impl Kind {
+    /// How many times a refused tail is asked again at the one Felix names.
+    fn retries(self) -> usize {
+        match self {
+            Kind::Owned => 0,
+            Kind::Facts => BUSY_RETRIES,
+        }
+    }
+}
 
 /// What came of trimming one stream.
 #[derive(Debug, PartialEq, Eq)]
@@ -37,25 +59,34 @@ pub(crate) enum Deletion {
 /// Whether to try deleting now. False for a short while after Felix said
 /// it cannot trim.
 pub(crate) fn may_delete() -> bool {
-    let paused = PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    not_paused(&PAUSED_UNTIL)
+}
+
+/// As [`may_delete`], for `sys.facts`: also false for a short while after the
+/// node's token turned out not to trim it.
+pub(crate) fn may_delete_facts() -> bool {
+    may_delete() && not_paused(&FACTS_PAUSED_UNTIL)
+}
+
+fn not_paused(until: &Mutex<Option<Instant>>) -> bool {
+    let paused = until.lock().unwrap_or_else(|e| e.into_inner());
     paused.is_none_or(|until| Instant::now() >= until)
 }
 
-/// How many times a trim is asked again at the tail Felix names, for a stream
-/// other writers keep appending to.
-pub(crate) const BUSY_RETRIES: usize = 3;
+/// How many times `sys.facts` is asked again at the tail Felix names.
+const BUSY_RETRIES: usize = 3;
 
 /// Hides the records of `stream` below `before`. `tail` is the stream's next
-/// offset as far as the caller knows; the trim record lands there. A refused
-/// tail is asked again at the one Felix names up to `retries` times.
+/// offset as far as the caller knows; the trim record lands there. For
+/// [`Kind::Facts`] a refused tail is asked again at the one Felix names.
 pub(crate) async fn trim_stream(
     felix: &Felix,
     stream: &str,
     before: u64,
     tail: u64,
-    retries: usize,
+    kind: Kind,
 ) -> Deletion {
-    let result = settle(tail, retries, |expected| {
+    let result = settle(tail, kind.retries(), |expected| {
         felix.trim_before(stream, before, expected)
     })
     .await;
@@ -79,11 +110,15 @@ pub(crate) async fn trim_stream(
                          nothing; finalize the head_trim fleet feature to let it delete"
                     );
                 }
-                pause();
+                pause(Kind::Owned);
                 Deletion::Unavailable
             }
             Failure::NoGrant => {
-                if !WARNED_NO_GRANT.swap(true, Ordering::Relaxed) {
+                let warned = match kind {
+                    Kind::Owned => &WARNED_NO_GRANT,
+                    Kind::Facts => &WARNED_NO_FACTS_GRANT,
+                };
+                if !warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         stream,
                         %error,
@@ -92,7 +127,7 @@ pub(crate) async fn trim_stream(
                          stream.manage includes it)"
                     );
                 }
-                pause();
+                pause(kind);
                 Deletion::Unavailable
             }
             Failure::TimedOut => {
@@ -113,9 +148,14 @@ pub(crate) async fn trim_stream(
     }
 }
 
-fn pause() {
-    let mut paused = PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
-    *paused = Some(Instant::now() + PAUSE);
+/// Holds off deleting for a while: everything for the owned streams, and
+/// only `sys.facts` for a missing grant on it.
+fn pause(kind: Kind) {
+    let until = match kind {
+        Kind::Owned => &PAUSED_UNTIL,
+        Kind::Facts => &FACTS_PAUSED_UNTIL,
+    };
+    *until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + PAUSE);
 }
 
 /// How one trim call ended.

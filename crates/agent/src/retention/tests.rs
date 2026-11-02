@@ -147,11 +147,37 @@ fn a_fleet_without_head_trim_is_told_apart_from_other_refusals() {
 #[test]
 fn a_pause_holds_off_deletion_until_it_ends() {
     // Run apart from other tests that pause: they share the process.
-    *PAUSED_UNTIL.lock().unwrap() = None;
+    reset();
     assert!(may_delete());
-    pause();
+    pause(Kind::Owned);
     assert!(!may_delete());
     *PAUSED_UNTIL.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
     assert!(may_delete());
+    reset();
+}
+
+/// A node whose token lacks only the `sys.facts` grant must go on deleting
+/// the streams it owns.
+#[test]
+fn a_missing_facts_grant_does_not_pause_the_other_deletions() {
+    reset();
+    pause(Kind::Facts);
+    assert!(may_delete());
+    assert!(!may_delete_facts());
+    reset();
+    pause(Kind::Owned);
+    assert!(!may_delete_facts());
+    reset();
+}
+
+/// Only `sys.facts` is asked again at a tail Felix names, and only a few times.
+#[test]
+fn only_the_facts_stream_is_asked_again() {
+    assert_eq!(Kind::Owned.retries(), 0);
+    assert_eq!(Kind::Facts.retries(), 3);
+}
+
+fn reset() {
     *PAUSED_UNTIL.lock().unwrap() = None;
+    *FACTS_PAUSED_UNTIL.lock().unwrap() = None;
 }

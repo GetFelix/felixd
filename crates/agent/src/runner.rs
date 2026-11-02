@@ -29,7 +29,7 @@ use crate::merge::MergeLog;
 use crate::metrics::{self, InputMetrics, WorkloadMetrics};
 use crate::module_store::{self, Fetched};
 use crate::output::OutputLog;
-use crate::retention::{self, Deletion};
+use crate::retention::{self, Deletion, Kind};
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
 
@@ -1102,7 +1102,7 @@ impl Steps<'_> {
                         self.snap_stream,
                         before,
                         self.snap_tail,
-                        0,
+                        Kind::Owned,
                     )
                     .await;
                     if let Deletion::Done { landed: Some(at) } = deletion {
@@ -1112,7 +1112,7 @@ impl Steps<'_> {
                 }
                 Owned::MergeLog => {
                     let stream = names::merge_stream(id);
-                    self.trim_at_tail(&stream, before, 0).await
+                    self.trim_at_tail(&stream, before, Kind::Owned).await
                 }
             };
             match (deletion, owned) {
@@ -1122,10 +1122,8 @@ impl Steps<'_> {
                 (Deletion::Later, _) => {}
             }
         }
-        if let Some(before) = facts {
-            let deletion = self
-                .trim_at_tail(names::FACTS, before, retention::BUSY_RETRIES)
-                .await;
+        if let Some(before) = facts.filter(|_| retention::may_delete_facts()) {
+            let deletion = self.trim_at_tail(names::FACTS, before, Kind::Facts).await;
             if let Deletion::Done { .. } = deletion {
                 self.deleted.facts_floor = before;
             }
@@ -1133,9 +1131,9 @@ impl Steps<'_> {
     }
 
     /// Trims `stream` below `before` at the tail Felix reports now.
-    async fn trim_at_tail(&self, stream: &str, before: u64, retries: usize) -> Deletion {
+    async fn trim_at_tail(&self, stream: &str, before: u64, kind: Kind) -> Deletion {
         match self.felix.read_tail(stream).await {
-            Ok(tail) => retention::trim_stream(self.felix, stream, before, tail, retries).await,
+            Ok(tail) => retention::trim_stream(self.felix, stream, before, tail, kind).await,
             Err(error) => {
                 tracing::warn!(stream, %error, "reading the tail to trim at failed");
                 Deletion::Later

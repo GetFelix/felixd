@@ -79,7 +79,9 @@ impl Trim {
 
     /// The offset to delete `sys.facts` below, if `workload` is the scheduler,
     /// reads it among its `inputs`, and that floor is past what is `done`.
-    /// Only the scheduler reads `sys.facts`, so its own floor is the lowest.
+    /// Only the scheduler reads `sys.facts`: [`crate::spec::validate_inputs`]
+    /// refuses a system stream as any other workload's input. Its own floor is
+    /// therefore the lowest.
     pub fn facts_floor(&self, workload: &str, inputs: &[String], done: Deleted) -> Option<u64> {
         if workload != names::SCHEDULER {
             return None;

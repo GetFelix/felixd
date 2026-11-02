@@ -132,10 +132,10 @@ fn a_principal_holding_two_roles_or_a_nested_role_is_refused() {
 
 /// `keep_snapshots` trims `.snap` and the merge log from the node that holds
 /// the workload, so a node is granted `stream.trim` on the workload streams
-/// and no role is granted it on the system ones. Admission's `stream.manage`
-/// includes it at the broker.
+/// and no role is granted it on the system namespace as a whole. Admission's
+/// `stream.manage` includes it at the broker.
 #[test]
-fn a_node_may_trim_workload_streams_only() {
+fn a_node_may_trim_workload_streams_but_not_the_system_namespace() {
     assert!(holds(Role::Node, "stream.trim", "stream:t/prod/*"));
     for role in [Role::Admission, Role::Submitter] {
         assert!(!holds(role, "stream.trim", "stream:t/prod/*"), "{role:?}");

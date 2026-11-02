@@ -211,8 +211,9 @@ Felix fleet to have finalized `head_trim`, a one-way step, and a token with
 workload runs on and the node logs a warning once. Inputs and the output stream
 are not deleted, with one exception: a scheduler run with `--keep-snapshots`
 also deletes the node facts on `sys.facts` that no kept snapshot reads, which
-keeps that stream to about `keep-snapshots x snapshot-every` records of 150
-bytes. Run `felixd init` again after upgrading so nodes get the grant for it.
+keeps that stream to about `keep-snapshots x snapshot-every` facts (each about
+150 bytes plus the ids of the workloads its node holds, so 3,000 facts and
+roughly 1 MB at `--keep-snapshots 3` with the defaults). Run `felixd init` again after upgrading so nodes get the grant for it.
 [Retention](docs/design.md#retention) has the details, including what
 `felixd check` and `felixd replay` do afterwards.
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)

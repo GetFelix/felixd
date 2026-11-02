@@ -1223,8 +1223,9 @@ call.
 ### The scheduler's facts
 
 Every node appends a fact to `sys.facts` every `--facts-every-ms` while a
-scheduler runs, so the stream grows with the number of nodes and nothing but
-the scheduler reads it. The scheduler's trim record names a floor for it like
+scheduler runs, so the stream grows with the number of nodes. Only the
+scheduler reads it: `felixd run` and admission refuse a system stream as the
+input of any other workload. The scheduler's trim record names a floor for it like
 for any input, and its holder deletes `sys.facts` below that floor, in the
 same step as `.snap` and the merge log and only after the record has landed.
 A scheduler restored from a snapshot reads facts from the snapshot's position
@@ -1240,21 +1241,23 @@ is safe for the same reason as before: a trim only hides offsets below a floor
 already on `.out`.
 
 Nodes hold `stream.trim` on `sys.facts` by exact name ([Grants](#grants)), so
-run `felixd init` again after upgrading. Without it the holder logs one
-warning, and the facts stay.
+run `felixd init` again after upgrading. A node whose token lacks only that
+grant logs one warning, keeps its facts and tries again after ten seconds at
+its next scheduler snapshot; it goes on deleting `.snap` and the merge log of
+every workload it holds.
 
-What stays: the facts from the oldest kept snapshot on, so about
-`keep_snapshots` times the scheduler's snapshot interval. The scheduler takes
-a snapshot every `--snapshot-every` inputs (1,000 by default), counting spec
-records and facts together, and every `--snapshot-every-ms` of input time if
-set. A fact is about 120 bytes for a node with a short id that holds
+What stays: the facts from the oldest kept snapshot on, so at most about
+`keep_snapshots` times `--snapshot-every` facts (1,000 by default; the
+scheduler counts spec records and facts together), whatever the number of
+nodes. A fact is about 120 bytes for a node with a short id that holds
 nothing, 150 with a 36-character id, plus each held workload's id and three
-bytes. For `keep_snapshots 3` at the default that is at most about 3,000
-records, 450 KB, whatever the number of nodes. With `--snapshot-every-ms` the interval can be shorter: it
-holds about nodes x (`keep_snapshots` x interval / `--facts-every-ms`)
-records, so 10 nodes at the default 30 s and a 10-minute interval keep about
-600 records, 90 KB. Without `keep_snapshots` on the scheduler nothing is
-deleted and the stream grows as under [Placement](#placement).
+bytes. For example, `keep_snapshots 3` at the default keeps at most 3,000
+facts; if each node holds 8 workloads with 20-character ids, a fact is about
+330 bytes and the stream about 1 MB. A shorter `--snapshot-every-ms` keeps
+less: about nodes x (`keep_snapshots` x interval / `--facts-every-ms`) facts,
+so 10 nodes at the default 30 s and a 10-minute interval keep about 600.
+Without `keep_snapshots` on the scheduler nothing is deleted and the stream
+grows as under [Placement](#placement).
 
 `wl.scheduler.out` is not trimmed here. It waits with the other `.out`
 streams for #150.
@@ -1266,7 +1269,8 @@ streams for #150.
   needs. An input is deleted only below the lowest floor of all its readers
   ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
   workload's floor. Until then the input floors in the record are advice
-  nothing acts on, except for `sys.facts`, which only the scheduler reads.
+  nothing acts on, except for `sys.facts`, which only the scheduler reads
+  (no other workload may take a system stream as input).
 - `.out` is not trimmed. It is every downstream's input, it holds the first
   claim that spec lineage reads, and `felixd check` lines records up with
   claims from the start of the stream (#150).

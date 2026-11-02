@@ -484,8 +484,9 @@ fn facts_floor(trim: &Trim) -> u64 {
 /// With `keep_snapshots` the scheduler's holder trims `sys.facts` below the
 /// floor its trim record names, while the nodes keep appending to it. A
 /// failover then resumes from a kept snapshot and places new workloads.
-/// `felixd check` starts from the beginning of the merge log and `sys.facts`,
-/// so it says they were trimmed; a replay starts from a snapshot and works.
+/// A replay starts from a snapshot, so it never reads `sys.facts` below the
+/// floor and works. (`felixd check` starts at offset 0 and stops on the
+/// trimmed merge log first, which #19 already covers.)
 #[tokio::test]
 async fn sys_facts_is_trimmed_below_the_schedulers_floor_and_failover_carries_on() {
     let Some(t) = test_felix().await else {
@@ -532,11 +533,6 @@ async fn sys_facts_is_trimmed_below_the_schedulers_floor_and_failover_carries_on
     assert!(!parked, "the scheduler resumed into trimmed history");
 
     let merge = names::merge_stream(names::SCHEDULER);
-    let error = t.check_error(&["--id", names::SCHEDULER]);
-    assert!(
-        error.contains("the history before was trimmed"),
-        "check did not say what was trimmed: {error}"
-    );
     let last = t.felix.tail(&merge).await.unwrap() - 1;
     let (ok, state) = t.replay(&["--id", names::SCHEDULER, "--to", &last.to_string()]);
     assert!(ok, "felixd replay: {state}");

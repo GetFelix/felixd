@@ -50,7 +50,7 @@ impl Submission {
 /// spec finds everything else. Returns the module's hash.
 pub async fn submit(settings: &Settings, submission: Submission) -> Result<String> {
     names::validate_id(&submission.id)?;
-    validate_inputs(&submission.inputs)?;
+    validate_inputs(&submission.id, &submission.inputs)?;
     if let Some(why) =
         module::size_problem(submission.module.len() as u64, module::MAX_MODULE_BYTES)
     {

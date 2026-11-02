@@ -250,9 +250,26 @@ fn a_spec_names_one_input_or_several_distinct_ones() {
         .map(|i| i.to_string())
         .collect();
     assert_eq!(
-        validate_inputs(&many),
+        validate_inputs("w", &many),
         Err(InvalidInputs::Count(crate::merge::MAX_INPUTS + 1))
     );
+}
+
+/// `sys.facts` is trimmed below the scheduler's floor, so no other workload
+/// may read a system stream, whether it is submitted through admission or not.
+#[test]
+fn only_a_system_workload_reads_a_system_stream() {
+    let facts = vec!["wl.a.out".to_owned(), names::FACTS.to_owned()];
+    assert_eq!(
+        validate_inputs("orders", &facts),
+        Err(InvalidInputs::System(names::FACTS.to_owned()))
+    );
+    assert_eq!(validate_inputs(names::SCHEDULER, &facts), Ok(()));
+    assert_eq!(
+        validate_inputs(names::ADMISSION, &[names::INTAKE.to_owned()]),
+        Ok(())
+    );
+    assert_eq!(validate_inputs("orders", &["wl.a.out".to_owned()]), Ok(()));
 }
 
 #[test]

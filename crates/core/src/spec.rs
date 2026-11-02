@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::class::{ErrorClass, Failure};
 use crate::merge::MAX_INPUTS;
-use crate::{DecodeError, codec};
+use crate::{DecodeError, codec, names};
 
 /// How often a workload is snapshotted unless its spec says otherwise.
 pub const DEFAULT_SNAPSHOT_EVERY: u64 = 1000;
@@ -142,8 +142,25 @@ impl WorkloadSpec {
     }
 }
 
-/// Checks a list of inputs: 1 to [`MAX_INPUTS`] streams, none twice.
-pub fn validate_inputs(inputs: &[String]) -> Result<(), InvalidInputs> {
+/// Checks the inputs of `workload`: 1 to [`MAX_INPUTS`] streams, none twice,
+/// and no system stream unless the workload is a system one. The scheduler
+/// reads `sys.facts` and the holder trims it below the scheduler's floor, so
+/// no other workload can read it.
+pub fn validate_inputs(workload: &str, inputs: &[String]) -> Result<(), InvalidInputs> {
+    validate_input_list(inputs)?;
+    if let Some(input) = inputs
+        .iter()
+        .find(|input| input.starts_with(names::SYSTEM_PREFIX))
+        && !names::is_system(workload)
+    {
+        return Err(InvalidInputs::System(input.clone()));
+    }
+    Ok(())
+}
+
+/// The part of [`validate_inputs`] that needs no workload id, which a spec
+/// already written is held to when it is read.
+fn validate_input_list(inputs: &[String]) -> Result<(), InvalidInputs> {
     if inputs.is_empty() || inputs.len() > MAX_INPUTS {
         return Err(InvalidInputs::Count(inputs.len()));
     }
@@ -161,6 +178,8 @@ pub enum InvalidInputs {
     Count(usize),
     #[error("input {0} is listed twice")]
     Twice(String),
+    #[error("input {0} is a system stream, which only a system workload reads")]
+    System(String),
 }
 
 /// `inputs` in JSON: `"input": "a"` for one, `"inputs": ["a", "b"]` for
@@ -200,7 +219,7 @@ mod inputs_field {
                 ));
             }
         };
-        super::validate_inputs(&inputs).map_err(D::Error::custom)?;
+        super::validate_input_list(&inputs).map_err(D::Error::custom)?;
         Ok(inputs)
     }
 }
