@@ -17,7 +17,7 @@ it: `felixd init` writes it.
   or one of admission's own; the output stream is `wl.<id>.out`; the
   state is `running` or `stopped`; snapshot settings are at least 1; fuel per call is at most ten
   times the default, memory at most 1 GiB, snapshot fuel at most ten times the default, the module
-  at most 8 MiB and the replication factor 1 to 7. A decision reads nothing but its request, so
+  at most 64 MiB and the replication factor 1 to 7. A decision reads nothing but its request, so
   the same requests always get the same decisions.
 - **State:** none. A snapshot is empty.
 
@@ -35,7 +35,10 @@ felixd replay --id admission --diff --all --module <hash of the new module in mo
 ```
 
 It prints each request the new policy decides otherwise. `admission-strict` is such a module,
-allowing no more than the default fuel per call; the tests use it.
+allowing no more than the default fuel per call; the tests use it. Admission keeps no state, so its
+snapshots are empty, and it declares no snapshot layout (see
+[contract.md](../../docs/contract.md#snapshot-layouts)). A replay with another module therefore
+always starts from the initial state, which costs nothing here.
 
 ## Build
 

@@ -20,7 +20,7 @@
 name: felixd
 
 x-broker: &broker
-  image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.6.2}
+  image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.7.0-preview.2}
   depends_on:
     felix-dev-auth:
       condition: service_completed_successfully
@@ -69,7 +69,7 @@ x-felixd: &felixd
 
 services:
   felix-controlplane:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     environment:
       FELIX_CONTROLPLANE_STORAGE_BACKEND: memory
       # Dev tokens let the bootstrap token mint a token for any principal. The
@@ -93,7 +93,7 @@ services:
   # felixd's and felixctl's tokens and the brokers' certificate to the
   # felix-dev volume.
   felix-dev-auth:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     network_mode: "service:felix-controlplane"
     depends_on:
       felix-controlplane:
@@ -219,7 +219,7 @@ services:
   # Turns on what failover of Quorum streams and caches needs, then creates
   # the example input stream `in` with three replicas.
   felix-fleet:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     network_mode: "service:felix-controlplane"
     depends_on:
       broker-1: {condition: service_healthy}
@@ -282,7 +282,7 @@ services:
   # Publishes a numbered record to `in` ten times a second. Start it with
   # `docker compose --profile producer up -d producer`.
   producer:
-    image: ghcr.io/getfelix/felixctl:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felixctl:${FELIX_VERSION:-0.7.0-preview.2}
     profiles: ["producer"]
     environment: *client-env
     networks: [felix]

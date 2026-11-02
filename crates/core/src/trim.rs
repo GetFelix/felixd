@@ -2,8 +2,13 @@
 //!
 //! A trim record on `.out` says below which offsets of the snapshot stream,
 //! the merge log and each input this workload's resume reads nothing.
-//! `felixd check` and `felixd replay` read from the start while records are
-//! there.
+//! `felixd check` starts at the oldest kept snapshot the last trim names;
+//! `felixd replay` reads from the start while records are there.
+//!
+//! The record also carries what a head cut off `.out` would take with it:
+//! the spec record of the stream's first claim, which says what module and
+//! input the stream was written under, and the highest spec record claimed
+//! so far, which a stale node is refused by.
 //! Nothing is deleted yet: Felix has no call to trim a stream at an offset
 //! (Felix#1662). The record is what that deletion will follow.
 
@@ -39,6 +44,14 @@ pub struct Trim {
     /// workload's resume reads nothing. Other readers of a shared input may
     /// need more.
     pub input_floors: Vec<u64>,
+    /// The `sys.specs` record the stream's first claim names. The first trim
+    /// that can read one writes it, and every trim after copies it. `None`
+    /// when no claim names one, and in records written before it was carried.
+    pub first_spec: Option<u64>,
+    /// The highest spec record claimed on the stream up to this record, the
+    /// floor a claim written here would carry. `None` when none was, and in
+    /// records written before it was carried.
+    pub claimed: Option<u64>,
 }
 
 /// Why [`plan`] wrote nothing.
@@ -46,9 +59,8 @@ pub struct Trim {
 pub enum Skip {
     /// Fewer than `keep` snapshots, so nothing is past them.
     TooFew,
-    /// The newest snapshot is not the holder's own. Until it is, a stale
-    /// holder can still land a snapshot, of a lower step, that the next
-    /// resume would restore.
+    /// The newest snapshot is not the holder's own. The trim append is also
+    /// refused once a later holder has claimed, so this is a second guard.
     NotOwn,
     /// A floor would go below the previous trim's. History below that may be
     /// gone, so this would be a bug; nothing is trimmed.
@@ -64,6 +76,9 @@ pub enum Skip {
 /// The oldest kept snapshot is the one with the lowest step, not the oldest
 /// on the stream: a stale holder's snapshot can land after a newer holder's
 /// with a lower step.
+///
+/// The record keeps `previous`'s `first_spec`; the caller fills in what it
+/// reads from the stream when there is none, and `claimed`.
 pub fn plan(
     epoch: u64,
     keep: usize,
@@ -101,6 +116,8 @@ pub fn plan(
         snap_floor,
         merge_floor,
         input_floors,
+        first_spec: previous.and_then(|p| p.first_spec),
+        claimed: None,
     };
     if let Some(previous) = previous
         && (trim.step < previous.step
@@ -117,8 +134,13 @@ pub fn plan(
     Ok(trim)
 }
 
+const HAS_FIRST_SPEC: u8 = 1;
+const HAS_CLAIMED: u8 = 2;
+
 /// Appends a trim record's body: snapshot, step, snap floor, merge floor (8
-/// each), the input count (2) and each input's floor (8).
+/// each), the input count (2) and each input's floor (8). Then, only when
+/// there is a spec to carry, a flags byte (1 for `first_spec`, 2 for
+/// `claimed`) and each field it names (8), `first_spec` first.
 pub(crate) fn encode_body(trim: &Trim, out: &mut Vec<u8>) {
     for field in [trim.snapshot, trim.step, trim.snap_floor, trim.merge_floor] {
         out.extend(field.to_be_bytes());
@@ -128,10 +150,27 @@ pub(crate) fn encode_body(trim: &Trim, out: &mut Vec<u8>) {
     for floor in &trim.input_floors {
         out.extend(floor.to_be_bytes());
     }
+    let mut flags = 0;
+    if trim.first_spec.is_some() {
+        flags |= HAS_FIRST_SPEC;
+    }
+    if trim.claimed.is_some() {
+        flags |= HAS_CLAIMED;
+    }
+    if flags != 0 {
+        out.push(flags);
+        out.extend(
+            trim.first_spec
+                .iter()
+                .chain(&trim.claimed)
+                .flat_map(|n| n.to_be_bytes()),
+        );
+    }
 }
 
-/// Reads a trim record's body. Bytes past the input floors are refused, so a
-/// later format is not misread as this one.
+/// Reads a trim record's body. A body that ends at the input floors carries
+/// no spec. Flags other than 1, 2 and 3, and bytes past the fields they
+/// name, are refused, so a later format is not misread as this one.
 pub(crate) fn decode_body(body: &[u8]) -> Result<Trim, DecodeError> {
     let mut r = Reader::new(body);
     let snapshot = r.u64()?;
@@ -140,6 +179,19 @@ pub(crate) fn decode_body(body: &[u8]) -> Result<Trim, DecodeError> {
     let merge_floor = r.u64()?;
     let count = u16::from_be_bytes(r.array()?);
     let input_floors = (0..count).map(|_| r.u64()).collect::<Result<_, _>>()?;
+    let (mut first_spec, mut claimed) = (None, None);
+    if r.remaining() != 0 {
+        let flags = r.u8()?;
+        if flags == 0 || flags & !(HAS_FIRST_SPEC | HAS_CLAIMED) != 0 {
+            return Err(DecodeError::InvalidTrimFlags(flags));
+        }
+        if flags & HAS_FIRST_SPEC != 0 {
+            first_spec = Some(r.u64()?);
+        }
+        if flags & HAS_CLAIMED != 0 {
+            claimed = Some(r.u64()?);
+        }
+    }
     if r.remaining() != 0 {
         return Err(DecodeError::TrailingBytes(r.remaining()));
     }
@@ -149,6 +201,8 @@ pub(crate) fn decode_body(body: &[u8]) -> Result<Trim, DecodeError> {
         snap_floor,
         merge_floor,
         input_floors,
+        first_spec,
+        claimed,
     })
 }
 

@@ -9,5 +9,14 @@ readme = "README.md"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# The variants below exist for the upgrade-check tests; see README.md.
+layout-v2 = []
+changed = ["layout-v2"]
+unreadable = ["layout-v2"]
+foreign-layout = []
+malformed-layout = []
+undeclared = []
+
 [dependencies]
 wit-bindgen = { workspace = true }

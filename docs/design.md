@@ -335,7 +335,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
-| `modules` | cache | sha256 of the module | the module bytes | submitters (`felixd run`) |
+| `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 8 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
 
@@ -354,9 +354,18 @@ and a failure record when the workload fails. Each snapshot carries the input of
 at that point.
 
 Today `felixd run` creates the workload's streams through the control plane's
-REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
-create streams. The end state moves that to admission ([Submitting
-work](#submitting-work)).
+REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). A workload
+admitted through intake gets its streams from admission's projector instead, with
+admission's credential ([Submitting work](#submitting-work)). Other agents never
+create streams.
+
+A create that Felix answers with 409 counts as done only if the stream or cache can be read
+back. Felix also refuses a stream under the name of a deleted one until the cluster has finalized
+stream incarnations, and a control plane that no broker registers with, as in the single-broker
+test stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait
+for a stream that does not exist. Admission's projector, which creates an accepted workload's
+streams, logs the same reason and retries every second, so later decisions wait behind it until an
+operator finalizes incarnations.
 
 Running `felixd run` again for an existing id appends a new spec record and
 points `workloads` at it. The cache only moves forward: a write naming an
@@ -389,6 +398,90 @@ first claim's spec, and judge each input under the limits of the spec whose
 claim covers it: a claim's spec applies from the input after the last output
 before it. A claim its owner refused, under another module or an older
 record, is passed over.
+
+### Modules
+
+A module is a WebAssembly component, named by the sha256 of its bytes. It can
+be up to 64 MiB. Felix refuses a cache value that is too large (a 20 MiB one
+was refused, below), and felixd writes at most 8 MiB to Felix at once, so a
+large module cannot always be one cache value. The `modules` cache stores a
+module like this:
+
+| Module size | Under its sha256 key | Under `<sha256>/<n>` |
+|---|---|---|
+| up to 8 MiB | the module, raw | nothing |
+| over 8 MiB | a manifest: the length and the sha256 of each chunk | chunk `n`, 4 MiB each and a shorter last one |
+
+The 8 MiB line is the most a build from before chunking could store. Anything
+such a build could hold stays one raw value, so running `felixd run` again on
+a 6 MiB module with a new build cannot leave an older node a manifest it would
+read as a module that does not match its hash.
+
+A reader tells the two apart by the first bytes: WebAssembly starts with
+`\0asm` and a manifest is JSON. It checks every chunk's length and hash as it
+reads it, then the joined bytes against the key, so a missing chunk is an
+error that names it (`chunk 2 of module <sha256> is not in the modules cache`)
+and a wrong one fails the workload as poison. Nothing runs on a module that
+fails a check. Every reader goes through `felixd_agent::module_store::fetch`:
+nodes starting a workload, `felixd check`, `felixd replay` and admission's
+projector. It reads four chunks at a time.
+
+The writer, `module_store::put`, stores the chunks first and the manifest last,
+so a manifest never names a chunk that was not written. Putting the same
+module again rewrites the same bytes, which also repairs a chunk that was
+lost. Nothing deletes chunks, so a put that fails part way, or a module admission
+rejects, leaves chunks no manifest names. A submitter needs write on `modules`
+as before; the chunks are keys in the same cache, so no grant changes.
+
+Admission's projector, which records an accepted spec while it holds the lease,
+reads the whole module with `fetch`, so a large module costs it the full fetch
+once per accepted request. Cache keys cannot be probed without reading the
+value, and the hash check is what makes a skip record, which is permanent, a
+true statement: a spec whose module is missing or wrong is never recorded as
+runnable.
+
+Why 4 MiB chunks and 64 MiB: a chunk well under the largest value Felix took
+keeps one write small. 64 MiB is sixteen chunks. Reading one chunk after
+another cost about 70 ms per MiB (below), so a node that takes over a workload
+with a module of that size waits several seconds before it can compile it, on
+top of the lease timing; the limit stops that wait growing without bound.
+Real components are far smaller, so this is headroom and not a target.
+
+Admission's limit is `max_module_bytes` in its policy, 64 MiB by default and
+compiled into the admission module. An admission module built before this
+limit rose still rejects modules over 8 MiB with `module_too_large` until
+`felixd init` runs with a newer one.
+
+Measured on a GitHub Actions runner with one broker and one replica, by
+`FELIXD_MEASURE_MODULES=1 cargo test -p felixd --test module_size --
+--nocapture`. Times vary between runs. The chunked rows read and wrote one
+chunk at a time; the build described above does four at a time, so it should
+be faster, but that was not re-measured.
+
+One cache value, written with a single put:
+
+| Size | put | get |
+|---|---|---|
+| 1 MiB | 1.7 to 2.2 s | 30 to 40 ms |
+| 5 MiB | 0.20 to 0.33 s | 120 to 150 ms |
+| 20 MiB | refused after 0.7 to 1.1 s | |
+
+The first put into a new cache pays for setting it up, which is why 1 MiB is
+slower than 5 MiB. The 20 MiB put started sending before the broker stopped it,
+so the refusal takes as long as it takes to push part of the value; Felix
+drops the connection instead of answering with a clear error
+([#196](https://github.com/GetFelix/felixd/issues/196)).
+
+A chunked module, through `module_store`:
+
+| Size | put | fetch |
+|---|---|---|
+| 20 MiB | 2.2 s | 1.4 s |
+| 64 MiB | 7.2 s | 4.5 s |
+
+Takeaway: values up to 5 MiB store in a fraction of a second, a 20 MiB value
+does not store at all, and a module of any size up to 64 MiB takes a few
+seconds to upload and about 70 ms per MiB to read back.
 
 ## Pipelines
 
@@ -804,7 +897,9 @@ on three brokers.
 
 `felixd check` runs each workload's module over its whole input stream, from
 its initial state, and lines the outputs it produces up with the records on
-the output stream by their headers. Each record should match the next
+the output stream by their headers. Once Felix has deleted the head of the
+output stream, it starts from the oldest snapshot the workload keeps instead
+([Retention](#checking-from-a-snapshot)). Each record should match the next
 replayed output. It reports:
 
 - a gap: a replayed output missing from the stream while a later one is there;
@@ -863,11 +958,8 @@ divergence is reported with the input offset, the epoch of the record, the node
 its epoch's claim names and both digests, and the command exits with 1. That
 checks determinism; CI runs it on every example workload after a takeover.
 
-The same comparison with a different module (`--module <hash>`, a module in
-the `modules` cache) checks an upgrade before it goes live: the new version
-runs over the recorded inputs from its initial state, since the snapshots hold
-the old version's state, and the diff shows where its outputs differ (#29).
-`--module` without `--diff` prints the new version's state at `--to`.
+With `--module`, the same comparison checks an upgrade; see
+[Checking an upgrade](#checking-an-upgrade).
 
 Replay needs no lease and writes nothing. It should run anywhere with read
 grants, but it reads the input and snapshot streams' tails with a refused
@@ -875,6 +967,70 @@ conditional write, so for now it needs publish grants on those streams too
 (Felix #1621). `felixd check` has the same gap. A node reads its input's tail
 with a read past the end instead, which Felix refuses with the tail, so a node
 needs only read on its inputs.
+
+### Checking an upgrade
+
+To see whether a new version of a workload's module still produces the outputs
+on the stream, run it over the recorded inputs:
+
+```
+felixd replay --id orders --diff --from 120000 --module orders-next.wasm
+```
+
+`--module` takes a component file, or the sha256 of one in the `modules`
+cache. The diff runs the new module from input 120000 on and compares each
+output with the recorded one. If none differs it prints
+`inputs from 120000 below 150000: 30000 outputs match` and exits with 0.
+Otherwise it prints the first input whose output differs, with the node, the
+epoch and both digests, and exits with 1. `--all` lists every input that
+differs.
+
+Before it can run input 120000, the new module needs the state the workload had
+there. There are two ways to get it. The replay can restore a snapshot, which
+is quick. Or it can start from the initial state and run every input before
+120000, which takes as long as the history is long. Stderr says which, for
+example for a workload that snapshots every 1000 inputs:
+
+```
+started from the snapshot of input 119999
+```
+
+**When a snapshot can be used.** A snapshot is the state the workload saved
+after some input. Its layout is the format of that state: how it is split into
+chunks and what the bytes mean. A new module can restore a snapshot only if it
+understands the layout the old module wrote. A module says what it understands
+in a custom section of its component named `felixd.snapshot`, which names the
+layout it writes and the other layouts it can restore
+([contract.md, Snapshot layouts](contract.md#snapshot-layouts)).
+
+Every snapshot on the stream was written by the module in the spec. A workload
+runs one module for its life: `felixd run` refuses a new module once the output
+or snapshot stream has a record. So the question is only whether the new module
+understands that one module's layout.
+
+| The replay finds | It starts from | stderr says |
+|---|---|---|
+| `--from-start` | the initial state | `started from the initial state, as asked` |
+| no snapshot before `--from` (always so with `--from 0`, the default) | the initial state | `started from the initial state` |
+| a snapshot, and the new module is the workload's own or understands its layout | the nearest snapshot before `--from` | `started from the snapshot of input N` |
+| a snapshot, and the new module does not understand its layout | the initial state | `started from the initial state, since ...` and the reason |
+| a snapshot the new module says it understands, but its `restore` traps or runs out of fuel | nowhere: the command stops | `snapshot not readable by the new module` and the snapshot's input offset |
+
+The reason in the fourth row is one of three. The module the workload runs
+declares no layout, so only it can read its snapshots. The new module declares
+no layout. Or the layout of the snapshots is neither the new module's `format`
+nor in its `reads`.
+
+The last row is an error, not a divergence of outputs. It exits with 1, as
+every error and every divergence does, so tell them apart by the output: a
+divergence is on stdout, and this is only on stderr. `--from-start` runs the
+check without reading the snapshot.
+
+A diff starts at input 0 unless `--from` says otherwise, and no snapshot is
+before input 0. To check from a snapshot, pass a `--from` after one.
+
+`--module` without `--diff` prints the new module's state at `--to`. It
+restores the nearest snapshot before the end of the replay, by the same rules.
 
 ## Grants
 
@@ -963,17 +1119,19 @@ until the kept snapshots pass it.
 The oldest kept snapshot is the one with the lowest step among the last K on
 the stream, not the first of them: a stale holder's snapshot can land after a
 newer holder's and be behind it. A holder trims only once the newest snapshot
-on `.snap` is its own. Until then an earlier holder can still land one, of a
-lower step, that the next resume would restore. Once it is, every snapshot
-written later is from this epoch or a later one and at or past a kept step, so
-the floors never go back, and `trim::plan` refuses one that would.
+on `.snap` is its own. This is a second guard: a later holder's snapshot lands
+only after its claim is on `.out`, and that claim makes this holder's trim
+append fail. Once it is the holder's own, every snapshot written later is from
+this epoch or a later one and at or past a kept step, so the floors never go
+back, and `trim::plan` refuses one that would.
 
 The record goes on `.out` with `publish_if` at the tail like an output, so a
 stale holder's is refused by the next claim. A crash before it lands changes
 nothing, and one after leaves a record the next holder passes over, like a
 claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
 
-Nothing is deleted yet. Felix trims only by age or size, which knows nothing
+Nothing is deleted yet. The TLA models include the deletion that will follow and check these
+floors against it ([formal.md](formal.md#trimming)). Felix trims only by age or size, which knows nothing
 of what a resume needs, and has no call to trim a stream before an offset
 ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). When it does,
 the floors decide different things per stream:
@@ -986,14 +1144,58 @@ the floors decide different things per stream:
   needs. An input is deleted only below the lowest floor of all its readers
   ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
   workload's floor.
-- `.out` is not trimmed. It is every downstream's input, it holds the first
-  claim that spec lineage reads, and `felixd check` lines records up with
-  claims from the start of the stream (#150).
+- `.out` is not trimmed yet. It is every downstream's input, so it can be
+  cut only below every downstream's floor (#150).
 
-`felixd check` and `felixd replay` read from the start of each stream while
-the records are there, trim records or not. Once something they need is
-deleted they stop and report the stream and the oldest offset Felix holds;
-checking from the oldest kept snapshot instead comes with #150.
+### Spec lineage
+
+An owner refuses a spec whose module or input differs from the one the
+stream's first claim names, so everything on `.out` was written under that
+module and input. `felixd run`, the agent's spec checks and `felixd check`
+read that claim to learn it. A cut head would take it away, so a trim record
+carries the first claim's spec record forward unchanged from the trim before
+it, and the first trim takes it from the claim itself. When Felix has deleted
+the head of `.out`, a reader asks the oldest record it keeps. If that is a
+claim or a trim, it names the spec. If it is an output, the reader goes on to
+the first claim or trim after it: any claim's spec has the first claim's
+module and input.
+
+A trim record also carries the highest spec record claimed so far. The check
+that refuses a stale node walks back from the tail to the last claim for its
+floor, and stops at a trim record instead when that is nearer, so it never
+needs a claim that has been deleted. Trim records written before these fields
+existed carry neither, and read as if they named no spec.
+
+### Checking from a snapshot
+
+`felixd check` replays from the first input. That is the whole check, and it
+stays the default while Felix holds the head of `.out`.
+
+When the last trim record on `.out` names an oldest kept snapshot, the check
+can start there instead: it restores the snapshot, steps the inputs after it,
+and lines them up with the records on `.out` from the snapshot's output tail
+on. With several inputs it starts the merge log check at the entry for the
+snapshot's step, with each input's next offset from there. It does so by
+default only when Felix has deleted the head of `.out`, since the first input
+can no longer be replayed. `--from-snapshot` asks for it while the head is
+still there, and `--from-start` refuses it.
+
+A check from a snapshot verifies less. The snapshot's state is taken as given,
+so a snapshot that does not hold what replaying the inputs before it would
+give is not noticed. Records below its output tail are not compared, so a gap,
+a duplicate or a misplaced record down there is not reported; an epoch below
+the highest one below the tail is, at the first record compared. What follows
+the snapshot gets the same verdict as a check from the start, and a record for
+an input the snapshot covers that was written after it is found, as an output
+the replay did not produce. If Felix keeps nothing of `.out` below an offset
+above the snapshot's output tail, the check fails saying so, rather than
+reporting the missing outputs as findings. `--from-start` fails the same way
+once Felix has deleted history that replay needs, and says which stream and
+which offset it still holds.
+
+`felixd replay` reads from the start of each stream while the records are
+there, trim records or not. Once something it needs is deleted it stops and
+reports the stream and the oldest offset Felix holds.
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)
@@ -1001,7 +1203,8 @@ rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
 
 `tests/trim.rs` and `tests/merge.rs` resume with every read below the floors
 refused (the `enforce-trim-floors` fault), as if they were deleted, and the
-workload carries on.
+workload carries on. The fault also refuses reads of `.out` below the oldest
+kept snapshot's output tail, where a cut of the head would leave it.
 
 ## Build order
 
@@ -1011,7 +1214,7 @@ workload carries on.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -1020,9 +1223,8 @@ workload carries on.
   workload needs its own single-shard output and snapshot streams, created
   through the control plane. That's fine for hundreds of workloads. At tens
   of thousands it depends on how Felix handles many small streams.
-- **Module size.** Wasm modules can be several megabytes. Whether a cache
-  value that large is reasonable, or modules should be chunked, needs
-  measuring.
+- **Module size.** Wasm modules can be tens of megabytes, more than one frame
+  to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
   stream when its leader changes, and the writer gets an error. felixd copes
   (see Exactly-once output), but anything that cannot re-read and compare
@@ -1067,7 +1269,8 @@ failovers. Three rules hold that:
 
 State is not capped by the size of one record. Snapshots are written in chunks,
 and a snapshot writes only the chunks that changed since the last one, with
-separate fuel from `step`. Snapshots are taken by input count and by time, old
+separate fuel from `step`. A module is stored the same way, in chunks
+([Modules](#modules)). Snapshots are taken by input count and by time, old
 snapshots and inputs are trimmed by a stated retention, and each workload has a
 recovery time budget that bounds how far a resume may replay.
 
@@ -1550,9 +1753,10 @@ now:
    ([Credentials](#credentials), #97). Agents never hold control-plane rights.
    Built: a separate credential a node is given, granted as in
    [Grants](#grants); binding it by name in the spec is #97.
-5. **Modules stay in the `modules` cache**, uploaded by hash. The store is
-   content-addressed, so a submitter cannot overwrite another's module, and
-   binaries stay off the log. Admission verifies presence and size.
+5. **Modules stay in the `modules` cache**, uploaded by hash, in chunks above
+   8 MiB ([Modules](#modules)). The store is content-addressed, so a submitter
+   cannot overwrite another's module, and binaries stay off the log. Admission
+   verifies presence, size and hash, reading the chunks of a large module.
 6. **`felixd run` is a thin client:** it uploads the module, publishes the
    request, waits for the accepted or rejected record and prints it.
 7. **Bootstrap.** `felixd init` writes admission's own spec directly with
@@ -1706,8 +1910,9 @@ chunk store (#77):
   per-tenant secret. Two tenants storing the same bytes get different
   addresses, so the store leaks no equality across tenants, and deleting a
   tenant's key and chunks removes its data.
-- Large modules are chunked the same way, which answers the module-size
-  question under [Risks](#risks-and-what-this-surfaces-in-felix) (#21).
+- Modules over 8 MiB are already cut into hashed chunks in the `modules` cache
+  ([Modules](#modules), #21). This store would share those chunks across
+  modules and free them by reference count.
 
 Venti never deleted a block, which made it simple and made deletion
 impossible. Plain content hashes also let anyone who can probe the store
