@@ -478,6 +478,11 @@ impl Agent {
         self.signal("INT");
     }
 
+    /// Asks the agent to shut down cleanly, as a supervisor's stop does.
+    pub(crate) fn terminate(&self) {
+        self.signal("TERM");
+    }
+
     pub(crate) fn kill(&mut self) {
         self.signal("CONT");
         let _ = self.child.kill();

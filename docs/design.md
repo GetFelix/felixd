@@ -592,8 +592,9 @@ not on the lease. A wrong clock costs duplicate work and refused writes.
 
 An agent never adopts a lease it finds under its own name. A restarted agent
 waits for its old leases to expire, so two processes configured with the same
-node id can't both believe they hold a workload. On a clean shutdown an agent
-deletes its leases with `cache_delete_if`, so another node can claim at once.
+node id can't both believe they hold a workload. On a clean shutdown (Ctrl-C
+or SIGTERM) an agent deletes its leases with `cache_delete_if`, so another
+node can claim at once.
 Only a holder fails a workload, and the failure is fenced by epoch like an
 output. The holder renews its lease the same way first, and gives up if that
 renewal is refused. Then it appends a failure record to the output stream

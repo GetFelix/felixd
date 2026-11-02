@@ -21,6 +21,9 @@
   workload again. There is no switch. This closes #73;
   defining the records in WIT waits for the effect records, and felixd does
   not push OTLP.
+- `felixd agent` shuts down cleanly on SIGTERM as well as Ctrl-C (#203). It stops its workloads and deletes
+  their leases, so `docker stop` and `systemctl stop` hand work to another node at once instead of after
+  the lease TTL. As PID 1 in a container it no longer ignores SIGTERM.
 - Degraded workloads (#73). A workload that keeps failing on a transient
   error, such as a stream its node cannot read, used to be retried for ever
   on that node, out of sight. Now `felixd ps` shows it as `degraded` with the
