@@ -231,6 +231,9 @@ impl Felix {
     }
 
     /// Publishes one record and waits until it is acknowledged.
+    ///
+    /// Sized as a raw binary frame. A broker without binary acks takes JSON,
+    /// which is a third larger, so there the broker's refusal can still come.
     pub async fn publish(&self, stream: &str, payload: Vec<u8>) -> Result<()> {
         let namespace = self.namespace_of(stream);
         self.fits(

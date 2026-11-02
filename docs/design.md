@@ -984,7 +984,9 @@ Every write to Felix is measured first. A request that would not fit in the clie
 payload) fails with `TooLarge`, which names the key or stream and the most Felix takes. Felix
 itself drops the connection for an oversized frame, which the client reports as a failed write
 and reconnects on, so the caller could not tell it from a broker going away and would retry it
-forever. `TooLarge` is not retried, and an output append that gets it marks the workload failed.
+for nothing. `TooLarge` is never sent, so it never reconnects, and an output append that gets it
+marks the workload failed at once. felixd's own writes stay under `MAX_WRITE_BYTES`, so this is the
+backstop for a smaller frame limit and for any other caller of `Felix`.
 
 Snapshots are written every N inputs (default 1000) and, with
 `snapshot_every_ms`, at the first input of each interval of that length,
