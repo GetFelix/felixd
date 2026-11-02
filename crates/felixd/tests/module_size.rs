@@ -77,6 +77,17 @@ async fn measure_cache_values() {
     }
 }
 
+/// The `modules` cache; `felixd run` creates it, but a test that stores a
+/// module itself has to.
+async fn modules_cache(t: &common::TestFelix) {
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    ensure_cache(&t.settings, names::MODULES, kind)
+        .await
+        .unwrap();
+}
+
 /// A real component of `len` bytes, more than one write to Felix holds when
 /// `len` is over 8 MiB.
 fn counter_of(len: usize) -> Vec<u8> {
@@ -128,6 +139,7 @@ async fn a_module_over_one_write_runs_and_is_checked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_corrupt_or_missing_chunk_is_an_error_and_a_re_put_repairs_it() {
     let Some(t) = test_felix().await else { return };
+    modules_cache(&t).await;
     let module = counter_of(CHUNK_BYTES * 2 + 100);
     let felix = &t.felix;
     let key = module_store::put(felix, &module).await.unwrap();
@@ -197,6 +209,7 @@ async fn measure_stored_modules() {
         return;
     }
     let Some(t) = test_felix().await else { return };
+    modules_cache(&t).await;
     for (n, mib) in [1, 5, 20, 64].into_iter().enumerate() {
         let mut module = noise(mib * MIB, 10 + n as u8).to_vec();
         module[..4].copy_from_slice(b"\0asm");
