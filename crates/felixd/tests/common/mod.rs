@@ -254,6 +254,19 @@ impl TestFelix {
             .collect())
     }
 
+    /// The oldest offset reads of `stream` start at: 0 until Felix trims it.
+    pub(crate) async fn readable_from(&self, stream: &str) -> u64 {
+        let tail = self.felix.tail(stream).await.unwrap();
+        match self.felix.read_range(stream, 0, tail).await {
+            Ok(_) => 0,
+            Err(error) => {
+                felixd_agent::felix::Trimmed::of(&error)
+                    .unwrap_or_else(|| panic!("reading {stream}: {error:#}"))
+                    .oldest
+            }
+        }
+    }
+
     /// The output records on `stream`, without claims and failures.
     pub(crate) async fn outputs(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
         let mut records = self.read_all(stream).await;
@@ -370,6 +383,19 @@ impl TestFelix {
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
         )
+    }
+
+    /// Runs `felixd check <args>`, which must fail. Returns what it printed on
+    /// stderr.
+    pub(crate) fn check_error(&self, args: &[&str]) -> String {
+        let out = self
+            .felixd(&["check"])
+            .args(args)
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "felixd check should have failed");
+        String::from_utf8_lossy(&out.stderr).into_owned()
     }
 
     /// Runs `felixd replay <args>`. Returns whether it succeeded, and what it

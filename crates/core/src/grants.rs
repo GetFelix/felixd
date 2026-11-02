@@ -68,6 +68,10 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
         Role::Node => vec![
             ("stream.subscribe", stream(namespace, "*")),
             ("stream.publish", stream(namespace, "*")),
+            // To delete a workload's `.snap` and merge log under
+            // `keep_snapshots`. Felix grants by name or the whole namespace,
+            // so it reaches the inputs too.
+            ("stream.trim", stream(namespace, "*")),
             ("stream.subscribe", stream(&sys, "*")),
             ("stream.publish", stream(&sys, names::FACTS)),
             ("cache.read", cache("*")),

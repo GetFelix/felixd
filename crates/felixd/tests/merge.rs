@@ -21,6 +21,8 @@ const ORDERS: &str = "orders";
 const PAYMENTS: &str = "payments";
 const INPUTS: [&str; 2] = [ORDERS, PAYMENTS];
 const MERGE: &str = "wl.wl.merge";
+/// For tests that read the whole merge log, so nothing is deleted from it.
+const KEEP: &str = "skip-deletion=1";
 
 /// What `faulty` outputs for a `meta` record: the stream, offset and append
 /// time it was given. So the outputs show which record each step ran.
@@ -507,13 +509,13 @@ async fn a_merged_workload_trims_by_the_merge_log() {
         t.publish_all(ORDERS, [meta()]).await;
         t.publish_all(PAYMENTS, [meta()]).await;
     }
-    let mut first = t.start_agent();
+    let mut first = t.start_agent_with_faults(KEEP);
     eventually("a trim", Duration::from_secs(60), || async {
         (!trims(&t).await.is_empty()).then_some(())
     })
     .await;
     first.kill();
-    let _next = t.start_agent();
+    let _next = t.start_agent_with_faults(KEEP);
     for _ in 0..5 {
         t.publish_all(PAYMENTS, [meta()]).await;
         t.publish_all(ORDERS, [meta()]).await;
@@ -538,6 +540,66 @@ async fn a_merged_workload_trims_by_the_merge_log() {
         want[own] = want[own].min(entry.offset);
         assert_eq!(trim.input_floors, want, "{trim:?}");
     }
+}
+
+/// The merge log is trimmed too. A holder killed after that is replaced by one
+/// that carries on from the entries that remain: every input record is
+/// stepped once, in an order that only moves forward. `felixd check` needs
+/// the whole merge log, so it stops and says where the log now starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failover_after_the_merge_log_is_trimmed_loses_nothing() {
+    let Some(t) = test_felix().await else { return };
+    submit_with(&t, &["--snapshot-every", "4", "--keep-snapshots", "2"]).await;
+    for _ in 0..10 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    let mut first = t.start_agent();
+    let floor = eventually("the merge log trimmed", Duration::from_secs(60), || async {
+        let floor = trims(&t).await.last()?.merge_floor;
+        (floor > 0 && t.readable_from(MERGE).await >= floor).then_some(floor)
+    })
+    .await;
+    first.kill();
+    let _next = t.start_agent();
+    for _ in 0..5 {
+        t.publish_all(PAYMENTS, [meta()]).await;
+        t.publish_all(ORDERS, [meta()]).await;
+    }
+    eventually("every record stepped", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 30).then_some(())
+    })
+    .await;
+    // Give a duplicate time to show up.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut seen = std::collections::HashSet::new();
+    let mut steps = Vec::new();
+    for (_, record) in t.outputs(OUTPUT).await {
+        let decoded = output::decode(&record).unwrap();
+        let (written, addressed) = decoded.output().unwrap();
+        let text = String::from_utf8(addressed.payload.to_vec()).unwrap();
+        let fields: Vec<&str> = text.split(' ').collect();
+        let record = (fields[0].to_owned(), fields[2].parse::<u64>().unwrap());
+        assert!(seen.insert(record.clone()), "{record:?} was stepped twice");
+        steps.push((written.header.input_offset, written.header.index));
+    }
+    for input in INPUTS {
+        let tail = t.felix.tail(input).await.unwrap();
+        for offset in 0..tail {
+            assert!(
+                seen.contains(&(input.to_owned(), offset)),
+                "{input}:{offset}"
+            );
+        }
+    }
+    assert!(steps.windows(2).all(|w| w[0] < w[1]), "{steps:?}");
+    assert!(t.readable_from(MERGE).await >= floor);
+
+    let error = t.check_error(&["--id", ID]);
+    assert!(
+        error.contains(&format!("needs {MERGE} from offset 0")),
+        "{error}"
+    );
 }
 
 async fn trims(t: &TestFelix) -> Vec<felixd_core::trim::Trim> {
@@ -570,7 +632,7 @@ async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
         t.publish_all(ORDERS, [meta()]).await;
         t.publish_all(PAYMENTS, [meta()]).await;
     }
-    let mut first = t.start_agent();
+    let mut first = t.start_agent_with_faults(KEEP);
     eventually("a trim past the start", Duration::from_secs(60), || async {
         trims(&t)
             .await
@@ -580,7 +642,7 @@ async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
     })
     .await;
     first.kill();
-    let mut next = t.start_agent_with_faults("enforce-trim-floors=1");
+    let mut next = t.start_agent_with_faults("enforce-trim-floors=1,skip-deletion=1");
     for _ in 0..5 {
         t.publish_all(PAYMENTS, [meta()]).await;
         t.publish_all(ORDERS, [meta()]).await;

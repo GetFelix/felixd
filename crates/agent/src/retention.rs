@@ -14,8 +14,9 @@ use felix_client::{BrokerError, ConditionalTrim, ErrorCode, TrimError};
 use crate::felix::Felix;
 
 /// How long a node that found Felix unable to trim waits before asking again,
-/// so a fleet that has not finalized `head_trim` costs one call a minute.
-const PAUSE: Duration = Duration::from_secs(60);
+/// so a fleet that has not finalized `head_trim` costs one call per interval,
+/// and one that has just finalized it is picked up soon after.
+const PAUSE: Duration = Duration::from_secs(10);
 
 static PAUSED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static WARNED_NOT_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -33,8 +34,8 @@ pub(crate) enum Deletion {
     Unavailable,
 }
 
-/// Whether to try deleting now. False for a minute after Felix said it
-/// cannot trim.
+/// Whether to try deleting now. False for a short while after Felix said
+/// it cannot trim.
 pub(crate) fn may_delete() -> bool {
     let paused = PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
     paused.is_none_or(|until| Instant::now() >= until)

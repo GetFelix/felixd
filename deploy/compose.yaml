@@ -216,8 +216,9 @@ services:
       felix:
         ipv4_address: 172.29.0.13
 
-  # Turns on what failover of Quorum streams and caches needs, then creates
-  # the example input stream `in` with three replicas.
+  # Turns on what failover of Quorum streams and caches needs, and head_trim
+  # for keep_snapshots, then creates the example input stream `in` with three
+  # replicas.
   felix-fleet:
     image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     network_mode: "service:felix-controlplane"
@@ -232,7 +233,7 @@ services:
       - |
         set -eu
         auth="Authorization: Bearer $$(cat /var/lib/felix/operator.jwt)"
-        for feature in generation_start majority_ack lease_free_reads fenced_caches; do
+        for feature in generation_start majority_ack lease_free_reads fenced_caches head_trim; do
           ok=
           for _ in $$(seq 1 30); do
             if wget -q -O /tmp/body --header "$$auth" --post-data '' \
