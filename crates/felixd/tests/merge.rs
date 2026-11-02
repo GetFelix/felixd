@@ -611,11 +611,16 @@ async fn assert_stepped_once(t: &TestFelix, records: usize) {
         steps.push((written.header.input_offset, written.header.index));
     }
     for input in INPUTS {
+        // Not every offset holds an event: a cluster's first holds a leader's
+        // marker, which `read_range` leaves out.
         let tail = t.felix.tail(input).await.unwrap();
-        for offset in 0..tail {
+        let events = t.felix.read_range(input, 0, tail).await.unwrap();
+        assert!(events.len() >= 15, "{input} holds {} events", events.len());
+        for record in events {
             assert!(
-                seen.contains(&(input.to_owned(), offset)),
-                "{input}:{offset}"
+                seen.contains(&(input.to_owned(), record.offset)),
+                "{input}:{}",
+                record.offset
             );
         }
     }
@@ -653,7 +658,7 @@ async fn raising_keep_snapshots_on_a_merged_workload_keeps_the_last_trim() {
     })
     .await;
     first.kill();
-    let held = t.read_all(common::SNAPSHOTS).await;
+    let held = t.read_readable(common::SNAPSHOTS).await;
     let manifests = held
         .iter()
         .filter(|(_, r)| matches!(snapshot::decode(r), Ok(snapshot::Record::Manifest(_))))
