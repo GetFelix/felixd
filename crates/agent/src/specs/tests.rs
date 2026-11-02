@@ -113,6 +113,31 @@ async fn a_needs_operator_record_with_an_unknown_reason_counts_toward_the_floor(
     assert_eq!(floor_of(vec![claim, unreadable_marker(4)]).await, Some(4));
 }
 
+/// As a newer build writes it: a class this build has no name for.
+fn unreadable_degraded(spec: u64) -> Vec<u8> {
+    use felixd_core::class::ErrorClass;
+    let mut record = output::encode_degraded(1, spec, ErrorClass::Transient, "node-a", "x");
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(output::decode(&record).is_err());
+    record
+}
+
+#[test]
+fn a_degraded_record_is_not_the_first_run_whatever_its_class() {
+    use felixd_core::class::ErrorClass;
+    let readable = output::encode_degraded(1, 3, ErrorClass::Transient, "node-a", "x");
+    assert!(!ran_something(&readable));
+    assert!(!ran_something(&unreadable_degraded(3)));
+}
+
+#[test]
+fn a_degraded_record_this_build_cannot_read_is_an_unreadable_park() {
+    use felixd_core::class::ErrorClass;
+    assert!(unreadable_park(&unreadable_degraded(3)));
+    let readable = output::encode_degraded(1, 3, ErrorClass::Transient, "node-a", "x");
+    assert!(!unreadable_park(&readable));
+}
+
 #[test]
 fn only_a_needs_operator_record_this_build_cannot_read_is_an_unreadable_park() {
     use felixd_core::class::OperatorReason;

@@ -192,10 +192,13 @@ fn ran_something(record: &[u8]) -> bool {
     output::needs_operator_spec_of(record).is_none() && output::degraded_spec_of(record).is_none()
 }
 
-/// Whether `record` is a needs-operator record that this build cannot read,
-/// as a newer build writes one with a reason this build has no name for.
+/// Whether `record` is a needs-operator or degraded record that this build
+/// cannot read, as a newer build writes one with a reason or class this build
+/// has no name for.
 fn unreadable_park(record: &[u8]) -> bool {
-    output::decode(record).is_err() && output::needs_operator_spec_of(record).is_some()
+    output::decode(record).is_err()
+        && (output::needs_operator_spec_of(record).is_some()
+            || output::degraded_spec_of(record).is_some())
 }
 
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
@@ -232,7 +235,7 @@ pub(crate) async fn refuse_stale_or_foreign(
         && unreadable_park(&last.payload)
     {
         bail!(
-            "{stream}:{}: a needs-operator record with a reason this build cannot read",
+            "{stream}:{}: a needs-operator or degraded record this build cannot read",
             last.offset
         );
     }

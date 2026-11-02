@@ -42,7 +42,7 @@ The floor is the highest spec record claimed on the stream so far, this claim's 
 owner takes it from the last claim before its own, and from any claim it finds past the tail when
 its claim is refused, so the last claim alone says whether an older spec is being run, even when
 that claim's owner refused its spec. A needs-operator record after the last claim, whatever its reason, raises the floor
-to its spec record too, since it can be written with no claim. Kind 1 claims
+to its spec record too, since it can be written with no claim. A degraded record does not. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
 judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
 run a spec whose module or input differ from the one the stream's first claim names, or whose
@@ -127,6 +127,8 @@ How readers treat it:
   record never claims and retries. A workload reading the stream needs an operator. During a rolling
   upgrade run the new build with `--stuck-after-ms 0` until no old node is left.
 - A reader that reads the record in full accepts any known class and refuses an unknown one. A node
+  that finds one it cannot read last on the stream does not claim the workload, as with an unreadable
+  needs-operator record, and leaves it to a node of the build that wrote it. A node
   that only needs to pass over it, or to show the spec record it names, reads its version, kind and
   spec record alone.
 
