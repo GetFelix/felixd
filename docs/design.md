@@ -278,9 +278,11 @@ can lose its disk and rejoin.
 ## The workload contract
 
 A workload is a Wasm component that implements the WIT world in
-`wit/workload.wit`, workload contract 0.2. [contract.md](contract.md) gives the
-interface and what each side guarantees. In short, `step` gets one input
-record with its stream, offset, append time and key, and returns outputs
+`wit/0.3/workload.wit`, workload contract 0.3, or the 0.2 world in
+`wit/0.2/workload.wit`, which the host still runs. [contract.md](contract.md)
+gives the interface and what each side guarantees. In short, `step` gets one
+input record with its stream, offset, append time, key and, from 0.3, the
+authenticated publisher, and returns outputs
 addressed by name and key, or rejects the input, or poisons the workload. The
 state is snapshotted and restored in chunks, and `inspect` returns it as JSON.
 A component of the 0.1 contract is refused.
@@ -897,7 +899,9 @@ on three brokers.
 
 `felixd check` runs each workload's module over its whole input stream, from
 its initial state, and lines the outputs it produces up with the records on
-the output stream by their headers. Each record should match the next
+the output stream by their headers. Once Felix has deleted the head of the
+output stream, it starts from the oldest snapshot the workload keeps instead
+([Retention](#checking-from-a-snapshot)). Each record should match the next
 replayed output. It reports:
 
 - a gap: a replayed output missing from the stream while a later one is there;
@@ -1044,7 +1048,7 @@ reaches none of them.
 |---|---|
 | Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
 | Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
-| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Admission records the requester but the shipped policy has no ownership rule, so any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it; a policy that lists requesters limits who may ask at all |
 | Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. The one direct write left. Not written by `init` |
 | Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
@@ -1142,14 +1146,58 @@ the floors decide different things per stream:
   needs. An input is deleted only below the lowest floor of all its readers
   ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
   workload's floor.
-- `.out` is not trimmed. It is every downstream's input, it holds the first
-  claim that spec lineage reads, and `felixd check` lines records up with
-  claims from the start of the stream (#150).
+- `.out` is not trimmed yet. It is every downstream's input, so it can be
+  cut only below every downstream's floor (#150).
 
-`felixd check` and `felixd replay` read from the start of each stream while
-the records are there, trim records or not. Once something they need is
-deleted they stop and report the stream and the oldest offset Felix holds;
-checking from the oldest kept snapshot instead comes with #150.
+### Spec lineage
+
+An owner refuses a spec whose module or input differs from the one the
+stream's first claim names, so everything on `.out` was written under that
+module and input. `felixd run`, the agent's spec checks and `felixd check`
+read that claim to learn it. A cut head would take it away, so a trim record
+carries the first claim's spec record forward unchanged from the trim before
+it, and the first trim takes it from the claim itself. When Felix has deleted
+the head of `.out`, a reader asks the oldest record it keeps. If that is a
+claim or a trim, it names the spec. If it is an output, the reader goes on to
+the first claim or trim after it: any claim's spec has the first claim's
+module and input.
+
+A trim record also carries the highest spec record claimed so far. The check
+that refuses a stale node walks back from the tail to the last claim for its
+floor, and stops at a trim record instead when that is nearer, so it never
+needs a claim that has been deleted. Trim records written before these fields
+existed carry neither, and read as if they named no spec.
+
+### Checking from a snapshot
+
+`felixd check` replays from the first input. That is the whole check, and it
+stays the default while Felix holds the head of `.out`.
+
+When the last trim record on `.out` names an oldest kept snapshot, the check
+can start there instead: it restores the snapshot, steps the inputs after it,
+and lines them up with the records on `.out` from the snapshot's output tail
+on. With several inputs it starts the merge log check at the entry for the
+snapshot's step, with each input's next offset from there. It does so by
+default only when Felix has deleted the head of `.out`, since the first input
+can no longer be replayed. `--from-snapshot` asks for it while the head is
+still there, and `--from-start` refuses it.
+
+A check from a snapshot verifies less. The snapshot's state is taken as given,
+so a snapshot that does not hold what replaying the inputs before it would
+give is not noticed. Records below its output tail are not compared, so a gap,
+a duplicate or a misplaced record down there is not reported; an epoch below
+the highest one below the tail is, at the first record compared. What follows
+the snapshot gets the same verdict as a check from the start, and a record for
+an input the snapshot covers that was written after it is found, as an output
+the replay did not produce. If Felix keeps nothing of `.out` below an offset
+above the snapshot's output tail, the check fails saying so, rather than
+reporting the missing outputs as findings. `--from-start` fails the same way
+once Felix has deleted history that replay needs, and says which stream and
+which offset it still holds.
+
+`felixd replay` reads from the start of each stream while the records are
+there, trim records or not. Once something it needs is deleted it stops and
+reports the stream and the oldest offset Felix holds.
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)
@@ -1157,7 +1205,8 @@ rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
 
 `tests/trim.rs` and `tests/merge.rs` resume with every read below the floors
 refused (the `enforce-trim-floors` fault), as if they were deleted, and the
-workload carries on.
+workload carries on. The fault also refuses reads of `.out` below the oldest
+kept snapshot's output tail, where a cut of the head would leave it.
 
 ## Build order
 
@@ -1306,6 +1355,22 @@ new module agrees on the inputs it has already seen.
 
 The interface, the guarantees and the record formats are in
 [contract.md](contract.md).
+
+## The workload contract, version 0.3
+
+Policy has to depend on who asked, and a step could not see that: the
+requester of a request cannot come from the payload, which any publisher can
+fill with anything. Version 0.3 adds one field, `publisher`, to the record a
+step reads: the principal the broker authenticated the write from, as the
+broker stored it. Because the host reads it from the stored record, a live
+step, a takeover, a snapshot resume, `felixd check` and `felixd replay` all
+pass the same value, so a workload that decides on it stays deterministic.
+
+The publisher is `none` when the broker recorded none, and for the output of
+another workload, which a node wrote and which names no one useful to the next
+stage. A workload that needs an identity treats `none` as unknown. The host
+runs 0.2 and 0.3 workloads side by side, so only a workload that wants the
+publisher is rebuilt. [contract.md](contract.md#the-publisher) has the rules.
 
 ## Upgrading felixd and scale
 
@@ -1758,8 +1823,8 @@ now:
    agents run only what a record says; `workloads` is still how they learn of
    a change.
 2. **Requests go to an intake stream, `sys.intake`.** A request carries the
-   module hash, the spec and the requester, taken from the authenticated
-   publisher and never from the payload. Changes, stops and removals of
+   module hash and the spec. The requester is the record's authenticated
+   publisher and never in the payload. Changes, stops and removals of
    workloads are requests on the same stream.
 3. **Admission is an ordinary deterministic felixd workload**, like the
    scheduler (#60). It reads `sys.intake`, checks the module is present and
@@ -1846,15 +1911,33 @@ Nodes can still point `workloads` at an old record, which the gate refuses as
 before, and it still checks every record, so a deployment that grants more
 than this table is no less safe than before.
 
-Not built: the requester. Felix records a record's publisher only when the
-broker is configured to and a reader asks, and the workload contract has no
-field for it, so admission decides from the payload alone and policy cannot
-depend on who asked. Any node can write `wl.admission.out`, as it can any
-output, until per-lease tokens (#74, GetFelix/felix#1625), and admission's
-projector records what it finds there. Admission's credential is node
-configuration (`--admission-token-file` and the control plane token) rather
-than a name bound in admission's spec (#97), so a node given it holds it
-whether or not it holds admission's lease.
+Built (#182): the requester. A broker stores a record's publisher when it is
+set up to (`FELIX_RECORD_PUBLISHERS=true` on a lone broker, the
+`publisher_principal` fleet feature in a cluster), and the workload contract
+0.3 hands it to a step ([contract.md](contract.md#the-publisher)). Admission
+runs on 0.3. Its decision records the requester, the principal that published
+the request, whether it accepts or rejects. Policy can depend on it in two
+ways:
+
+- A request whose publisher the broker did not record is rejected as
+  `no_requester`. Admission fails closed because without a requester there is
+  nobody to hold to a rule, and a broker not yet set to record publishers
+  would otherwise let anyone with publish rights through unseen. A deployment
+  that enables admission must enable recording first.
+- `Policy::requesters` lists the principals allowed to ask. Empty, the default,
+  allows any recorded requester, as before: the grants on `sys.intake` already
+  decide who can publish at all. With a list, any other requester is rejected
+  as `not_permitted`. The list is compiled into the admission module like every
+  other limit, so changing it is a module change that `felixd replay --diff
+  --module` checks against past requests.
+
+The requester in the payload is not read, and a payload that claims one is
+ignored. Any node can still write `wl.admission.out`, as it can any output,
+until per-lease tokens (#74, GetFelix/felix#1625), and admission's projector
+records what it finds there. Admission's credential is node configuration
+(`--admission-token-file` and the control plane token) rather than a name bound
+in admission's spec (#97), so a node given it holds it whether or not it holds
+admission's lease.
 
 Open: the quota model (per tenant, per submitter, or per namespace, and what
 it counts: workloads, module bytes, fuel and memory limits).

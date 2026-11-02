@@ -201,7 +201,8 @@ services:
       - "127.0.0.1:5300:5000/udp"
       - "127.0.0.1:8130:8080"
 
-  # Turns on what failover of Quorum streams and caches needs. Brokers act
+  # Turns on what failover of Quorum streams and caches needs, and the
+  # recording of each record's publisher, which admission reads. Brokers act
   # on the enabled set at their next heartbeat.
   felix-fleet:
     image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
@@ -217,7 +218,9 @@ services:
       - |
         set -eu
         auth="Authorization: Bearer $$(cat /var/lib/felix/operator.jwt)"
-        for feature in generation_start majority_ack lease_free_reads fenced_caches; do
+        # publisher_principal makes brokers store who published each record,
+        # which admission needs to know who asked.
+        for feature in generation_start majority_ack lease_free_reads fenced_caches publisher_principal; do
           ok=
           for _ in $$(seq 1 30); do
             if wget -q -O /tmp/body --header "$$auth" --post-data '' \
@@ -228,7 +231,9 @@ services:
           done
           [ -n "$$ok" ] || { echo "felix-fleet: finalizing $$feature failed"; exit 1; }
         done
-        sleep 3
+        # Brokers act on the enabled set at their next heartbeat (5 s by
+        # default), so wait out more than one.
+        sleep 8
         echo "felix-fleet: features finalized"
 
 networks:

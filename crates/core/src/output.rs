@@ -157,6 +157,17 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// The spec record a claim names, or a trim record carries as the
+    /// stream's first claim's. Either says what module and input the stream
+    /// was written under.
+    pub fn names_spec(&self) -> Option<u64> {
+        match self {
+            Record::Claim { spec, .. } => *spec,
+            Record::Trim { .. } => self.trim().and_then(|t| t.first_spec),
+            _ => None,
+        }
+    }
+
     /// The header of an output or a rejection, the records a step produces.
     pub fn written(&self) -> Option<Written> {
         match self {

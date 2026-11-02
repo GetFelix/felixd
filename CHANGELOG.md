@@ -132,6 +132,32 @@
   with every log at trace level, then scans every record, cache entry, metric,
   log line and refused-credential error for the token bytes. Per-lease tokens
   wait on scoped token minting in Felix (GetFelix/felix#1625).
+- The requester (#182). Workload contract 0.3 adds `publisher` to `record-in`:
+  the principal the broker authenticated an input record's write from, `none`
+  when the broker stored none and for another workload's output. felixd runs
+  0.3 and 0.2 workloads side by side, chosen by the interfaces a component
+  exports; a 0.2 workload is unchanged and never sees the publisher, and
+  `wit/workload.wit` moved to `wit/0.2/workload.wit` beside the new
+  `wit/0.3/workload.wit`. The agent asks the broker for publishers and passes
+  the stored value on every path (live, takeover, resume, merge, `check`,
+  `replay`). Admission is built on 0.3 and records the requester in each
+  decision (`requester`, left out when none). Breaking: a request whose
+  publisher the broker did not record is rejected as `no_requester`, so a
+  deployment that brings up the 0.3 admission needs a broker that stores
+  publishers, `FELIX_RECORD_PUBLISHERS=true` on a lone broker or the
+  `publisher_principal` fleet feature finalized in a cluster (one-way: storage
+  format v6, which older brokers refuse), before `felixd init`. A deployment
+  that already runs admission keeps its 0.2 module, which records no requester,
+  until module upgrades exist: a workload's module cannot change once it has
+  written output, and admission's id is fixed. Upgrade every node and the CLI
+  before submitting a 0.3 module or running the 0.3 admission: a felixd from
+  this release on leaves a module of a newer contract to an operator, and
+  earlier builds fail the workload; an older `felixd run` cannot read the new
+  reasons. Decision `reason` now tolerates a code a newer build wrote
+  (`unknown`). New `Policy::requesters` limits who may ask (`not_permitted`; the
+  `admission-requesters` example). `felixd_runtime::Input` and
+  `felixd_core::admission::decide` take the publisher. The test stacks turn
+  recording on.
 - A scheduler that is itself a felixd workload (#60). Submit
   `scheduler.wasm` (in the container image) as `felixd run --id scheduler
   --input sys.specs --input sys.facts`. It reads spec records and node facts
@@ -167,6 +193,19 @@
 - `felixd ps` shows each workload's state (running, waiting, needs operator
   with the reason, failed, stopped), holder, epoch, output stream tail and how
   far it is along each input, and each node, all read from records (#17).
+- Trim records carry the stream's lineage, and `felixd check` starts from a
+  snapshot (#150). A trim record on the output stream now also holds the spec
+  record of the stream's first claim, copied from trim to trim, and the highest
+  spec record claimed so far. Once a cut head has taken the first claim, the
+  agent, `felixd run` and `felixd check` read what the stream was written under
+  from the oldest record Felix keeps, and the stale-spec check stops at a trim
+  record. Trim records without the new fields still read. `felixd check`
+  still replays from the first input; once the head of the output stream is
+  deleted it restores the oldest snapshot the last trim record keeps and checks
+  what follows it, the merge log from the entry at its step. `--from-snapshot`
+  asks for that earlier and `--from-start` refuses it. A snapshot's state is
+  taken as given and outputs below its tail are not compared.
+  Deleting `.out` and the floors downstream readers need remain (#150).
 - `felixd drain <node>` makes a node release its leases, so other nodes take
   its workloads over without waiting for them to expire, and claim nothing
   until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`
