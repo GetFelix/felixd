@@ -423,18 +423,21 @@ impl TestFelix {
     }
 
     /// Runs `felixd replay <args>`. Returns whether it succeeded, and what it
-    /// printed on stdout.
+    /// printed on stdout, or on failure stdout followed by stderr.
     pub(crate) fn replay(&self, args: &[&str]) -> (bool, String) {
         let out = self
             .felixd(&["replay"])
             .args(args)
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .output()
             .unwrap();
-        (
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        )
+        let mut text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !out.status.success() {
+            text.push('\n');
+            text.push_str(String::from_utf8_lossy(&out.stderr).trim());
+        }
+        (out.status.success(), text)
     }
 
     /// Waits for the workload to be marked failed and returns why.

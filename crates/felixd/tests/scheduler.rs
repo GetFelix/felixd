@@ -550,6 +550,12 @@ async fn sys_facts_is_trimmed_below_the_schedulers_floor_and_failover_carries_on
         });
     assert!(!parked, "the scheduler resumed into trimmed history");
 
+    // A running scheduler keeps snapshotting and trimming, so by the time the
+    // replay connects the oldest kept snapshot can be past `last`, and there
+    // is nothing to start from. Stop the nodes so the history holds still.
+    for agent in agents.values_mut() {
+        agent.kill();
+    }
     let merge = names::merge_stream(names::SCHEDULER);
     let last = t.felix.tail(&merge).await.unwrap() - 1;
     let (ok, state) = t.replay(&["--id", names::SCHEDULER, "--to", &last.to_string()]);
