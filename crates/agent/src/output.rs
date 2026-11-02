@@ -515,6 +515,12 @@ impl<'a> OutputLog<'a> {
         self.tail
     }
 
+    /// Notes that Felix's own trim record landed at `at`. It takes an offset,
+    /// so the next append goes after it rather than being refused for it.
+    pub(crate) fn trim_landed(&mut self, at: u64) {
+        self.tail = self.tail.max(at + 1);
+    }
+
     /// Appends `batch` at the tail.
     ///
     /// A refused write, or one whose answer was lost, means someone else may

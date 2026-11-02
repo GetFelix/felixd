@@ -237,8 +237,11 @@ enum Command {
         replication_factor: u32,
         /// Let nodes delete history under `--keep-snapshots`: grants the node
         /// role `stream.trim` on every stream of the namespace, which can
-        /// erase any of them for good, and on `sys.facts`. Without it nodes
-        /// record what could be deleted and delete nothing.
+        /// erase any of them for good, and on `sys.facts`. Nodes then delete a
+        /// workload's snapshots, merge log and output, and its inputs below
+        /// what every workload that reads them needs; a reader outside felixd
+        /// is not known to them. Without it nodes record what could be deleted
+        /// and delete nothing.
         #[arg(long)]
         grant_trim: bool,
         /// The admission workload, a WebAssembly component.
@@ -268,8 +271,10 @@ enum Command {
         /// many milliseconds long, by the inputs' append times.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         snapshot_every_ms: Option<u64>,
-        /// Keep this many snapshots and record history before the oldest of
-        /// them as trimmable. Unset keeps everything.
+        /// Keep this many snapshots and delete the history before the oldest
+        /// of them: from the workload's own streams, and from streams other
+        /// workloads read, as far as all of them allow. Needs `felixd init
+        /// --grant-trim`. Unset keeps everything.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         keep_snapshots: Option<u32>,
         /// Fuel given to each call into the workload. It is stored in the

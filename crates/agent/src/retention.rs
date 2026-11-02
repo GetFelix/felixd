@@ -1,4 +1,5 @@
-//! Deleting what a trim record names from the streams a workload owns.
+//! Deleting what a trim record names: from the streams a workload owns, from
+//! its `.out` and from the inputs it shares with other workloads.
 //!
 //! A failed deletion is never the workload's failure: the trim record is
 //! already on `.out`, and the next snapshot (or the next holder) deletes again.
@@ -20,18 +21,25 @@ const PAUSE: Duration = Duration::from_secs(10);
 
 static PAUSED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static FACTS_PAUSED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static SHARED_PAUSED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static WARNED_NOT_ENABLED: AtomicBool = AtomicBool::new(false);
 static WARNED_NO_GRANT: AtomicBool = AtomicBool::new(false);
 static WARNED_NO_FACTS_GRANT: AtomicBool = AtomicBool::new(false);
+static WARNED_NO_SHARED_GRANT: AtomicBool = AtomicBool::new(false);
 
 /// Which kind of stream is being trimmed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// One the workload owns, `.snap` or the merge log.
+    /// One only the workload's holder writes: `.snap`, the merge log or
+    /// `.out`. A refused tail may mean a later holder has written, so it is
+    /// not chased.
     Owned,
     /// `sys.facts`, which every node appends to and whose trim grant is
     /// separate, so a node that lacks it still deletes the owned streams.
     Facts,
+    /// An input other workloads read, written by others. A node whose token
+    /// cannot trim it still deletes the owned streams.
+    Shared,
 }
 
 impl Kind {
@@ -39,7 +47,7 @@ impl Kind {
     fn retries(self) -> usize {
         match self {
             Kind::Owned => 0,
-            Kind::Facts => BUSY_RETRIES,
+            Kind::Facts | Kind::Shared => BUSY_RETRIES,
         }
     }
 }
@@ -73,12 +81,19 @@ fn not_paused(until: &Mutex<Option<Instant>>) -> bool {
     paused.is_none_or(|until| Instant::now() >= until)
 }
 
-/// How many times `sys.facts` is asked again at the tail Felix names.
+/// As [`may_delete`], for the inputs shared with other workloads.
+pub(crate) fn may_delete_shared() -> bool {
+    may_delete() && not_paused(&SHARED_PAUSED_UNTIL)
+}
+
+/// How many times a stream with other writers is asked again at the tail Felix
+/// names.
 const BUSY_RETRIES: usize = 3;
 
 /// Hides the records of `stream` below `before`. `tail` is the stream's next
 /// offset as far as the caller knows; the trim record lands there. For
-/// [`Kind::Facts`] a refused tail is asked again at the one Felix names.
+/// [`Kind::Facts`] and [`Kind::Shared`] a refused tail is asked again at the
+/// one Felix names.
 pub(crate) async fn trim_stream(
     felix: &Felix,
     stream: &str,
@@ -117,6 +132,7 @@ pub(crate) async fn trim_stream(
                 let warned = match kind {
                     Kind::Owned => &WARNED_NO_GRANT,
                     Kind::Facts => &WARNED_NO_FACTS_GRANT,
+                    Kind::Shared => &WARNED_NO_SHARED_GRANT,
                 };
                 if !warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
@@ -149,11 +165,12 @@ pub(crate) async fn trim_stream(
 }
 
 /// Holds off deleting for a while: everything for the owned streams, and
-/// only `sys.facts` for a missing grant on it.
+/// only `sys.facts` or the shared inputs for a missing grant on them.
 fn pause(kind: Kind) {
     let until = match kind {
         Kind::Owned => &PAUSED_UNTIL,
         Kind::Facts => &FACTS_PAUSED_UNTIL,
+        Kind::Shared => &SHARED_PAUSED_UNTIL,
     };
     *until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + PAUSE);
 }
@@ -172,7 +189,9 @@ enum Settled {
 /// only hides offsets below a floor already on `.out`. The owned streams
 /// retry nothing (`retries` is 0): their expected tail may just be stale, so
 /// giving up costs one snapshot interval, as the next snapshot write refreshes
-/// it. A stream with many writers, like `sys.facts`, moves its tail between any
+/// it. For `.out` the refusal is also the fence: a holder a later one has
+/// superseded finds the tail moved and must not trim at the new one. A stream
+/// with many writers, like `sys.facts` or an input, moves its tail between any
 /// two calls, and giving up there would never trim it.
 async fn settle<F, Fut>(expected: u64, retries: usize, mut call: F) -> Result<Settled>
 where

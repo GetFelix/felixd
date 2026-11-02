@@ -1156,9 +1156,12 @@ API. The nodes need new tokens to carry them, and Felix puts them in a token onl
 after the fleet has finalized `head_trim`.
 
 Residual of `--grant-trim`: Felix grants a stream by its exact name or a whole
-namespace's streams, so a node's credential can then trim any stream in the
-namespace, not only the `.snap` and merge log it deletes from: inputs, other
-workloads' outputs and `wl.admission.out` included. The node's publish grant
+namespace's streams, so a node's credential can trim any stream in the
+namespace, not only the ones felixd deletes from. felixd deletes inputs and
+workloads' outputs, but only as far as the readers it knows allow
+([Retention](#retention)); a compromised node, or any program holding the node's
+token, can also trim a stream a reader felixd does not know needs, or
+`wl.admission.out`, whose decisions spec records name for good. The node's publish grant
 has the same reach, but publishing only appends, and a trim erases history for
 every reader and cannot be undone. That is why it is opt-in. The rule on
 `sys.facts` adds one more: any node's token can trim it above the scheduler's
@@ -1209,9 +1212,12 @@ but a compromised node could write garbage. Per-lease tokens close that
 ## Retention
 
 `keep_snapshots` (`felixd run --keep-snapshots K`) keeps a workload's last K
-snapshots and deletes the history of `.snap` and the merge log that its resume
-no longer reads. Without it nothing is deleted and a workload's streams grow
-for as long as it runs.
+snapshots and deletes the history its resume no longer reads: from `.snap` and
+the merge log, from the workload's own `.out`, and from its inputs. A stream
+that other workloads read is deleted only as far as all of them allow, see
+[Streams other workloads read](#streams-other-workloads-read). Without
+`keep_snapshots` nothing is deleted and a workload's streams grow for as long as
+it runs.
 
 After each snapshot the holder writes, it appends a trim record to
 `wl.<id>.out` ([records.md](records.md#output-stream-records)) naming the
@@ -1227,10 +1233,10 @@ floors below which this workload's resume reads nothing:
 The holder then deletes `.snap` and the merge log up to those floors, with
 Felix's conditional head trim (`trim_before`; see "Conditional head trim" in
 Felix's `docs/durable-storage.md`). Both streams are the workload's own, so
-only its holder deletes from them. The scheduler's holder also deletes
-`sys.facts`, below its floor for that input ([The scheduler's
-facts](#the-schedulers-facts)). Other inputs and `.out` are never deleted by
-this: see below.
+only its holder deletes from them, up to the floors in its own record. The
+scheduler's holder also deletes `sys.facts`, below its floor for that input
+([The scheduler's facts](#the-schedulers-facts)). The holder then goes on to its
+`.out` and its inputs, which other workloads may read too.
 
 ```mermaid
 sequenceDiagram
@@ -1242,6 +1248,7 @@ sequenceDiagram
     O-->>H: landed
     H->>S: trim_before the floors, at each stream's tail
     S-->>H: reads below the floors are refused
+    H->>H: then .out and the inputs, below every reader's floor
 ```
 
 The order is the point. The record lands on `.out` first, and only then does
@@ -1259,13 +1266,18 @@ A trim is itself a record on the stream it trims, at the stream's tail, and
 Felix applies it only if the holder names that tail exactly. The holder
 therefore asks at the tail it expects. Felix may answer that the tail is
 different: another writer appended, or the holder's tail is stale, as a read
-can be after a leader change. The holder does not retry at the tail Felix
-names. Retrying would be safe, because a trim only hides offsets below a floor
-the record on `.out` already names, so giving up is a cheap, conservative
-choice. It costs at most one snapshot interval of extra history: the next
-snapshot write refreshes the `.snap` tail, and a resume probes the true tail.
-The snapshot writer and the merge log append, which also write at the tail,
-carry on from the tail Felix reports. Felix leaves trim records out of what it
+can be after a leader change. For the streams only the holder writes, `.snap`,
+the merge log and `.out`, the holder does not retry at the tail Felix names.
+Retrying would be safe for `.snap` and the merge log, because a trim only hides
+offsets below a floor the record on `.out` already names, so giving up there is
+a cheap, conservative choice. It costs at most one snapshot interval of extra
+history: the next snapshot write refreshes the `.snap` tail, and a resume probes
+the true tail. For `.out` the refusal is also the fence: a holder a later one
+has superseded finds that the tail moved, and must not trim at the new one.
+Streams that others append to, `sys.facts` and the inputs, are asked again at
+the tail Felix names. The snapshot writer, the merge log append and the output
+log, which also write at the tail, carry on from the tail Felix reports, or
+past the trim record that landed on their own stream. Felix leaves trim records out of what it
 returns to readers (felixd skips claims itself, not trim records on `.snap` or
 the merge log), so a stream with a gap in its offsets is read as before.
 
@@ -1313,14 +1325,17 @@ workload:
 - **The node's token carries `stream.trim`.** Run `felixd init --grant-trim`
   to give it to the node role over the namespace's streams and `sys.facts`,
   and read the residual under [Grants](#grants) first: it lets any node erase
-  any stream in the namespace. Then mint the nodes new tokens, and if the mint
+  any stream in the namespace, and felixd itself then deletes inputs and other
+  workloads' outputs, which readers it does not know about may still need. Then mint the nodes new tokens, and if the mint
   names the actions to request, add `stream.trim`. `stream.manage` includes
   `stream.trim`, and Felix's control plane mints it into broker tokens only
   after `head_trim` is finalized. A node whose token lacks it, for either reason, gets a refusal
   that looks the same, so the warning names both steps.
 
 Without either, the holder logs one warning, and the workload
-carries on with `.snap` and the merge log growing as before. After ten
+carries on with its streams growing as before. A token that lacks the grant on
+`sys.facts` or on the inputs only holds that deletion back, with its own
+warning: the other deletions go on. After ten
 seconds, the first snapshot or resume tries again, so the deletion starts soon
 after the fleet finalizes the feature or the grant arrives, with no restart. A trim whose answer times
 out is not a failure either: the next snapshot asks again, and a trim that
@@ -1368,21 +1383,108 @@ interval keep about 600.
 Without `keep_snapshots` on the scheduler nothing is deleted and the stream
 grows as under [Placement](#placement).
 
-`wl.scheduler.out` is not trimmed here. It waits with the other `.out`
-streams for #150.
+`wl.scheduler.out` is not trimmed: a node follows the scheduler's output from
+its latest table on, so it keeps the output whole
+([Streams other workloads read](#streams-other-workloads-read)).
 
-### What is not deleted
+### Streams other workloads read
 
-- An input may be another workload's `.out` or a stream other workloads and
-  programs read. One workload's floor says only what that workload's resume
-  needs. An input is deleted only below the lowest floor of all its readers
-  ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
-  workload's floor. Until then the input floors in the record are advice
-  nothing acts on, except for `sys.facts`, which only the scheduler reads
-  (no other workload may take a system stream as input).
-- `.out` is not trimmed. It is every downstream's input, so it can be cut only
-  below every downstream's floor (#150). It also holds the first claim that
-  spec lineage reads.
+An input is often a stream other workloads and programs read, and a workload's
+`.out` is the input of every workload after it. A trim record says only what
+its own workload's resume needs, so the holder deletes these streams below what
+every workload that reads them needs, and no further.
+
+| Stream | Deleted by | Below |
+|---|---|---|
+| `.snap` and the merge log | the workload's holder | its own floor |
+| an input | the holder of any workload that reads it | the lowest floor of its readers |
+| `.out` of a workload with `keep_snapshots` | that workload's holder | the lower of its own need and its readers' lowest floor |
+| `sys.facts` | the scheduler's holder | the scheduler's floor, it is the only reader |
+| `sys.specs`, `sys.intake`, `wl.admission.out`, `wl.scheduler.out` | nothing | |
+
+A holder acts only after its own trim record has landed, and only on streams of
+the felixd namespace: an input that is a system stream, or one of a workload's
+own streams (`wl.*`, handled through that workload's `.out` row), is not
+deleted on the readers' word.
+
+**Readers.** Every workload in the `workloads` cache whose spec lists the stream
+counts, in any state. A reader's floor on the stream is the input floor in the
+last trim record on its `.out`, read the way a resume reads it. The holder acts
+only on evidence, never on silence, so a reader that shows none counts as
+needing everything, a floor of 0:
+
+- a workload with no trim record, such as one without `keep_snapshots` or one
+  that has not yet taken K snapshots, including one that was submitted and has
+  not run;
+- a workload whose spec in the cache lists other inputs than its `.out` was
+  written under (a conflicting spec parks it, and reverting resumes under the
+  old inputs): it counts as needing the inputs of both from 0. Only a workload
+  whose cached spec still lists the stream is looked at, so one edited away from
+  it is not seen;
+- a spec that does not decode, for example one written by a newer felixd. It
+  may read any stream, so it holds every shared stream back;
+- any failure reading a reader's trim record or the `workloads` cache, which
+  leaves the stream alone until the next snapshot.
+
+```mermaid
+flowchart LR
+    A["workload A<br/>trim record: input floor 40"] --> L{"lowest floor"}
+    B["workload B<br/>trim record: input floor 12"] --> L
+    L -->|"trim_before 12"| S[("in")]
+    C["workload C<br/>no trim record: floor 0"] -.->|"would hold it at 0"| L
+```
+
+Whichever holder's floor advances does the deletion, so a stream is deleted as
+far as its readers allow without any one node coordinating. Each pass is
+conservative by itself: a reader's floor only goes up, so an older record than
+the reader's latest is a lower bound, and a stale holder deleting on it deletes
+no more than a current one would. The inputs are written by others, so a refused
+tail is asked again at the tail Felix names, a few times, then left to the next
+snapshot, like `sys.facts`.
+
+**`.out`.** The holder of a workload trims its `.out` below the lower of two
+things. Its own need is the output tail of the oldest snapshot it keeps, where a
+resume of that snapshot and `felixd check --from-snapshot` read from. Everything
+the resume reads back stays above it, and so does the last trim record, which is
+written after a snapshot. The other is the lowest floor, on this `.out`, of the
+workloads that read it. Two rules guard it:
+
+- The holder cuts the head only once its last trim record carries the first
+  claim's spec ([Spec lineage](#spec-lineage)). A stream whose first claim
+  named no spec keeps its head.
+- A system workload's `.out` is never cut. Spec records name admission's
+  decisions on `wl.admission.out` for good, and every node follows the
+  scheduler's output from its latest table on.
+
+Felix's trim lands as a record at the `.out` tail, so the holder moves its
+expected tail past it and the next output is not refused for it.
+
+**Readers felixd does not know.** Another program that subscribes to an input or
+to a workload's `.out`, and a `felixd replay` or `felixd check` that asks for an
+old offset, are not workloads in the `workloads` cache, so their floors are
+unknown. A stream they read may be deleted past them, and they get Felix's "too
+old" answer when they next ask for those offsets. That is the
+risk `--grant-trim` and `keep_snapshots` accept ([Grants](#grants)). A workload
+that lists the stream and has never kept snapshots pins it whole, even stopped,
+since every state counts; one that once did counts by its last trim record. A producer that publishes to an input with a
+conditional write at its tail is refused once per trim, because the trim is a
+record on the stream, and retries at the tail Felix reports.
+
+**A reader added later.** A workload submitted after history was deleted starts
+at the first input, finds it gone, and is recorded as needing an operator
+(reason 9, history trimmed), as for any input that Felix has trimmed past what a
+workload needs (see below). Deleted history does not come back. To avoid it,
+submit a workload that needs the whole stream before the others delete: from the
+moment its spec is in the `workloads` cache it has no trim record, so it holds the
+stream at 0. A submission that lands while a holder is
+deleting can still lose: the holder may have read the cache before the new spec
+was in it.
+
+**Cost.** A deletion pass reads the `workloads` cache once and the last trim
+record of each workload that reads one of the streams, once per snapshot of each
+workload that keeps snapshots, and again when a holder resumes. A reader with
+no trim record is read back through its whole `.out` to find that out, so a
+reader that never keeps snapshots makes every pass cost the length of its `.out`.
 
 ### Spec lineage
 
@@ -1446,11 +1548,9 @@ with the message below. A replay to an offset older than every snapshot left
 starts from the initial state and replays the input, which works while the
 input is still whole.
 
-A merge log that has been trimmed is a different matter: `check` from the
-start needs every entry, and a replay before the oldest kept snapshot needs
-the entries it deleted. They stop and say which stream they needed, the offset
-they asked for and the oldest offset Felix holds. `check` adds the way out,
-`--from-snapshot`, for example:
+A check from the start needs the history that was deleted from the merge log,
+an input or `.out`. It stops and says which stream it needed, the offset it
+asked for and the oldest offset Felix holds, for example:
 
 ```
 felixd check needs wl.orders.merge from offset 0, but Felix holds it only from
@@ -1458,21 +1558,39 @@ offset 412: the history before was trimmed; `felixd check --from-snapshot`
 starts after a snapshot instead
 ```
 
-A check that starts from the oldest kept snapshot, as it does by default once
-Felix has deleted the head of `.out`, needs only the merge log entries from that
-snapshot's step on, which the trim keeps.
+`felixd check --from-snapshot` starts after the oldest kept snapshot instead
+([Checking from a snapshot](#checking-from-a-snapshot)), and `check` does that by
+default once the head of `.out` is gone. When only an input has been deleted, a
+check from the start fails as above, and the message names the flag.
+Once `.out` has been cut, `felixd replay --diff` compares from the input after
+the oldest kept snapshot, the way `check` does, and says where it started;
+`--from-start` stops as above. A plain `felixd replay` does not read `.out`, and
+works from a snapshot's input on.
+
+A replay to an offset older than the oldest kept snapshot, once the input
+before it is deleted, says so and names the oldest offset it can reach:
+
+```
+felixd replay: input 40 is older than the oldest snapshot it can restore,
+which is of input 120, and wl.orders.in no longer holds the inputs before
+offset 110; the oldest offset replay can reach is 120
+```
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)
 rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
 
 `tests/retention.rs` and `tests/merge.rs` run a failover after the deletion,
-and a crash between the record and the deletion. `tests/trim.rs` and
-`tests/merge.rs` also resume with every read below the floors refused (the
-`enforce-trim-floors` fault), and the `skip-deletion` fault writes the records
-and deletes nothing, for tests that read a whole stream. The
-`enforce-trim-floors` fault also refuses reads of `.out` below the oldest kept
-snapshot's output tail, where a cut of the head would leave it.
+and a crash between the record and the deletion. `tests/retention.rs` also
+covers the streams other workloads read: two workloads on one input, a pipeline,
+a reader with no `keep_snapshots`, a failover after the record, and a workload
+added late. `tests/trim.rs` and `tests/merge.rs` also resume with every read
+below the floors refused (the `enforce-trim-floors` fault), and the
+`skip-deletion` fault writes the records and deletes nothing, for tests that
+read a whole stream. The `skip-shared-deletion` fault deletes `.snap`, the merge
+log and `sys.facts` but leaves `.out` and the inputs, which every test agent has
+by default. The `enforce-trim-floors` fault also refuses reads of `.out` below the
+oldest kept snapshot's output tail, where a cut of the head would leave it.
 
 ## Build order
 
@@ -1482,7 +1600,7 @@ snapshot's output tail, where a cut of the head would leave it.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); `--keep-snapshots` deletes `.snap` and the merge log below the floors it records, [Retention](#retention); deleting inputs waits for #150, except `sys.facts`, which the scheduler's holder trims) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); `--keep-snapshots` deletes `.snap`, the merge log, the workload's own `.out` and its inputs below the floors it records and its readers allow, [Retention](#retention)) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -1637,8 +1755,9 @@ State is not capped by the size of one record. Snapshots are written in chunks,
 and a snapshot writes only the chunks that changed since the last one, with
 separate fuel from `step`. A module is stored the same way, in chunks
 ([Modules](#modules)). Snapshots are taken by input count and by time,
-`keep_snapshots` deletes old snapshots and the merge log
-([Retention](#retention); inputs wait for #150, except the scheduler's `sys.facts`), and each workload has a
+`keep_snapshots` deletes old snapshots, the merge log, the workload's `.out`
+and its inputs, as far as every reader allows
+([Retention](#retention)), and each workload has a
 recovery time budget that bounds how far a resume may replay.
 
 ## The workload contract, version 0.2
@@ -1867,7 +1986,8 @@ full node at the defaults so writes about 4.6 MB a day. The agent refuses a
 record per spec record, one per assignment change and a table every ten
 minutes of input time. With `keep_snapshots` on the scheduler, `sys.facts` is
 trimmed to what the oldest kept snapshot reads ([The scheduler's
-facts](#the-schedulers-facts)); `wl.scheduler.out` is not trimmed yet (#150).
+facts](#the-schedulers-facts)); `wl.scheduler.out` is never trimmed
+([Retention](#streams-other-workloads-read)).
 
 Mixed versions. A node from before the scheduler ignores assignments and
 claims by first claim wins. That only takes work an assignment meant for

@@ -626,6 +626,8 @@ async fn run(
         hold,
         last_trim,
         deleted: Deleted::default(),
+        deleted_inputs: Vec::new(),
+        out_need: None,
         metrics: workload_metrics,
         positions,
         progress,
@@ -884,7 +886,7 @@ fn not_behind(stream: &str, tail: u64, next_input: u64) -> Result<()> {
 
 /// The last trim record on `.out` below `tail`, walking back no further
 /// than Felix holds.
-async fn last_trim(felix: &Felix, stream: &str, tail: u64) -> Result<Option<Trim>> {
+pub(crate) async fn last_trim(felix: &Felix, stream: &str, tail: u64) -> Result<Option<Trim>> {
     let mut end = tail;
     let mut window = 16;
     while end > 0 {
@@ -917,13 +919,8 @@ async fn enforce_floors(felix: &Felix, spec: &WorkloadSpec, trim: &Trim) -> Resu
         return Ok(());
     };
     let snap_stream = names::snapshot_stream(id);
-    let found = felix
-        .read_range(&snap_stream, trim.snapshot, trim.snapshot + 1)
-        .await?;
-    let kept = found
-        .first()
-        .and_then(|r| Snapshot::decode(&r.payload).ok().flatten())
-        .map(|s| s.taken().header)
+    let kept = snapshots::header_at(felix, &snap_stream, trim.snapshot)
+        .await?
         .with_context(|| {
             format!(
                 "the trim names {snap_stream}:{}, not a snapshot",
@@ -1003,8 +1000,14 @@ struct Steps<'a> {
     hold: &'a mut u64,
     /// The last trim this owner wrote, or the last on `.out` when it resumed.
     last_trim: Option<Trim>,
-    /// The floors this owner has deleted `.snap` and the merge log below.
+    /// The floors this owner has deleted `.snap`, the merge log, `.out` and
+    /// `sys.facts` below.
     deleted: Deleted,
+    /// Per input, the floor this owner has deleted it below.
+    deleted_inputs: Vec<u64>,
+    /// The output tail of the oldest kept snapshot the last trim names, with
+    /// that snapshot's `.snap` offset.
+    out_need: Option<(u64, u64)>,
     metrics: Option<Arc<WorkloadMetrics>>,
     positions: Vec<Arc<InputMetrics>>,
     progress: &'a Progress,
@@ -1225,27 +1228,36 @@ impl Steps<'_> {
         Ok(())
     }
 
-    /// Deletes `.snap` and the merge log below the last trim record's floors,
-    /// as far as this owner has not already, and for the scheduler `sys.facts`
-    /// below its floor for that input. Only a record that has landed on
-    /// `.out` is acted on, so a crash leaves less deleted than recorded and
-    /// the next holder finishes. Never fails the workload: whatever Felix
-    /// refuses is asked again at the next snapshot.
+    /// Deletes below the last trim record's floors, as far as this owner has
+    /// not already: `.snap` and the merge log, for the scheduler `sys.facts`,
+    /// then `.out` and the inputs shared with other workloads, which also
+    /// wait for every other reader ([`felixd_core::readers`]). Only a record
+    /// that has landed on `.out` is acted on, so a crash leaves less deleted
+    /// than recorded and the next holder finishes. Never fails the workload:
+    /// whatever Felix refuses is asked again at the next snapshot.
     ///
-    /// A trim is a record of its own at the stream's tail. For `.snap` that
-    /// moves `snap_tail` on, so the next snapshot write is not refused for it.
+    /// A trim is a record of its own at the stream's tail. For `.snap` and
+    /// `.out` that moves the tail on, so the next write is not refused for it.
     /// The merge log's own append finds its tail moved and carries on from
-    /// where Felix says, since a trim record holds no entry. Every node
-    /// appends to `sys.facts`, so a trim there is asked again at the tail
-    /// Felix names.
+    /// where Felix says, since a trim record holds no entry. Streams that
+    /// others append to, `sys.facts` and the inputs, are asked again at the
+    /// tail Felix names.
     async fn delete_trimmed(&mut self) {
-        let Some(trim) = &self.last_trim else { return };
+        let Some(trim) = self.last_trim.clone() else {
+            return;
+        };
         let todo = trim.deletions(self.spec.merged(), self.deleted);
         let Some(id) = names::output_of(&self.spec.output) else {
             return;
         };
         let facts = trim.facts_floor(id, &self.spec.inputs, self.deleted);
-        if (todo.is_empty() && facts.is_none())
+        let keep_shared = faults::skip_shared_deletion();
+        let output = !keep_shared && self.deletes_output(&trim);
+        let shared = match keep_shared || self.spec.keep_snapshots.is_none() {
+            true => Vec::new(),
+            false => trim.shared_inputs(&self.spec.inputs, &self.deleted_inputs),
+        };
+        if (todo.is_empty() && facts.is_none() && !output && shared.is_empty())
             || faults::skip_deletion()
             || !retention::may_delete()
             || !self.fence.holds()
@@ -1285,6 +1297,9 @@ impl Steps<'_> {
             if let Deletion::Done { .. } = deletion {
                 self.deleted.facts_floor = before;
             }
+        }
+        if output || !shared.is_empty() {
+            self.delete_shared(&trim, id, output, &shared).await;
         }
     }
 
@@ -1536,6 +1551,8 @@ impl Written<'_> {
         })
     }
 }
+
+mod deletion;
 
 #[cfg(test)]
 mod tests;

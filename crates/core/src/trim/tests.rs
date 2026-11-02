@@ -349,3 +349,51 @@ fn facts_are_not_deleted_twice_or_below_zero() {
         None
     );
 }
+
+fn streams(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// Only inputs other workloads may read are candidates: not a system stream,
+/// not a workload's own streams, whose holder has its own rule.
+#[test]
+fn only_plain_inputs_are_trimmed_on_the_readers_word() {
+    let trim = Trim {
+        input_floors: vec![5, 6, 7],
+        ..floors(12, 40)
+    };
+    let inputs = streams(&["orders", names::FACTS, "wl.up.out"]);
+    assert_eq!(trim.shared_inputs(&inputs, &[]), vec![(0, 5)]);
+}
+
+#[test]
+fn an_input_is_not_trimmed_twice_or_at_zero() {
+    let trim = Trim {
+        input_floors: vec![5, 0],
+        ..floors(12, 40)
+    };
+    let inputs = streams(&["a", "b"]);
+    assert_eq!(trim.shared_inputs(&inputs, &[]), vec![(0, 5)]);
+    assert!(trim.shared_inputs(&inputs, &[5, 0]).is_empty());
+    assert_eq!(trim.shared_inputs(&inputs, &[3]), vec![(0, 5)]);
+}
+
+#[test]
+fn the_head_of_out_goes_only_when_the_record_carries_the_first_spec() {
+    let mut trim = floors(1, 1);
+    assert!(!trim.cuts_output("orders"));
+    trim.first_spec = Some(0);
+    assert!(trim.cuts_output("orders"));
+}
+
+/// Admission's decisions are named by spec records for good, and the
+/// scheduler's output is read from its latest table on.
+#[test]
+fn the_output_of_a_system_workload_is_never_cut() {
+    let trim = Trim {
+        first_spec: Some(0),
+        ..floors(1, 1)
+    };
+    assert!(!trim.cuts_output(names::ADMISSION));
+    assert!(!trim.cuts_output(names::SCHEDULER));
+}

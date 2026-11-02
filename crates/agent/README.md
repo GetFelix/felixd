@@ -19,6 +19,7 @@ binary depends on it.
 | `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ, and checks a merge log against its inputs. Starts at the first input, or after the snapshot the last trim record names once the output stream's head is deleted or when asked. |
 | `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. Another module may replay the inputs, from the workload's snapshot if it declares it can read it. |
 | `ps` | What `felixd ps` does: each workload's state, holder, assignment and positions, and each node, read from the caches and streams. |
+| `retention` and `readers` | Deleting history below a trim record's floors, and finding the workloads that read a stream so it is deleted only below the lowest floor of all of them. |
 | `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
 | `stuck` | `retry`, which runs a workload's attempts until one ends the run or they have failed for the stuck bound with no progress in between. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. Tokens are a `Secret`, which formats as a placeholder; `expose` is called only where a token is handed to Felix. |

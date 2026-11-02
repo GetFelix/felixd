@@ -170,14 +170,33 @@ fn a_missing_facts_grant_does_not_pause_the_other_deletions() {
     reset();
 }
 
-/// Only `sys.facts` is asked again at a tail Felix names, and only a few times.
+/// A node whose token cannot trim the shared inputs still deletes what it
+/// owns and `sys.facts`.
 #[test]
-fn only_the_facts_stream_is_asked_again() {
+fn a_missing_grant_on_shared_inputs_does_not_pause_the_other_deletions() {
+    reset();
+    pause(Kind::Shared);
+    assert!(may_delete());
+    assert!(may_delete_facts());
+    assert!(!may_delete_shared());
+    reset();
+    pause(Kind::Owned);
+    assert!(!may_delete_shared());
+    reset();
+}
+
+/// Streams other nodes append to are asked again at a tail Felix names, and
+/// only a few times. The owned streams, `.out` among them, are not: there a
+/// moved tail is the fence against a holder that has been superseded.
+#[test]
+fn only_streams_with_other_writers_are_asked_again() {
     assert_eq!(Kind::Owned.retries(), 0);
     assert_eq!(Kind::Facts.retries(), 3);
+    assert_eq!(Kind::Shared.retries(), 3);
 }
 
 fn reset() {
     *PAUSED_UNTIL.lock().unwrap() = None;
     *FACTS_PAUSED_UNTIL.lock().unwrap() = None;
+    *SHARED_PAUSED_UNTIL.lock().unwrap() = None;
 }

@@ -19,6 +19,7 @@
 //! - [`check`]: what is wrong with an output stream, against a replay.
 //! - [`status`]: what `felixd ps` says about a workload, from its records.
 //! - [`trim`]: where history may be trimmed, by the last snapshots kept.
+//! - [`readers`]: how far a stream several workloads read may be deleted.
 
 pub mod admission;
 pub mod check;
@@ -31,6 +32,7 @@ pub mod names;
 pub mod node;
 pub mod output;
 pub mod placement;
+pub mod readers;
 pub mod replay;
 pub mod resume;
 pub mod schedule;

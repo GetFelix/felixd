@@ -211,13 +211,18 @@ still gets snapshots and every node takes them at the same inputs. With
 before the oldest of the last three its resume no longer reads (a trim record
 on the output stream), which `felixd check --from-snapshot` starts from, and
 then deletes the snapshot stream and the merge log
-up to there, so a long-running workload stops growing them. Deleting needs the
+up to there, so a long-running workload stops growing them. It also deletes its
+own output stream and its inputs, but only below what every workload that reads
+them still needs: a stream shared with other workloads goes as far as the lowest
+of their floors, and a workload that keeps no snapshots, or one that was
+submitted later, holds the stream where it is. A program outside felixd that
+reads one of those streams is not known to it, and can find its history gone.
+Deleting needs the
 Felix fleet to have finalized `head_trim`, a one-way step, and a node token
 with `stream.trim`. That grant is off by default because it lets any node
 erase any stream in the namespace for good: run `felixd init --grant-trim` to
 turn it on, then mint the nodes new tokens. Without them the workload runs on,
-keeps its history, and the node logs a warning once. Inputs and the output
-stream are not deleted, with one exception: a scheduler run with
+keeps its history, and the node logs a warning once. A scheduler run with
 `--keep-snapshots` also deletes the node facts on `sys.facts` that no kept
 snapshot reads, which keeps that stream to about `keep-snapshots x
 snapshot-every` facts (each about 150 bytes plus the ids of the workloads its
@@ -655,7 +660,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check, deleting snapshots and the merge log, and a scale test done; deleting inputs open. A cluster carries hundreds of workloads, not thousands: [Scale](docs/design.md#scale) |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check, deleting history (snapshots, the merge log, outputs and inputs, below every reader's floor), and a scale test done. A cluster carries hundreds of workloads, not thousands: [Scale](docs/design.md#scale) |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Operator docs done |
 
 ## Crates

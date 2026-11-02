@@ -278,17 +278,17 @@ fn covered(trimmed: &anyhow::Error, snapshot: &SnapshotHeader) -> Result<()> {
 }
 
 /// The records Felix holds on an output stream.
-struct Held {
-    records: Vec<StreamRecord>,
+pub(crate) struct Held {
+    pub(crate) records: Vec<StreamRecord>,
     /// Felix had deleted the head, and `records` start at the oldest it
     /// keeps. The read it refused, as an error.
-    trimmed: Option<anyhow::Error>,
-    cut: bool,
+    pub(crate) trimmed: Option<anyhow::Error>,
+    pub(crate) cut: bool,
 }
 
 /// Reads `stream` up to `tail`, from its oldest record when Felix has
 /// deleted the head, which `Held::trimmed` then says.
-async fn read_held(felix: &Felix, stream: &str, tail: u64) -> Result<Held> {
+pub(crate) async fn read_held(felix: &Felix, stream: &str, tail: u64) -> Result<Held> {
     match felix.read_range(stream, 0, tail).await {
         Ok(records) => Ok(Held {
             records,
