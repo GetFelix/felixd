@@ -2,19 +2,26 @@
 
 ## Unreleased
 
-- Trim records carry the stream's lineage, and `felixd check` starts from a
-  snapshot (#150). A trim record on the output stream now also holds the spec
-  record of the stream's first claim, copied from trim to trim, and the highest
-  spec record claimed so far. Once a cut head has taken the first claim, the
-  agent, `felixd run` and `felixd check` read what the stream was written under
-  from the oldest record Felix keeps, and the stale-spec check stops at a trim
-  record. Trim records without the new fields still read. `felixd check`
-  still replays from the first input; once the head of the output stream is
-  deleted it restores the oldest snapshot the last trim record keeps and checks
-  what follows it, the merge log from the entry at its step. `--from-snapshot`
-  asks for that earlier and `--from-start` refuses it. A snapshot's state is
-  taken as given and outputs below its tail are not compared.
-  Deleting `.out` and the floors downstream readers need remain (#150).
+- Upgrade check from a snapshot (#29). `felixd replay --diff --module` and
+  `replay --to ... --module` start the new module from the workload's nearest
+  snapshot (before `--from` for a diff, before the end of the range for `--to`)
+  when the new module's `felixd.snapshot` custom section says it reads the
+  layout the workload's module wrote, and from the initial state when it does
+  not, saying which and why on stderr. The section is optional JSON,
+  `{"format": "<id>", "reads": ["<id>", ...]}`, additive to contract 0.2
+  (docs/contract.md, "Snapshot layouts"); a module without one is readable only
+  by itself. A new module that declares the layout and traps or runs out of
+  fuel restoring it is reported as "snapshot not readable by the new module",
+  not as a divergence. A section that does not parse is an error when it is
+  read, and the message points at `--from-start`. New `--from-start` always
+  replays from the initial state. `--module` takes a component file as well as
+  the hash of one in the `modules` cache. The `--to` form now prints two lines
+  on stderr, `started from ...` and `ran N more of the inputs below E`, where
+  it printed one. In `felixd_agent::replay`, `replay` and `diff` take
+  `from_start`, `Replayed` carries a `Start` in place of `restored` and `Diffed`
+  gains `start` (breaking for library users). The `counter` example declares
+  its layout and has cargo features that build the variants the tests replay
+  against it; `felixd_testkit::workload_with` builds one.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and
@@ -114,6 +121,19 @@
 - `felixd ps` shows each workload's state (running, waiting, needs operator
   with the reason, failed, stopped), holder, epoch, output stream tail and how
   far it is along each input, and each node, all read from records (#17).
+- Trim records carry the stream's lineage, and `felixd check` starts from a
+  snapshot (#150). A trim record on the output stream now also holds the spec
+  record of the stream's first claim, copied from trim to trim, and the highest
+  spec record claimed so far. Once a cut head has taken the first claim, the
+  agent, `felixd run` and `felixd check` read what the stream was written under
+  from the oldest record Felix keeps, and the stale-spec check stops at a trim
+  record. Trim records without the new fields still read. `felixd check`
+  still replays from the first input; once the head of the output stream is
+  deleted it restores the oldest snapshot the last trim record keeps and checks
+  what follows it, the merge log from the entry at its step. `--from-snapshot`
+  asks for that earlier and `--from-start` refuses it. A snapshot's state is
+  taken as given and outputs below its tail are not compared.
+  Deleting `.out` and the floors downstream readers need remain (#150).
 - `felixd drain <node>` makes a node release its leases, so other nodes take
   its workloads over without waiting for them to expire, and claim nothing
   until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`

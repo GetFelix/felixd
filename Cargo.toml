@@ -18,6 +18,7 @@ felixd-agent = { path = "crates/agent" }
 felixd-testkit = { path = "crates/testkit" }
 wasmtime = { version = "=50.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wit-component = "=0.262.0"
+wasmparser = { version = "=0.262.0", default-features = false, features = ["std", "component-model"] }
 anyhow = "=1.0.104"
 bytes = "=1.12.1"
 felix-client = "=0.6.2"
