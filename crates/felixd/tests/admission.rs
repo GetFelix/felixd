@@ -17,6 +17,7 @@ use common::{
 use felix_client::ConditionalWrite;
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::admission::{self, Submitted};
+use felixd_agent::module_store;
 use felixd_core::admission::{Decision, Outcome, Policy, Reason, Request};
 use felixd_core::spec::{Limits, SpecRecord, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
@@ -119,6 +120,32 @@ async fn append_record(t: &TestFelix, record: &SpecRecord) -> u64 {
             break offset;
         }
     }
+}
+
+/// A module over the 8 MiB one write holds is uploaded in chunks, admitted on
+/// its length, checked by the projector, and runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_over_one_write_is_admitted_and_runs() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let _a = t.start_agent();
+    let module = felixd_testkit::padded(&felixd_testkit::workload("counter"), 9 << 20);
+    assert!(t.run(ID, &module, INPUT, &[]).success());
+    let [(_, decision)] = &decisions_for(&t, ID).await[..] else {
+        panic!("not one decision for the request");
+    };
+    assert!(
+        matches!(decision.outcome, Outcome::Accepted { module_bytes, .. } if module_bytes == 9 << 20),
+        "{decision:?}"
+    );
+    assert!(
+        records(&t)
+            .await
+            .iter()
+            .any(|(_, r)| r.id == ID && !r.skipped)
+    );
+    t.publish_all(INPUT, (0..5).map(count)).await;
+    assert_uninterrupted(&t, &module, 5).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -571,6 +598,54 @@ async fn a_record_naming_a_decision_without_admission_slows_nothing() {
         (t.outputs(OUTPUT).await.len() >= 5).then_some(())
     })
     .await;
+}
+
+/// The projector reads a chunked module whole before it records the spec, so
+/// a missing or wrong chunk gets a skip record and the workload never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunked_module_with_a_missing_or_wrong_chunk_is_skipped() {
+    let Some(t) = test_felix().await else { return };
+    init(&t).await;
+    let a = t.start_agent();
+    admission_held_by(&t, &a.node_id).await;
+    let counter = felixd_testkit::workload("counter");
+
+    for (id, size, damage) in [("lost", 9 << 20, "delete"), ("wrong", 10 << 20, "flip")] {
+        let module = felixd_testkit::padded(&counter, size);
+        let key = module_store::put(&t.felix, &module).await.unwrap();
+        let chunk = module::chunk_key(&key, 1);
+        if damage == "delete" {
+            t.felix.cache_delete(names::MODULES, &chunk).await.unwrap();
+        } else {
+            let mut bad = module[module::CHUNK_BYTES..2 * module::CHUNK_BYTES].to_vec();
+            bad[3] ^= 1;
+            t.felix
+                .cache_put(names::MODULES, &chunk, bad.into())
+                .await
+                .unwrap();
+        }
+        let spec = admission::running(id, &key, vec![INPUT.to_owned()]);
+        let request = Request::new(id, spec, module.len() as u64, replication_factor());
+        t.felix
+            .publish(names::INTAKE, request.encode())
+            .await
+            .unwrap();
+        eventually("a skip record", Duration::from_secs(60), || async {
+            records(&t)
+                .await
+                .into_iter()
+                .any(|(_, r)| r.id == id && r.skipped)
+                .then_some(())
+        })
+        .await;
+    }
+    let ran = records(&t).await;
+    assert!(
+        ran.iter()
+            .filter(|(_, r)| r.id != names::ADMISSION)
+            .all(|(_, r)| r.skipped),
+        "a spec with a bad module was recorded as runnable"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
