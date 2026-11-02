@@ -517,17 +517,14 @@ design.md fixes the outline. These are the choices this note adds:
 6. The default output name is `out`, and a downstream workload reads one
    named output. Reading several outputs at once waits for the determinism
    work in #62.
-<<<<<<< HEAD
-7. The host serves 0.2 and 0.3 side by side, chosen by the exported interface
-   names, instead of ending 0.2. A workload that does not need the publisher
-   should not have to be rebuilt and resubmitted as new code.
-8. `publisher` is a field of `record-in` and not of `input`, because it
-   describes a record from a stream. A response to an effect request (#71) is
-   not published by anyone.
-9. The publisher of another workload's output is always `none`, so a
-   pipeline's downstream does not depend on which node wrote the record.
-=======
 7. Snapshot compatibility is declared in an optional custom section, not in the
    WIT, so declaring it needs no new contract version and a module without it
    stays valid.
->>>>>>> origin/main
+8. The host serves 0.2 and 0.3 side by side, chosen by the exported interface
+   names, instead of ending 0.2. A workload that does not need the publisher
+   should not have to be rebuilt and resubmitted as new code.
+9. `publisher` is a field of `record-in` and not of `input`, because it
+   describes a record from a stream. A response to an effect request (#71) is
+   not published by anyone.
+10. The publisher of another workload's output is always `none`, so a
+    pipeline's downstream does not depend on which node wrote the record.

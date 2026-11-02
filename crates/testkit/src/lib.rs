@@ -9,10 +9,5 @@
 mod contract01;
 mod workloads;
 
-<<<<<<< HEAD
 pub use contract01::{contract_01_component, newer_contract_component};
-pub use workloads::workload;
-=======
-pub use contract01::contract_01_component;
 pub use workloads::{workload, workload_with};
->>>>>>> origin/main
