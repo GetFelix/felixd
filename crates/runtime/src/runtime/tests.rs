@@ -62,8 +62,31 @@ fn a_contract_01_component_is_refused_by_name() {
     assert!(matches!(err, LoadError::Contract01), "{err}");
     assert_eq!(
         err.to_string(),
-        "the component is built against felixd:workload@0.1.0, rebuild it against 0.2"
+        "the component is built against felixd:workload@0.1.0, rebuild it against 0.3"
     );
+}
+
+#[test]
+fn a_component_of_a_newer_contract_is_refused_as_unknown() {
+    let err = load_err(
+        r#"(component
+            (instance $step)
+            (instance $state)
+            (export "felixd:workload/step@0.4.0" (instance $step))
+            (export "felixd:workload/state@0.4.0" (instance $state)))"#,
+    );
+    assert!(
+        matches!(&err, LoadError::UnknownContract(found)
+            if found == &["felixd:workload/step@0.4.0", "felixd:workload/state@0.4.0"]),
+        "{err}"
+    );
+    // A known version missing half its interfaces is not a workload.
+    let err = load_err(
+        r#"(component
+            (instance $step)
+            (export "felixd:workload/step@0.3.0" (instance $step)))"#,
+    );
+    assert!(matches!(err, LoadError::NotAWorkload(_)), "{err}");
 }
 
 #[test]

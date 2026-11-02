@@ -319,6 +319,18 @@ async fn with_only_its_role_each_principal_runs_a_submitted_workload() {
         SpecRecord::decode(&r).is_ok_and(|r| r.id == id && r.admitted.is_some() && !r.skipped)
     });
     assert!(recorded, "no admitted spec record for {id}");
+    // The decision names the submitter, not the node that runs admission.
+    let decisions = t
+        .read_all(&names::output_stream(names::ADMISSION))
+        .await
+        .into_iter()
+        .filter_map(|(_, r)| felixd_agent::admission::decision_of(&r).ok())
+        .filter(|d| d.id == id)
+        .collect::<Vec<_>>();
+    let [decision] = &decisions[..] else {
+        panic!("not one decision for {id}: {decisions:?}");
+    };
+    assert_eq!(decision.requester.as_deref(), Some("p:felixd-submitter"));
     t.publish_all(&input, (0..3u64).map(|i| i.to_be_bytes().to_vec()))
         .await;
     eventually("the outputs", Duration::from_secs(60), || async {

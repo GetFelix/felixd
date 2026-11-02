@@ -2,7 +2,7 @@ use felixd_agent::ps::{Node, Position, Report, Workload};
 use felixd_core::class::{ErrorClass, Failure};
 use felixd_core::lease::Lease;
 use felixd_core::node::{Drain, NodeInfo};
-use felixd_core::status::{Parked, State};
+use felixd_core::status::{Degraded, Parked, State};
 
 use super::render;
 
@@ -126,6 +126,66 @@ fn a_parked_or_failed_workload_says_why() {
     );
     assert!(printed.contains("b: failed (poison): trap"), "{printed}");
     assert!(!printed.contains("no node is up"), "{printed}");
+}
+
+#[test]
+fn a_degraded_workload_shows_its_class_and_detail() {
+    let degraded = Degraded {
+        class: "transient".into(),
+        node: "node-2".into(),
+        detail: "the input stream closed".into(),
+    };
+    let report = Report {
+        workloads: vec![workload("a", State::Degraded(degraded), None)],
+        nodes: vec![node("n", true, false, 0)],
+        scheduled: false,
+    };
+    let printed = render(&report);
+    let row = printed.lines().nth(1).expect("a workload row");
+    let cells: Vec<&str> = row.split_whitespace().take(2).collect();
+    assert_eq!(cells, ["a", "degraded"], "{printed}");
+    assert!(
+        printed.contains("a: degraded (transient) on node-2: the input stream closed"),
+        "{printed}"
+    );
+    // The spec stays running, so nothing says that no node will take it.
+    assert!(!printed.contains("no node is up"), "{printed}");
+}
+
+/// The output the README shows for a degraded workload.
+#[test]
+fn a_degraded_workload_prints_as_the_readme_shows() {
+    let mut counter = workload(
+        "counter",
+        State::Degraded(Degraded {
+            class: "transient".into(),
+            node: "node-2".into(),
+            detail: "the input stream closed".into(),
+        }),
+        None,
+    );
+    counter.last_epoch = Some(7);
+    counter.outputs = 120;
+    counter.inputs = vec![Position {
+        stream: "in".into(),
+        next: 120,
+        tail: 140,
+    }];
+    let report = Report {
+        workloads: vec![counter],
+        nodes: vec![node("n", true, false, 0)],
+        scheduled: false,
+    };
+    let printed = render(&report);
+    let shown: Vec<&str> = printed.lines().take(3).collect();
+    assert_eq!(
+        shown,
+        [
+            "WORKLOAD  STATE     HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG",
+            "counter   degraded  -       (7)    120      in     120   140   20",
+            "counter: degraded (transient) on node-2: the input stream closed",
+        ]
+    );
 }
 
 #[test]

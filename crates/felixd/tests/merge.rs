@@ -74,13 +74,18 @@ async fn merge_log(t: &TestFelix) -> Vec<(u64, u64, Option<merge::Entry>)> {
 async fn expected(t: &TestFelix, module: &[u8]) -> Vec<Vec<u8>> {
     let mut records = Vec::new();
     for input in INPUTS {
-        let on: HashMap<u64, (u64, Vec<u8>)> = t
+        let on: HashMap<u64, (u64, Option<String>, Vec<u8>)> = t
             .felix
             .read_range(input, 0, t.felix.tail(input).await.unwrap())
             .await
             .unwrap()
             .into_iter()
-            .map(|r| (r.offset, (r.timestamp_micros, r.payload.to_vec())))
+            .map(|r| {
+                (
+                    r.offset,
+                    (r.timestamp_micros, r.publisher, r.payload.to_vec()),
+                )
+            })
             .collect();
         records.push(on);
     }
@@ -92,7 +97,7 @@ async fn expected(t: &TestFelix, module: &[u8]) -> Vec<Vec<u8>> {
     for (at, _, entry) in merge_log(t).await {
         let Some(entry) = entry else { continue };
         let input = usize::from(entry.input);
-        let (stamp, payload) = &records[input][&entry.offset];
+        let (stamp, publisher, payload) = &records[input][&entry.offset];
         assert_eq!(*stamp, entry.timestamp_micros, "{entry} at {at}");
         let given = Input {
             stream: INPUTS[input],
@@ -101,6 +106,7 @@ async fn expected(t: &TestFelix, module: &[u8]) -> Vec<Vec<u8>> {
             timestamp_micros: entry.timestamp_micros,
             key: None,
             payload,
+            publisher: publisher.as_deref(),
         };
         let Stepped::Outputs(outputs) = workload.step(given).unwrap() else {
             panic!("faulty rejected {entry}");
@@ -172,6 +178,35 @@ async fn two_inputs_are_stepped_in_merge_log_order() {
     assert_merged(&t, &module, published).await;
     let log = merge_log(&t).await;
     assert!(log[0].2.is_none(), "the log starts with a claim: {log:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_step_is_given_the_publisher_of_its_record() {
+    let Some(t) = test_felix().await else { return };
+    let module = submit(&t).await;
+    t.publish_all(ORDERS, [b"publisher".to_vec(), b"publisher".to_vec()])
+        .await;
+    t.publish_all(PAYMENTS, [b"publisher".to_vec()]).await;
+    let mut first = t.start_agent();
+    eventually("the first steps", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 3).then_some(())
+    })
+    .await;
+    // A new holder steps the rest from the merge log, reading each record
+    // back from its input.
+    first.kill();
+    let _second = t.start_agent();
+    t.publish_all(PAYMENTS, [b"publisher".to_vec()]).await;
+    t.publish_all(ORDERS, [b"publisher".to_vec()]).await;
+    // Compares every output with one computed here from the stored records.
+    assert_merged(&t, &module, 5).await;
+    // A cluster's first offset holds a leader's marker, not an event.
+    let tail = t.felix.tail(ORDERS).await.unwrap();
+    let record = t.felix.read_range(ORDERS, 0, tail).await.unwrap().remove(0);
+    let who = record.publisher.expect("the broker recorded the publisher");
+    let (_, first) = t.outputs(OUTPUT).await.remove(0);
+    let (_, written) = output::decode(&first).unwrap().output().unwrap();
+    assert_eq!(written.payload, who.as_bytes());
 }
 
 /// The holder aborts once its first merge append lands, before stepping any
@@ -522,6 +557,18 @@ async fn a_merged_workload_trims_by_the_merge_log() {
     }
     assert_merged(&t, &module, 30).await;
 
+    // A check can start after the snapshot the last trim names, from the merge
+    // log entry at its step, and finds what a check from the start does.
+    let (ok, report) = t.check(&["--id", ID, "--complete", "--from-snapshot"]);
+    assert!(ok, "{report}");
+    assert!(
+        report.contains("checked after the snapshot of input"),
+        "{report}"
+    );
+    let (ok, report) = t.check(&["--id", ID, "--complete"]);
+    assert!(ok, "{report}");
+    assert!(!report.contains("checked after"), "{report}");
+
     let found = trims(&t).await;
     assert!(found.len() >= 2, "{found:?}");
     let log = t.read_all(MERGE).await;
@@ -574,6 +621,7 @@ async fn a_failover_after_the_merge_log_is_trimmed_loses_nothing() {
         error.contains(&format!("needs {MERGE} from offset 0")),
         "{error}"
     );
+    assert!(error.contains("--from-snapshot"), "{error}");
 }
 
 /// Waits for `records` outputs, then checks every input record was stepped
@@ -598,11 +646,16 @@ async fn assert_stepped_once(t: &TestFelix, records: usize) {
         steps.push((written.header.input_offset, written.header.index));
     }
     for input in INPUTS {
+        // Not every offset holds an event: a cluster's first holds a leader's
+        // marker, which `read_range` leaves out.
         let tail = t.felix.tail(input).await.unwrap();
-        for offset in 0..tail {
+        let events = t.felix.read_range(input, 0, tail).await.unwrap();
+        assert!(events.len() >= 15, "{input} holds {} events", events.len());
+        for record in events {
             assert!(
-                seen.contains(&(input.to_owned(), offset)),
-                "{input}:{offset}"
+                seen.contains(&(input.to_owned(), record.offset)),
+                "{input}:{}",
+                record.offset
             );
         }
     }
@@ -640,7 +693,7 @@ async fn raising_keep_snapshots_on_a_merged_workload_keeps_the_last_trim() {
     })
     .await;
     first.kill();
-    let held = t.read_all(common::SNAPSHOTS).await;
+    let held = t.read_readable(common::SNAPSHOTS).await;
     let manifests = held
         .iter()
         .filter(|(_, r)| matches!(snapshot::decode(r), Ok(snapshot::Record::Manifest(_))))

@@ -5,8 +5,8 @@
 //! each request it outputs exactly one [`Decision`], keyed by the workload id,
 //! on `wl.admission.out`, so its decisions are written once, fail over and
 //! replay like any output. [`decide`] is the whole policy and reads nothing
-//! but the request, so a replay of the same module over the same requests
-//! decides the same way, and a replay of another module shows which past
+//! but the request and who published it, so a replay of the same module over
+//! the same requests decides the same way, and a replay of another module shows which past
 //! requests a policy change would decide differently.
 //!
 //! The node holding admission's lease then projects each accepted decision
@@ -26,7 +26,9 @@ const DECISION_FORMAT: u32 = 1;
 
 /// A request on `sys.intake`: run, change or stop workload `id`. A stop is
 /// the spec with state `stopped`. The requester is not in the payload, which
-/// any publisher can fill with anything.
+/// any publisher can fill with anything: it is the principal the broker
+/// authenticated the write from, which the workload contract hands to a step
+/// as the record's publisher.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub format: u32,
@@ -74,6 +76,12 @@ pub struct Decision {
     pub request: u64,
     /// The workload the request names, or empty for one that did not decode.
     pub id: String,
+    /// Who published the request, as the broker recorded it: the principal
+    /// its token named. Absent when the broker recorded none, which is
+    /// rejected as [`Reason::NoRequester`], and in decisions written before
+    /// requesters were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -114,6 +122,15 @@ pub enum Reason {
     OverLimit,
     /// The module is larger than the policy allows.
     ModuleTooLarge,
+    /// The broker recorded no publisher for the request, so nobody can be
+    /// held to the policy. Fails closed.
+    NoRequester,
+    /// The policy lists who may ask, and the requester is not on it.
+    NotPermitted,
+    /// A reason a newer build wrote. Readers of an older build see the
+    /// rejection and not an error.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Reason {
@@ -127,6 +144,9 @@ impl Reason {
             Reason::InvalidSpec => 5,
             Reason::OverLimit => 6,
             Reason::ModuleTooLarge => 7,
+            Reason::NoRequester => 8,
+            Reason::NotPermitted => 9,
+            Reason::Unknown => 0,
         }
     }
 }
@@ -141,6 +161,9 @@ impl std::fmt::Display for Reason {
             Reason::InvalidSpec => "invalid_spec",
             Reason::OverLimit => "over_limit",
             Reason::ModuleTooLarge => "module_too_large",
+            Reason::NoRequester => "no_requester",
+            Reason::NotPermitted => "not_permitted",
+            Reason::Unknown => "unknown",
         })
     }
 }
@@ -181,6 +204,10 @@ pub struct Policy {
     pub max_snapshot_fuel: u64,
     pub max_module_bytes: u64,
     pub max_replication_factor: u32,
+    /// The principals allowed to ask, exactly as the broker names them. Empty
+    /// means any requester the broker recorded; the intake stream's publish
+    /// grant already limits who can publish at all.
+    pub requesters: &'static [&'static str],
 }
 
 impl Default for Policy {
@@ -192,16 +219,18 @@ impl Default for Policy {
             max_snapshot_fuel: 10 * limits.snapshot_fuel,
             max_module_bytes: module::MAX_MODULE_BYTES,
             max_replication_factor: 7,
+            requesters: &[],
         }
     }
 }
 
-/// Decides the request at `sys.intake` offset `offset`. Total and pure: every
-/// request gets exactly one decision, from its bytes and `policy` alone.
-pub fn decide(policy: &Policy, offset: u64, payload: &[u8]) -> Decision {
+/// Decides the request at `sys.intake` offset `offset`, published by
+/// `publisher`. Total and pure: every request gets exactly one decision, from
+/// its bytes, its publisher and `policy` alone.
+pub fn decide(policy: &Policy, offset: u64, publisher: Option<&str>, payload: &[u8]) -> Decision {
     let (id, outcome) = match Request::decode(payload) {
         Ok(request) => {
-            let outcome = match check(policy, &request) {
+            let outcome = match check(policy, publisher, &request) {
                 Ok(()) => Outcome::Accepted {
                     spec: request.spec,
                     module_bytes: request.module_bytes,
@@ -223,12 +252,30 @@ pub fn decide(policy: &Policy, offset: u64, payload: &[u8]) -> Decision {
         format: DECISION_FORMAT,
         request: offset,
         id,
+        requester: publisher.map(str::to_owned),
         outcome,
     }
 }
 
-fn check(policy: &Policy, request: &Request) -> Result<(), (Reason, String)> {
+fn check(
+    policy: &Policy,
+    publisher: Option<&str>,
+    request: &Request,
+) -> Result<(), (Reason, String)> {
     let spec = &request.spec;
+    // An empty name is no one: treat it as unrecorded.
+    let Some(requester) = publisher.filter(|p| !p.is_empty()) else {
+        return Err((
+            Reason::NoRequester,
+            "the broker recorded no publisher for the request".to_owned(),
+        ));
+    };
+    if !policy.requesters.is_empty() && !policy.requesters.contains(&requester) {
+        return Err((
+            Reason::NotPermitted,
+            format!("{requester} may not ask for workloads"),
+        ));
+    }
     names::validate_id(&request.id).map_err(|e| (Reason::InvalidId, e.to_string()))?;
     if names::is_system(&request.id) {
         return Err((

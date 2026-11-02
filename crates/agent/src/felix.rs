@@ -59,6 +59,10 @@ impl Felix {
             token_provider: Some(Arc::new(settings.token.clone())),
             // Time-based snapshot points come from input append times.
             timestamps: true,
+            // A step is given its record's publisher. Reads return it once the
+            // broker has stored one; the flag also asks for it on live events,
+            // so a live step and a replay see the same value.
+            publishers: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
         let client = Client::connect_seeds(
@@ -631,10 +635,15 @@ impl Trimmed {
         match Trimmed::of(&error) {
             Some(t) => anyhow::anyhow!(
                 "{command} needs {} from offset {}, but Felix holds it only from offset {}: \
-                 the history before was trimmed",
+                 the history before was trimmed{}",
                 t.stream,
                 t.requested,
-                t.oldest
+                t.oldest,
+                if command == "felixd check" {
+                    "; `felixd check --from-snapshot` starts after a snapshot instead"
+                } else {
+                    ""
+                }
             ),
             None => error,
         }

@@ -78,7 +78,9 @@ async fn a_failover_after_the_snapshot_stream_is_trimmed_loses_nothing() {
     assert!(kept.len() >= 2, "two snapshots are kept: {kept:?}");
 
     // Replay starts from a kept snapshot, so a recent offset still works.
-    let (ok, replayed) = t.replay(&["--id", ID, "--to", "89"]);
+    // The last input's offset: a cluster's inputs start after a leader marker.
+    let last = t.felix.tail(INPUT).await.unwrap() - 1;
+    let (ok, replayed) = t.replay(&["--id", ID, "--to", &last.to_string()]);
     assert!(ok, "{replayed}");
     assert_eq!(replayed, "{\"count\":90}");
     assert!(!parked(&t).await, "the resume read deleted history");
@@ -103,9 +105,9 @@ async fn a_crash_between_the_trim_record_and_the_deletion_is_finished_by_the_nex
     let found = trims(&t).await;
     let floor = found.last().expect("the second trim landed").snap_floor;
     assert!(floor > 0, "{found:?}");
-    assert_eq!(
-        t.readable_from(SNAPSHOTS).await,
-        0,
+    // On a cluster the stream's head is a leader marker, so it starts at 1.
+    assert!(
+        t.readable_from(SNAPSHOTS).await < floor,
         "nothing is deleted before the crash"
     );
 

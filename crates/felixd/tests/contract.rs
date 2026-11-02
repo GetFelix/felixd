@@ -1,5 +1,5 @@
-//! Workload contract 0.2 end to end: rejections, poison, addressed outputs,
-//! chunked snapshots, input metadata and 0.1 modules, each through a takeover
+//! Workload contract 0.3 end to end: rejections, poison, addressed outputs,
+//! chunked snapshots, input metadata, the publisher and 0.1 modules, each through a takeover
 //! where it matters, and checked with `felixd check` and `felixd replay`.
 //!
 //! Needs a Felix broker; see `common`.
@@ -331,11 +331,51 @@ async fn the_input_metadata_is_the_same_live_after_a_takeover_and_in_a_replay() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_publisher_is_the_same_live_after_a_takeover_and_in_a_replay() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("faulty", &["--snapshot-every", "3"]).await;
+    let mut first = t.start_agent();
+    t.publish_all(INPUT, inputs(&["publisher"; 5])).await;
+    produced(&t, OUTPUT, 5).await;
+    first.kill();
+    let _second = t.start_agent();
+    t.publish_all(INPUT, inputs(&["publisher"; 5])).await;
+    // Compares every output with one computed here from the stored records,
+    // publisher included.
+    assert_uninterrupted(&t, &module, 10).await;
+    let input = read_stamped(&t, INPUT).await;
+    let who = input[0]
+        .publisher
+        .clone()
+        .expect("the broker recorded the publisher");
+    assert!(!who.is_empty());
+    for record in &input {
+        assert_eq!(record.publisher.as_deref(), Some(who.as_str()));
+    }
+    let first_output = t.outputs(OUTPUT).await[0].1.clone();
+    let (_, a) = output::decode(&first_output).unwrap().output().unwrap();
+    assert_eq!(a.payload, who.as_bytes());
+    diff_passes(&t, ID);
+    let (ok, report) = t.check(&["--id", ID, "--complete"]);
+    assert!(ok, "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
+    refused_and_left_for_an_operator(felixd_testkit::contract_01_component()).await;
+}
+
+/// A module of a contract this build does not know is left to an operator
+/// too, never failed: a newer felixd may run it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_of_a_newer_contract_is_left_for_an_operator() {
+    refused_and_left_for_an_operator(felixd_testkit::newer_contract_component()).await;
+}
+
+async fn refused_and_left_for_an_operator(old: Vec<u8>) {
     let Some(t) = test_felix().await else { return };
     // Another workload, so the caches exist and an agent has work it does.
     t.submit_as("other", "counter", &[]).await;
-    let old = felixd_testkit::contract_01_component();
     let hash = module::hash(&old);
     assert!(!t.run(ID, &old, INPUT, &[]).success(), "felixd run took it");
     assert!(
@@ -387,7 +427,7 @@ async fn a_contract_01_module_is_refused_and_left_for_an_operator() {
         OperatorReason::ModuleRefused
     );
     tokio::time::sleep(LEASE_TTL * 2).await;
-    assert!(t.lease(ID).await.is_none(), "the 0.1 workload is held");
+    assert!(t.lease(ID).await.is_none(), "the refused workload is held");
     let record = t.spec().await.record.unwrap();
     assert_eq!(
         t.needs_operator().await,

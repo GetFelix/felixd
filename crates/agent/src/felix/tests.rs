@@ -51,8 +51,18 @@ fn a_command_that_reads_trimmed_history_names_the_stream_and_where_it_starts() {
     assert_eq!(
         message,
         "felixd check needs wl.a.merge from offset 0, but Felix holds it only from offset 37: \
-         the history before was trimmed"
+         the history before was trimmed; `felixd check --from-snapshot` starts after a snapshot instead"
     );
+    let replay = Trimmed::explained(
+        Trimmed {
+            stream: "wl.a.merge".into(),
+            requested: 0,
+            oldest: 37,
+        }
+        .into(),
+        "felixd replay",
+    );
+    assert!(!replay.to_string().contains("--from-snapshot"));
 }
 
 #[test]

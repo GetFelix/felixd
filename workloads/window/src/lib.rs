@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 wit_bindgen::generate!({
-    path: "../../wit",
+    path: "../../wit/0.2",
     world: "workload",
 });
 

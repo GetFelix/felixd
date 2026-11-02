@@ -2,7 +2,7 @@
 
 The placement scheduler (#60). It is a felixd workload like any other, so its assignments fail
 over, are written exactly once and replay. The logic is `felixd_core::schedule::Scheduler`; this
-crate wraps it as a [contract 0.2](../../docs/contract.md) component.
+crate wraps it as a [contract 0.2](../../wit/0.2/workload.wit) (see [upgrading to 0.3](../../docs/contract.md#upgrading-from-02)) component.
 
 Unlike the other workloads here it depends on `felixd-core`, for the record formats it reads and
 writes.

@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::admission;
 use felixd_agent::agent::AgentConfig;
-use felixd_agent::check::check;
+use felixd_agent::check::{Origin, check};
 use felixd_agent::drain;
 use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
@@ -76,6 +76,19 @@ enum Command {
         /// left out.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         facts_every_ms: Option<u64>,
+        /// How long, in milliseconds, a workload this node holds may keep
+        /// failing on a transient error, with no progress in between, before
+        /// the node records it as degraded and releases the lease so another
+        /// node can try. At least the lease TTL. 60000, or the lease TTL if
+        /// that is longer, when left out. 0 turns it off: the node retries
+        /// for ever and writes no degraded record, which a rolling upgrade
+        /// from a build that predates the record needs.
+        #[arg(long)]
+        stuck_after_ms: Option<u64>,
+        /// How long, in milliseconds, this node leaves a workload alone after
+        /// releasing it as degraded, so another node gets a turn.
+        #[arg(long, default_value_t = felixd_agent::agent::DEFAULT_DEGRADED_BACKOFF.as_millis() as u64)]
+        degraded_backoff_ms: u64,
         /// Serve Prometheus metrics at `/metrics` on this address, such as
         /// 127.0.0.1:9464. Off when left out. Plain HTTP with no
         /// authentication: it names workloads and streams, so keep it on an
@@ -98,7 +111,8 @@ enum Command {
     },
     /// Check output streams: replay each workload's module over its input and
     /// report gaps, duplicates, records out of order, epoch regressions and
-    /// outputs that differ. Exits with 1 if anything is found.
+    /// outputs that differ. A workload that trims its history is checked from
+    /// the oldest snapshot it keeps. Exits with 1 if anything is found.
     Check {
         #[command(flatten)]
         connection: Connection,
@@ -114,6 +128,16 @@ enum Command {
         /// reads, up the whole pipeline. Stages are checked upstream first.
         #[arg(long)]
         upstream: bool,
+        /// Replay from the first input. This is the default; it fails once
+        /// Felix has deleted history the replay needs.
+        #[arg(long, conflicts_with = "from_snapshot")]
+        from_start: bool,
+        /// Start after the oldest snapshot the last trim record keeps. The
+        /// snapshot's state is taken as given, and outputs below its tail
+        /// are not compared. Used by default only when Felix has deleted
+        /// the head of the output stream.
+        #[arg(long)]
+        from_snapshot: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
     /// what its `inspect` returns, or with `--diff` compare the outputs a
@@ -293,6 +317,8 @@ async fn main() -> Result<()> {
             assignment_bound_ms,
             assignment_grace_ms,
             facts_every_ms,
+            stuck_after_ms,
+            degraded_backoff_ms,
             metrics_bind,
             metrics_max_workloads,
             admission_token_file,
@@ -322,6 +348,12 @@ async fn main() -> Result<()> {
                     3 * Duration::from_millis(lease_ttl_ms),
                     Duration::from_millis,
                 ),
+                stuck_after: stuck_after_ms.map_or(
+                    felixd_agent::agent::DEFAULT_STUCK_AFTER
+                        .max(Duration::from_millis(lease_ttl_ms)),
+                    Duration::from_millis,
+                ),
+                degraded_backoff: Duration::from_millis(degraded_backoff_ms),
                 admission_token,
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
@@ -331,13 +363,23 @@ async fn main() -> Result<()> {
             ids,
             complete,
             upstream,
+            from_start,
+            from_snapshot,
         } => {
-            let reports = check(&connection.settings()?, &ids, complete, upstream).await?;
+            let origin = match (from_start, from_snapshot) {
+                (true, _) => Origin::Start,
+                (_, true) => Origin::Snapshot,
+                _ => Origin::Auto,
+            };
+            let reports = check(&connection.settings()?, &ids, complete, upstream, origin).await?;
             let mut found = false;
             for report in &reports {
                 if report.findings.is_empty() {
+                    let after = report.from_snapshot.map_or(String::new(), |input| {
+                        format!(", checked after the snapshot of input {input}")
+                    });
                     println!(
-                        "{}: {} records, ok, from {}",
+                        "{}: {} records, ok, from {}{after}",
                         report.output,
                         report.records,
                         report.inputs.join(", ")

@@ -254,6 +254,19 @@ impl TestFelix {
             .collect())
     }
 
+    /// Every record `stream` still holds, from the offset Felix has trimmed
+    /// it to. A cluster's first offset is a marker, so a trim at the first
+    /// event leaves reads from 0 refused.
+    pub(crate) async fn read_readable(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
+        let from = self.readable_from(stream).await;
+        let tail = self.felix.tail(stream).await.unwrap();
+        let records = self.felix.read_range(stream, from, tail).await.unwrap();
+        records
+            .into_iter()
+            .map(|r| (r.offset, r.payload.to_vec()))
+            .collect()
+    }
+
     /// The oldest offset reads of `stream` start at: 0 until Felix trims it.
     pub(crate) async fn readable_from(&self, stream: &str) -> u64 {
         let tail = self.felix.tail(stream).await.unwrap();
@@ -545,6 +558,7 @@ pub(crate) fn input(offset: u64, timestamp_micros: u64, payload: &[u8]) -> Input
         timestamp_micros,
         key: None,
         payload,
+        publisher: None,
     }
 }
 
@@ -566,9 +580,11 @@ pub(crate) fn expected(module: &[u8], inputs: &[felix_client::StreamRecord]) -> 
     let mut records = Vec::new();
     for record in inputs {
         let offset = record.offset;
-        let stepped = workload
-            .step(input(offset, record.timestamp_micros, &record.payload))
-            .unwrap();
+        let given = Input {
+            publisher: record.publisher.as_deref(),
+            ..input(offset, record.timestamp_micros, &record.payload)
+        };
+        let stepped = workload.step(given).unwrap();
         match stepped {
             Stepped::Outputs(outputs) => {
                 for (index, out) in outputs.iter().enumerate() {

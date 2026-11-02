@@ -212,3 +212,18 @@ fn an_output_is_compared_by_name_and_key_as_well() {
     );
     assert!(r.compare(0, &[named("out", Some(b"k"))]).is_some());
 }
+
+#[test]
+fn a_degraded_record_is_passed_over_when_reading_the_recorded_outputs() {
+    let stream = [
+        encode_claim(1, "a"),
+        out(0, 0, 1, b"x"),
+        crate::output::encode_degraded(1, 0, crate::class::ErrorClass::Transient, "node-a", "gone"),
+        encode_claim(2, "b"),
+        out(1, 0, 2, b"y"),
+    ];
+    let r = recorded(&stream, 0..10);
+    assert_eq!(r.compare(0, &[p(b"x")]), None);
+    assert_eq!(r.compare(1, &[p(b"y")]), None);
+    assert_eq!(r.end(), 2);
+}
