@@ -148,6 +148,13 @@ pub(crate) enum Outcome {
     /// is on its streams cannot be resumed from. It would fail the same way
     /// anywhere, so it is not retried.
     Failed(String),
+    /// As [`Outcome::Failed`], because a replay of the inputs the stream has
+    /// outputs for produced something else. The failure is poison all the
+    /// same; `divergence` is what a divergence record holds.
+    Diverged {
+        reason: String,
+        divergence: Divergence,
+    },
     /// This node no longer holds the lease by its own clock.
     Lost,
     /// A record at this epoch was found on the output stream, above the
@@ -268,6 +275,63 @@ impl fmt::Display for Superseded {
 
 impl std::error::Error for Superseded {}
 
+/// Where a replay and the output stream disagreed, as far as this run knows.
+/// The spec record, node, epoch and build come from the holder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Divergence {
+    pub(crate) header: OutputHeader,
+    /// The input offset of the snapshot this run restored.
+    pub(crate) snapshot: Option<u64>,
+    /// The digest of what the stream holds there.
+    pub(crate) expected: Option<[u8; 32]>,
+    /// The digest of what this run produced.
+    pub(crate) actual: Option<[u8; 32]>,
+}
+
+impl Divergence {
+    /// The finding for `header`, where the stream holds `held` and this run
+    /// produced `replayed`. Each digest covers exactly what the comparison
+    /// looks at, so an epoch never shows as a difference.
+    pub(crate) fn of(
+        header: OutputHeader,
+        snapshot: Option<u64>,
+        (held, replayed): (Option<&[u8]>, Option<&[u8]>),
+    ) -> Divergence {
+        Divergence {
+            header,
+            snapshot,
+            expected: held.and_then(output::compared_digest),
+            actual: replayed.and_then(output::compared_digest),
+        }
+    }
+}
+
+/// A replay produced something the output stream does not hold, so the
+/// stream was written by something else or the workload is not
+/// deterministic. Poison, like any state no node can get past, but it carries
+/// what the holder records about it.
+#[derive(Debug)]
+pub(crate) struct Diverged {
+    message: String,
+    divergence: Divergence,
+}
+
+impl fmt::Display for Diverged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Diverged {}
+
+pub(crate) fn diverged(message: impl fmt::Display, divergence: Divergence) -> anyhow::Error {
+    Diverged {
+        message: message.to_string(),
+        divergence,
+    }
+    .into()
+}
+
 /// A state no node can get past. Retrying would replay the same history into
 /// the same failure, so the workload is marked failed instead.
 #[derive(Debug)]
@@ -383,7 +447,12 @@ pub(crate) async fn run_workload(
             recorded: true,
         });
     }
-    if error.is::<Poison>() {
+    if let Some(found) = error.downcast_ref::<Diverged>() {
+        Ok(Outcome::Diverged {
+            reason: format!("{error:#}"),
+            divergence: found.divergence.clone(),
+        })
+    } else if error.is::<Poison>() {
         Ok(Outcome::Failed(format!("{error:#}")))
     } else if error.is::<LostLease>() {
         Ok(Outcome::Lost)
@@ -527,6 +596,12 @@ async fn run(
         }
     };
 
+    // What the replay started from, for a divergence record.
+    let restored = snapshot
+        .as_ref()
+        .filter(|_| resume.restore)
+        .map(|s| s.taken().header.input_offset);
+    log.snapshot = restored;
     let mut steps = Steps {
         felix,
         modules: runtime,
@@ -544,6 +619,7 @@ async fn run(
             next: resume.output_from,
             end: output_tail,
             page: VecDeque::new(),
+            snapshot: restored,
         },
         since_snapshot: 0,
         previous_stamp,
@@ -985,7 +1061,7 @@ impl Steps<'_> {
                 .encode(header, self.fence.epoch())
                 .map_err(poison)?;
             if self.resume.already_written(offset, index) {
-                self.written.check(&record).await?;
+                self.written.check(header, &record).await?;
             } else {
                 batch.push(record);
             }
@@ -1415,10 +1491,14 @@ struct Written<'a> {
     next: u64,
     end: u64,
     page: VecDeque<StreamRecord>,
+    /// The input offset of the snapshot the run restored, for a divergence.
+    snapshot: Option<u64>,
 }
 
 impl Written<'_> {
-    async fn check(&mut self, replayed: &[u8]) -> Result<()> {
+    /// Checks `replayed`, the record for `header` this run produced, against
+    /// the next record the stream holds.
+    async fn check(&mut self, header: OutputHeader, replayed: &[u8]) -> Result<()> {
         while self.page.is_empty() && self.next < self.end {
             let (records, after) = self
                 .felix
@@ -1433,8 +1513,11 @@ impl Written<'_> {
         }
         let found = self.page.pop_front();
         let offset = found.as_ref().map_or(self.end, |r| r.offset);
-        resume::check_skipped(offset, replayed, found.as_ref().map(|r| r.payload.as_ref()))
-            .map_err(poison)
+        let held = found.as_ref().map(|r| r.payload.as_ref());
+        resume::check_skipped(offset, replayed, held).map_err(|error| {
+            let divergence = Divergence::of(header, self.snapshot, (held, Some(replayed)));
+            diverged(error, divergence)
+        })
     }
 }
 

@@ -130,8 +130,11 @@ pub async fn diff(
     let mut feed = Feed::new(&felix, id, &spec);
     let input_tail = felix.tail(feed.stream()).await?;
     let end = end_of(&felix, feed.stream(), to, input_tail).await?;
-    let recorded = Recorded::read(records.iter().map(|r| r.payload.as_ref()), from..end)
-        .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
+    let recorded = Recorded::read(
+        records.iter().map(|r| (r.offset, r.payload.as_ref())),
+        from..end,
+    )
+    .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, start) = start(&felix, id, &spec, module, from, from_start).await?;
     let (_, limits) = judged(&felix, id, &spec, &records, false).await?;

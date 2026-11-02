@@ -292,6 +292,7 @@ pub(crate) struct Metrics {
     handoffs: [AtomicU64; 3],
     needs_operator: [AtomicU64; REASONS.len()],
     degraded: [AtomicU64; CLASSES.len()],
+    divergences: AtomicU64,
     failures: AtomicU64,
     snapshots_written: AtomicU64,
     snapshots_skipped: AtomicU64,
@@ -311,6 +312,7 @@ pub(crate) fn enable(node: &str, max_workloads: usize) -> &'static Metrics {
         handoffs: Default::default(),
         needs_operator: Default::default(),
         degraded: Default::default(),
+        divergences: AtomicU64::new(0),
         failures: AtomicU64::new(0),
         snapshots_written: AtomicU64::new(0),
         snapshots_skipped: AtomicU64::new(0),
@@ -352,6 +354,12 @@ pub(crate) fn degraded(class: ErrorClass) {
     if let Some(m) = get() {
         let at = CLASSES.iter().position(|&c| c == class).unwrap_or(0);
         m.degraded[at].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn diverged() {
+    if let Some(m) = get() {
+        m.divergences.fetch_add(1, Ordering::Relaxed);
     }
 }
 

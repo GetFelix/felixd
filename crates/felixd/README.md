@@ -25,7 +25,7 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
 | `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Replays from the first input, or from the oldest kept snapshot once the head of the output stream is deleted or with `--from-snapshot`. Exits 1 if it finds any. |
 | `felixd replay` | Rebuilds a workload as of `--to` and prints what its `inspect` returns, or with `--diff` compares a replay with the recorded outputs. Writes nothing. |
-| `felixd ps` | Shows each workload's state, holder, assignment (while a scheduler runs), epoch, output stream tail and position on each input, and each node. Reads only. |
+| `felixd ps` | Shows each workload's state, holder, assignment (while a scheduler runs), epoch, output stream tail and position on each input, and each node, and where a failed workload's replay diverged from its output stream. Reads only. |
 | `felixd drain <node>` | Marks a node as draining: it releases its leases so other nodes take its workloads over at once, and claims nothing. |
 | `felixd undrain <node>` | Lifts the mark, so the node claims work again. |
 

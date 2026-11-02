@@ -70,6 +70,9 @@ pub(crate) fn render(report: &Report) -> String {
         {
             details.push(format!("{}: {state}", w.id));
         }
+        if let Some(divergence) = &w.divergence {
+            details.push(format!("{}: {divergence}", w.id));
+        }
         if let Some(unread) = &w.unread {
             details.push(format!("{}: could not read: {unread}", w.id));
         }

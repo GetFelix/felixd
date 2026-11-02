@@ -27,6 +27,13 @@ pub struct Runtime {
 #[derive(Clone)]
 pub struct Compiled(Component, Version);
 
+impl Compiled {
+    /// The workload contract version the component implements.
+    pub fn contract(&self) -> &'static str {
+        self.1.number()
+    }
+}
+
 /// Why a component could not be loaded.
 #[derive(Debug, Error)]
 pub enum LoadError {
@@ -56,6 +63,11 @@ pub enum LoadError {
     #[error("the component does not implement the workload world: {0}")]
     Instantiate(String),
 }
+
+/// The wasmtime version this build links, pinned in the workspace manifest.
+/// A float or trap that differs across versions would differ on a replay,
+/// so a divergence record names it.
+pub const WASMTIME_VERSION: &str = "50.0.0";
 
 /// The top-level functions a 0.1 workload exports.
 const CONTRACT_01: [&str; 4] = ["step", "snapshot", "restore", "inspect"];

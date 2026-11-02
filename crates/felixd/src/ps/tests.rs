@@ -2,7 +2,7 @@ use felixd_agent::ps::{Node, Position, Report, Workload};
 use felixd_core::class::{ErrorClass, Failure};
 use felixd_core::lease::Lease;
 use felixd_core::node::{Drain, NodeInfo};
-use felixd_core::status::{Degraded, Parked, State};
+use felixd_core::status::{Degraded, Diverged, Parked, State};
 
 use super::render;
 
@@ -15,6 +15,7 @@ fn workload(id: &str, state: State, holder: Option<Lease>) -> Workload {
         assigned: None,
         outputs: 0,
         last_epoch: None,
+        divergence: None,
         inputs: vec![Position {
             stream: "in".into(),
             next: 0,
@@ -254,4 +255,74 @@ fn with_a_scheduler_each_workload_shows_its_assignment() {
     );
     assert_eq!(lines[1][..5], ["wl", "running", "n-2", "n-2@912", "3"]);
     assert_eq!(lines[2][..4], ["new", "waiting", "-", "-"]);
+}
+
+const EXPECTED: &str = "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed";
+const ACTUAL: &str = "3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3";
+
+fn diverged() -> Diverged {
+    Diverged {
+        node: "node-2".into(),
+        epoch: 7,
+        input_offset: 41,
+        index: 0,
+        snapshot: Some(30),
+        contract: "0.2.0".into(),
+        wasmtime: "50.0.0".into(),
+        felixd: "0.1.0".into(),
+        expected: Some(EXPECTED.into()),
+        actual: Some(ACTUAL.into()),
+        detail: "replayed output differs from the record at offset 52 of the output stream".into(),
+    }
+}
+
+/// The output the README shows for a workload that failed on a divergence.
+#[test]
+fn a_failed_workload_prints_where_it_diverged_as_the_readme_shows() {
+    let mut counter = workload(
+        "counter",
+        State::Failed(Failure {
+            class: ErrorClass::Poison,
+            detail: "replayed output differs from the record at offset 52 of the output stream"
+                .into(),
+        }),
+        None,
+    );
+    counter.last_epoch = Some(7);
+    counter.outputs = 54;
+    counter.inputs = vec![Position {
+        stream: "in".into(),
+        next: 41,
+        tail: 60,
+    }];
+    counter.divergence = Some(diverged());
+    let report = Report {
+        workloads: vec![counter],
+        nodes: vec![node("n", true, false, 0)],
+        scheduled: false,
+    };
+    let printed = render(&report);
+    let shown: Vec<&str> = printed.lines().take(4).collect();
+    assert_eq!(
+        shown,
+        [
+            "WORKLOAD  STATE   HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG",
+            "counter   failed  -       (7)    54       in     41    60    19",
+            "counter: failed (poison): replayed output differs from the record at offset 52 of the output stream",
+            &format!(
+                "counter: diverged at input 41 output 0 on node-2 at epoch 7: the stream holds sha256 {}, the replay produced sha256 {}, started from the snapshot of input 30, contract 0.2.0, wasmtime 50.0.0, felixd 0.1.0: replayed output differs from the record at offset 52 of the output stream",
+                EXPECTED, ACTUAL
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_workload_with_no_divergence_prints_no_line_for_one() {
+    let report = Report {
+        workloads: vec![workload("a", State::Running, None)],
+        nodes: vec![node("n", true, false, 0)],
+        scheduled: false,
+    };
+    assert!(!render(&report).contains("diverged"));
 }

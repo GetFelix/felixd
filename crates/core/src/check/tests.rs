@@ -1090,3 +1090,88 @@ fn an_epoch_below_the_one_before_the_records_checked_is_a_regression() {
         }]
     );
 }
+
+fn divergence_record(epoch: u64, spec: u64) -> Vec<u8> {
+    use crate::output::{Abi, Diverged, encode_divergence};
+    encode_divergence(
+        epoch,
+        &Diverged {
+            spec,
+            header: header(0, 0),
+            snapshot: None,
+            node: b"node-a",
+            abi: Abi {
+                contract: b"0.2.0",
+                wasmtime: b"50.0.0",
+                felixd: b"1.2.3",
+            },
+            expected: None,
+            actual: None,
+            detail: b"",
+        },
+    )
+}
+
+/// As for a degraded record: the first claim, not the divergence record
+/// before it, names the module and input the stream was written under.
+#[test]
+fn a_divergence_record_before_the_first_claim_is_passed_over() {
+    use crate::spec::{WorkloadSpec, WorkloadState};
+    let spec = |input: &str| WorkloadSpec {
+        module: "aa".into(),
+        inputs: vec![input.into()],
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        keep_snapshots: None,
+        state: WorkloadState::Running,
+        limits: Default::default(),
+        failure: None,
+        record: None,
+    };
+    let claimed = HashMap::from([(1, spec("in"))]);
+    let records = [
+        divergence_record(0, 1),
+        output::encode_claim_under(1, 1, 1, "x"),
+        output::encode(header(0, 0), 1, b"x"),
+    ];
+    let cached = WorkloadSpec {
+        record: Some(2),
+        ..spec("other")
+    };
+    let (lineage, _) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.inputs, ["in"]);
+}
+
+#[test]
+fn a_divergence_record_does_not_raise_the_floor() {
+    let records = [
+        output::encode_claim_under(1, 10, 10, "a"),
+        output::encode(header(0, 0), 1, b"x"),
+        divergence_record(2, 13),
+        output::encode_claim_under(3, 12, 12, "c"),
+        output::encode(header(1, 0), 3, b"x"),
+    ];
+    assert_eq!(
+        specs_applied(records.iter().map(Vec::as_slice), |_| true),
+        [(0, 10), (1, 12)]
+    );
+}
+
+#[test]
+fn a_divergence_record_between_outputs_is_not_a_finding() {
+    let expected = replay(5);
+    let mut records = vec![output::encode_claim(1, "")];
+    records.extend(clean(&expected[..3]));
+    records.push(divergence_record(1, 0));
+    records.push(output::encode_claim(2, ""));
+    records.extend(expected[3..].iter().map(|e| encode(e, 2)));
+    assert_eq!(run(&expected, &records, true), []);
+    // Its epoch is checked like any record's.
+    records[4] = divergence_record(5, 0);
+    assert!(
+        run(&expected, &records, true)
+            .iter()
+            .any(|f| matches!(f, Finding::EpochRegression { .. }))
+    );
+}

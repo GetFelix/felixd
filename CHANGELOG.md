@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Divergence records (#73). A workload fails as poison when a node replays its
+  inputs and gets an output other than the one the stream holds. The node now
+  first appends a `divergence` record (output record kind 9: spec record,
+  input offset and index, the input of the snapshot the replay started from,
+  node id, contract, wasmtime and felixd versions, the sha256 of the output
+  the stream holds and of the one the replay produced, detail), fenced by epoch
+  like the failure record that follows it, which keeps its class. It is best
+  effort, and a deposed node writes neither record. `felixd ps` prints it under
+  a failed workload, `felixd replay --diff` names it when it finds the same
+  output differing, and `felixd_divergences_total` counts them. Every reader
+  passes over it like a claim, and a node that cannot read one that is last on
+  the stream does not take the workload. A build from before kind 9 reads it
+  as an unknown kind: an old node that claims a failed workload after its spec
+  is submitted again fails the new spec, an old `ps`, `check` or `replay`
+  reports the stream unreadable, and a downstream workload run by an old node
+  needs an operator. Finish a rolling upgrade before submitting a failed
+  workload again. There is no switch. This closes #73;
+  defining the records in WIT waits for the effect records, and felixd does
+  not push OTLP.
 - `felixd agent` shuts down cleanly on SIGTERM as well as Ctrl-C (#203). It stops its workloads and deletes
   their leases, so `docker stop` and `systemctl stop` hand work to another node at once instead of after
   the lease TTL. As PID 1 in a container it no longer ignores SIGTERM.

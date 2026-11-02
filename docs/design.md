@@ -621,6 +621,13 @@ only before any later owner has begun, and a claimer that finds it last
 before its claim, or past the tail when its claim is refused, stops instead
 of claiming after it.
 
+A workload whose replay differs from its output stream fails as poison, and
+the holder writes a divergence record just before the failure record, the same
+way, so the failure says where and on which build it happened
+([System records and errors](#system-records-and-errors)). A build from before
+the record reads it as an unknown kind, which matters only for a workload that
+has failed already ([records.md](records.md)); there is no switch.
+
 A holder retries a run that fails on an error from Felix, such as a broker
 that is down or a stream it cannot read, because the next attempt resumes from
 what the streams hold. It does not retry for ever. A run is stuck when its
@@ -751,6 +758,11 @@ it. For each workload:
   the workload and no holder has written its claim record since. Otherwise `running` when a lease
   with an epoch exists, `claiming` when the lease has no epoch yet, and
   `waiting` when there is none.
+- **Divergence.** A line below the table with the input and output that
+  differ, the node and epoch that found it, the digests of both sides and the
+  build, when the output stream ends on a divergence record for this spec
+  record, behind the failure record and any other note after it, within the
+  stream's last 8 records. A claim or an output after it means a holder has run since, and it is not shown.
 - **Holder and epoch.** The lease's owner and epoch, and whether that node is
   draining. With no holder, the epoch of the last record on the output stream.
 - **Outputs.** The output stream's tail.
@@ -794,8 +806,16 @@ claim record is written. If it keeps coming back:
 claiming a workload that fails everywhere, is
 [#99](https://github.com/GetFelix/felixd/issues/99).
 
-Divergence records, which `felixd ps` would also show, are not built yet
-([#73](https://github.com/GetFelix/felixd/issues/73)).
+A `failed` workload whose failure is `replayed output differs` or
+`records ... that differ from this workload's output` has a divergence line
+under its failure line. The digests are of the output the stream holds and
+of the one this node's replay produced, so a different build, or a module that
+is not deterministic, shows as two different digests for one input. They
+cover the whole output as compared, not only its payload, so they differ from
+the payload digests `replay --diff` prints. To dig
+further, `felixd replay --id <id> --diff` replays the inputs on your own
+machine, names the divergence record when it finds the same output differing,
+and `--module` tries another module against the recorded outputs.
 
 ## Exactly-once output
 
@@ -1882,9 +1902,36 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   format. Adding an outcome is a new version. Contract 0.2 already treats
   running out of snapshot fuel as an abandoned snapshot and out of restore fuel
   as needs operator (`docs/contract.md`); this section does not change that.
-- A divergence record carries the node, its determinism ABI, the input offset,
-  the snapshot it started from, and the digests of both the expected and the
-  actual output, so `felixd replay` can reproduce it. Not built yet.
+- **A divergence is recorded** (#73). When a holder's replay produces an
+  output that differs from what the stream holds, or finds records at its
+  tail that are not its output, the workload fails as poison. Before the
+  failure record the holder appends a divergence record on `wl.<id>.out`,
+  fenced by epoch like the needs-operator and degraded records, with the spec
+  record, the input offset and index of the output, the input offset of the
+  snapshot the replay restored (or none), its node id, the determinism ABI of
+  its build, the sha256 of the output the stream holds and of the one the
+  replay produced, and the detail ([records.md](records.md) has the layout).
+  The ABI is three strings for now: the workload contract version, the
+  wasmtime version and the felixd version; one identifier for all of it waits
+  for the determinism ABI ([#62](https://github.com/GetFelix/felixd/issues/62)).
+  The failure record that follows keeps its class, poison. The divergence
+  record is an observation: it is passed over by every reader, raises no
+  floor, and a node that cannot read it does not take the workload. It is
+  best effort, so the workload fails with or without it, and a deposed node
+  writes neither. `felixd ps` shows it under the failure, `felixd replay
+  --diff` names it, and `felixd_divergences_total` counts them. It exists so
+  the question after a poison failure from replay, whether the module, the
+  inputs or the build changed, can be answered from the log: the record has
+  the digests of both sides and the build that found it, and `felixd replay`
+  can reproduce the rest. A merge log that holds records its holder did not
+  write is a different fault, retried as transient and recorded as degraded
+  when stuck, not as a divergence.
+- **What #73 leaves out on purpose.** Two things. The system records are
+  defined once in `core`, not in WIT, because WIT definitions go with the
+  effect records, and effects are not built. Metrics are scraped from each
+  node as Prometheus text, which an OpenTelemetry Collector reads; felixd does
+  not push OTLP. The rest is built: typed spec and failure records, error
+  classes, and the needs-operator, degraded and divergence records.
 - Metrics are Prometheus text per node, which an OpenTelemetry Collector
   scrapes with its Prometheus receiver; [Metrics](metrics.md) lists them.
   Input lag, claims, handoffs, steps, step latency, outputs, refusals and
