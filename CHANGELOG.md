@@ -12,6 +12,11 @@
   same refusal when it creates an accepted workload's streams: it logs Felix's
   reason and retries every second until the name can be reused, instead of
   recording a spec whose streams do not exist.
+- Felix 0.7.0-preview.2. felixd builds on `felix-client` 0.7.0-preview.2 and the
+  compose files and test stacks default to the 0.7.0-preview.2 images. Nothing
+  changes for users. This release is the first with conditional head trims,
+  which later changes use to delete history. The client's cluster type is now
+  called `Client`.
 - Upgrade check from a snapshot (#29). `felixd replay --diff --module` and
   `replay --to ... --module` start the new module from the workload's nearest
   snapshot (before `--from` for a diff, before the end of the range for `--to`)

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
-    AckMode, BrokerError, CacheCondition, CacheConditionResult, ClientConfig, ClusterClient,
+    AckMode, BrokerError, CacheCondition, CacheConditionResult, Client, ClientConfig,
     ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy, StartPosition, StreamRecord,
     SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
@@ -27,7 +27,7 @@ const READY_WITHIN: Duration = Duration::from_secs(20);
 /// namespace's system namespace for system streams. All streams here have a
 /// single shard.
 pub struct Felix {
-    client: Arc<ClusterClient>,
+    client: Arc<Client>,
     tenant: String,
     namespace: String,
 }
@@ -60,7 +60,7 @@ impl Felix {
             timestamps: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
-        let client = ClusterClient::connect_seeds(
+        let client = Client::connect_seeds(
             &settings.brokers,
             &settings.server_name,
             config,
