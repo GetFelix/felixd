@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check a module in specs/ under each configuration registered for it
 # below, and hold each to its outcome. `TLA_MODULE` picks the module:
-# Felixd (the default), FelixdSpecs, FelixdMerge or FelixdAdmission.
+# Felixd (the default), FelixdTrimming, FelixdSpecs, FelixdMerge or FelixdAdmission.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -9,7 +9,8 @@
 # that quietly became a pass would be a model that stopped saying anything.
 #
 # `scripts/check_tla.sh Felixd FelixdNoMarker` checks only those; a name not
-# registered below must pass. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
+# registered below must pass. `TLA_MODULE=FelixdTrimming` checks the trimming
+# configurations of Felixd. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
 # checks the spec history model, `TLA_MODULE=FelixdMerge` the merge log
 # model and `TLA_MODULE=FelixdAdmission` the admission model. `TLC_WORKERS=4` caps TLC's worker threads.
 #
@@ -51,6 +52,17 @@ felixd_expectations=(
   "FelixdPartialNoIndex violates NoPoison"
 )
 
+# Felixd.tla with trimming on (docs/formal.md, Trimming). Its own job: the
+# configurations above take most of the 30 minutes of theirs.
+felixd_trim_expectations=(
+  "FelixdTrim pass"
+  "FelixdTrimKeepTwo pass"
+  "FelixdTrimTwice pass"
+  "FelixdTrimNoOwn pass"
+  "FelixdTrimOldest violates RestoreIntact"
+  "FelixdTrimAnyTime violates RestoreIntact"
+)
+
 felixd_specs_expectations=(
   "FelixdSpecs pass"
   "FelixdSpecsStale pass"
@@ -78,6 +90,9 @@ felixd_merge_expectations=(
   "FelixdMergeRecreate pass"
   "FelixdMergeLost pass"
   "FelixdMerge pass"
+  "FelixdMergeTrim pass"
+  "FelixdMergeTrimKeepTwo pass"
+  "FelixdMergeTrimOldest violates RestoreIntact"
 )
 
 felixd_admission_expectations=(
@@ -97,6 +112,7 @@ felixd_admission_expectations=(
 MODULE="${TLA_MODULE:-Felixd}"
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
+  FelixdTrimming) MODULE=Felixd; expectations=("${felixd_trim_expectations[@]}") ;;
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
   FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
   FelixdAdmission) expectations=("${felixd_admission_expectations[@]}") ;;
