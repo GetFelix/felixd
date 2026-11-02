@@ -361,11 +361,14 @@ admitted through intake gets its streams from admission's projector instead, wit
 admission's credential ([Submitting work](#submitting-work)). Other agents never
 create streams.
 
-A create that Felix answers with 409 counts as done only if the stream or cache can be read
-back. Felix also refuses a stream under the name of a deleted one until the cluster has finalized
-stream incarnations, and a control plane that no broker registers with, as in the single-broker
-test stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait
-for a stream that does not exist. Admission's projector, which creates an accepted workload's
+A create that Felix answers with 409 counts as done if its message says the stream or cache
+already exists, as when it exists with other settings; the shared system streams and caches
+answer that way on every `felixd run`, so reading each back would send the control plane a
+request for every one. Any other 409 counts only if the stream or cache can be read back. Felix
+also refuses a stream under the name of a deleted one until the cluster has finalized stream
+incarnations, and a control plane that no broker registers with, as in the single-broker test
+stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait for
+a stream that does not exist. Admission's projector, which creates an accepted workload's
 streams, logs the same reason and retries every second, so later decisions wait behind it until an
 operator finalizes incarnations.
 

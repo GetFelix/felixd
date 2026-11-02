@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fewer control plane requests per `felixd run`. Reading a stream or cache back after a 409 (#149)
+  put about nine extra GETs on the control plane for every submit, each on a new connection, and at
+  1000 workloads brokers lost their leases (GetFelix/felix#1760). A 409 that says the resource
+  already exists is no longer read back, any other 409 still is, and the control plane calls share
+  one connection pool.
 - `felixd agent` shuts down cleanly on SIGTERM as well as Ctrl-C (#203). It stops its workloads and deletes
   their leases, so `docker stop` and `systemctl stop` hand work to another node at once instead of after
   the lease TTL. As PID 1 in a container it no longer ignores SIGTERM.

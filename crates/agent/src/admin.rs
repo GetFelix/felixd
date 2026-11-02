@@ -224,13 +224,20 @@ fn view_is_tenant_wide(token: &str, tenant: &str) -> bool {
 
 /// POSTs `body` to the collection at `/v1/tenants/{tenant}/{collection}` and
 /// accepts a 409 only if `name` is there afterwards. Felix answers 409 both
-/// when the resource exists and when a create reuses a deleted name before the
-/// cluster has finalized incarnations, and only the first leaves something to
-/// use. Reading back does not depend on the wording of the refusal.
+/// when the resource exists with other settings and when a create reuses a
+/// deleted name before the cluster has finalized incarnations, and only the
+/// first leaves something to use.
+///
+/// A 409 that says the resource already exists is trusted, because every
+/// `felixd run` hits it for the shared system streams and caches, and a read
+/// back each time put thousands of requests on the control plane at scale.
+/// Any other 409 is read back, so an unfamiliar wording is never taken for
+/// success.
 async fn create(settings: &Settings, collection: &str, name: &str, body: Value) -> Result<()> {
     let (status, text) = call(settings, "POST", collection, Some(body)).await?;
     match status {
         200..=299 => Ok(()),
+        409 if says_already_exists(&text) => Ok(()),
         409 => {
             let path = format!("{collection}/{name}");
             match call(settings, "GET", &path, None).await?.0 {
@@ -244,6 +251,28 @@ async fn create(settings: &Settings, collection: &str, name: &str, body: Value) 
         }
         _ => bail!("creating {collection}/{name} failed with HTTP {status}: {text}"),
     }
+}
+
+/// Whether a 409 body is Felix's "already exists" answer. The refusal of a
+/// deleted name never reads this way, but is excluded by its own words too.
+fn says_already_exists(body: &str) -> bool {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["message"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    message.contains("already exists") && !message.contains("was deleted")
+}
+
+/// The process's one HTTP agent, so calls in a row reuse a connection instead
+/// of opening one each.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into()
+    })
 }
 
 /// Calls `/v1/tenants/{tenant}/{path}` with the control plane token, and
@@ -267,10 +296,7 @@ async fn call(
         path
     );
     tokio::task::spawn_blocking(move || -> Result<(u16, String)> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent = agent();
         let sent = match body {
             Some(body) => agent
                 .post(&url)
