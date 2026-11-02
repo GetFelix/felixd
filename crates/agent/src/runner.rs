@@ -1100,7 +1100,7 @@ impl Steps<'_> {
             return Ok(());
         }
         faults::before_snapshot();
-        if !self.fence.holds() {
+        if !self.fence.held().await {
             return Err(LostLease.into());
         }
         let started = Instant::now();
@@ -1360,7 +1360,7 @@ impl Steps<'_> {
                     manifest = Some(m);
                 }
             }
-            if !self.fence.holds() {
+            if !self.fence.held().await {
                 return Err(LostLease.into());
             }
             let count = batch.len() as u64;

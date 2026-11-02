@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Agents degrade under load instead of tipping into lease churn (GetFelix/felix#1760). On a slow
+  cluster, leases lapsed together, every agent claimed them back at once, and the claims slowed
+  renewals further until nothing settled. Now a holder whose renewal is late pauses its writes at
+  two thirds of the TTL and carries on if that renewal is applied, instead of dropping the
+  workload. A renewal unanswered for a TTL counts as failed. A node makes at most 8 claims at
+  once, holds new claims back for up to TTL/3 while its renewals are slow, and waits before
+  claiming a workload it lost again (TTL/12 to TTL/6, doubling per loss in a row up to one TTL).
+  Lease and epoch rules are unchanged; these only delay claims and writes.
 - Nightly scale run against Felix main (GetFelix/felix#1760). `scale-nightly.yml` runs the scale test at 1000
   workloads on the `:nightly` Felix images every night and opens an issue labelled `felix-nightly-scale` when they
   do not all start. `Scale` takes a `felix_image_tag` input and can be called from another workflow.
