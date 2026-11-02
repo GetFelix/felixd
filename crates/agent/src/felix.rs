@@ -26,6 +26,7 @@ const READY_WITHIN: Duration = Duration::from_secs(20);
 /// A connection to Felix, scoped to one tenant and namespace, and that
 /// namespace's system namespace for system streams. All streams here have a
 /// single shard.
+#[derive(Clone)]
 pub struct Felix {
     client: Arc<Client>,
     tenant: String,
