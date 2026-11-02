@@ -231,17 +231,7 @@ async fn create(settings: &Settings, collection: &str, name: &str, body: Value) 
     let (status, text) = call(settings, "POST", collection, Some(body)).await?;
     match status {
         200..=299 => Ok(()),
-        409 => {
-            let path = format!("{collection}/{name}");
-            match call(settings, "GET", &path, None).await?.0 {
-                200 => Ok(()),
-                404 => bail!("creating {path} was refused with HTTP 409: {text}"),
-                other => bail!(
-                    "creating {path} was refused with HTTP 409: {text}; reading it back \
-                     failed with HTTP {other}"
-                ),
-            }
-        }
+        409 => Ok(()),
         _ => bail!("creating {collection}/{name} failed with HTTP {status}: {text}"),
     }
 }
