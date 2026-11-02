@@ -198,7 +198,9 @@ async fn a_merged_step_is_given_the_publisher_of_its_record() {
     t.publish_all(ORDERS, [b"publisher".to_vec()]).await;
     // Compares every output with one computed here from the stored records.
     assert_merged(&t, &module, 5).await;
-    let record = t.felix.read_range(ORDERS, 0, 1).await.unwrap().remove(0);
+    // A cluster's first offset holds a leader's marker, not an event.
+    let tail = t.felix.tail(ORDERS).await.unwrap();
+    let record = t.felix.read_range(ORDERS, 0, tail).await.unwrap().remove(0);
     let who = record.publisher.expect("the broker recorded the publisher");
     let (_, first) = t.outputs(OUTPUT).await.remove(0);
     let (_, written) = output::decode(&first).unwrap().output().unwrap();
