@@ -108,6 +108,19 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
         .collect()
 }
 
+/// The node role's grant to delete history under `keep_snapshots`, which
+/// `felixd init --grant-trim` writes and plain `init` does not. Felix grants
+/// by name or the whole namespace, so it lets a node's credential trim any
+/// stream in the namespace, inputs and other workloads' outputs included, and
+/// a trim cannot be undone.
+pub fn trim_policy(tenant: &str, namespace: &str) -> Policy {
+    Policy {
+        subject: Role::Node.subject(namespace),
+        object: format!("stream:{tenant}/{namespace}/*"),
+        action: "stream.trim".to_owned(),
+    }
+}
+
 /// One role assignment, as the control plane's grouping API has it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grouping {
@@ -125,9 +138,10 @@ fn is_felixd_subject(namespace: &str, subject: &str) -> bool {
 }
 
 /// Checks what the control plane holds for `namespace` against
-/// [`policies`] and returns the rules still missing. Any rule under a felixd
-/// role that is not in [`policies`] (a wider one, or another role) is an
-/// error, and so is any grouping that makes a felixd role inherit another
+/// [`policies`] and returns the rules still missing, plus [`trim_policy`] when
+/// `grant_trim`. Holding the trim rule is fine either way: `init` without the
+/// flag does not take it back. Any other rule under a felixd role that is
+/// not in [`policies`] (a wider one, or another role) is an error, and so is any grouping that makes a felixd role inherit another
 /// role, or gives one principal two of the roles: the roles' separation
 /// holds only if nothing else adds to them.
 pub fn audit(
@@ -135,10 +149,15 @@ pub fn audit(
     namespace: &str,
     held: &[Policy],
     groupings: &[Grouping],
+    grant_trim: bool,
 ) -> Result<Vec<Policy>, String> {
-    let wanted = policies(tenant, namespace);
+    let mut wanted = policies(tenant, namespace);
+    let trim = trim_policy(tenant, namespace);
     for policy in held {
-        if is_felixd_subject(namespace, &policy.subject) && !wanted.contains(policy) {
+        if is_felixd_subject(namespace, &policy.subject)
+            && !wanted.contains(policy)
+            && *policy != trim
+        {
             return Err(format!(
                 "{} holds {} on {}, which felixd does not grant it",
                 policy.subject, policy.action, policy.object
@@ -172,6 +191,9 @@ pub fn audit(
                 grouping.user
             ));
         }
+    }
+    if grant_trim {
+        wanted.push(trim);
     }
     Ok(wanted.into_iter().filter(|p| !held.contains(p)).collect())
 }

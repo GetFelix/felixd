@@ -2,15 +2,19 @@
 //!
 //! A trim record on `.out` says below which offsets of the snapshot stream,
 //! the merge log and each input this workload's resume reads nothing.
-//! `felixd check` starts at the oldest kept snapshot the last trim names;
+//! `felixd check --from-snapshot` starts at the oldest kept snapshot the last
+//! trim names, and does so by default once the `.out` head is deleted;
 //! `felixd replay` reads from the start while records are there.
 //!
 //! The record also carries what a head cut off `.out` would take with it:
 //! the spec record of the stream's first claim, which says what module and
 //! input the stream was written under, and the highest spec record claimed
 //! so far, which a stale node is refused by.
-//! Nothing is deleted yet: Felix has no call to trim a stream at an offset
-//! (Felix#1662). The record is what that deletion will follow.
+//!
+//! The holder then deletes what the record names on the streams that are the
+//! workload's own, `.snap` and the merge log ([`Trim::deletions`]), and only
+//! after the record has landed, so a crash at any point leaves less deleted
+//! than recorded. Inputs are not deleted: other readers may need them.
 
 use crate::codec::{DecodeError, Reader};
 
@@ -52,6 +56,39 @@ pub struct Trim {
     /// floor a claim written here would carry. `None` when none was, and in
     /// records written before it was carried.
     pub claimed: Option<u64>,
+}
+
+/// A stream whose history the holder deletes on a trim record's word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owned {
+    /// The snapshot stream, `.snap`.
+    Snapshots,
+    /// The merge log.
+    MergeLog,
+}
+
+/// The floors a holder has already deleted below, on the streams it owns.
+/// Zero where it has deleted nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Deleted {
+    pub snap_floor: u64,
+    pub merge_floor: u64,
+}
+
+impl Trim {
+    /// What is left to delete: each owned stream whose floor is past what is
+    /// already `done`, with the offset to delete below. The merge log only
+    /// counts for a `merged` workload.
+    pub fn deletions(&self, merged: bool, done: Deleted) -> Vec<(Owned, u64)> {
+        let mut left = Vec::new();
+        if self.snap_floor > done.snap_floor {
+            left.push((Owned::Snapshots, self.snap_floor));
+        }
+        if merged && self.merge_floor > done.merge_floor {
+            left.push((Owned::MergeLog, self.merge_floor));
+        }
+        left
+    }
 }
 
 /// Why [`plan`] wrote nothing.

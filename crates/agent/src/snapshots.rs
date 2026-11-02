@@ -35,6 +35,14 @@ impl Snapshot {
         })
     }
 
+    /// Whether the chunks it names are all on the stream from `first_held`,
+    /// the first offset Felix still serves. A manifest can survive a trim that
+    /// took a chunk it shares with an older snapshot.
+    pub(crate) fn restorable(&self, first_held: u64) -> bool {
+        self.manifest()
+            .is_none_or(|m| m.chunks.iter().all(|c| c.offset >= first_held))
+    }
+
     /// The manifest, for a chunked snapshot.
     pub(crate) fn manifest(&self) -> Option<&Manifest> {
         match self {
@@ -134,6 +142,24 @@ pub(crate) async fn newest(
     Ok(found)
 }
 
+/// The snapshots among `records`, a read of the stream from the first offset
+/// Felix holds, that can be restored, oldest first. One whose chunks a trim
+/// took is left out, for an older or newer one.
+pub(crate) fn restorable<'a>(
+    stream: &str,
+    records: impl IntoIterator<Item = (u64, &'a Bytes)>,
+) -> Result<Vec<Snapshot>> {
+    let records: Vec<_> = records.into_iter().collect();
+    let first_held = records.first().map_or(0, |(offset, _)| *offset);
+    let mut found = Vec::with_capacity(records.len());
+    for (offset, payload) in records {
+        let snapshot =
+            Snapshot::decode(payload).map_err(|e| anyhow!("snapshot at {stream}:{offset}: {e}"))?;
+        found.extend(snapshot.filter(|s| s.restorable(first_held)));
+    }
+    Ok(found)
+}
+
 /// The state's chunks, in order, each checked against the hash its manifest
 /// names. A version 2 snapshot is one chunk.
 pub(crate) async fn chunks(
@@ -196,3 +222,6 @@ impl ReadError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

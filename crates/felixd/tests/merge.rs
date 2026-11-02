@@ -14,13 +14,15 @@ use common::{ID, OUTPUT, TestFelix, eventually, replication_factor, test_felix};
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_core::output::{self, Addressed, OutputHeader};
 use felixd_core::spec::Limits;
-use felixd_core::{merge, names};
+use felixd_core::{merge, names, snapshot};
 use felixd_runtime::{Input, Runtime, Stepped};
 
 const ORDERS: &str = "orders";
 const PAYMENTS: &str = "payments";
 const INPUTS: [&str; 2] = [ORDERS, PAYMENTS];
 const MERGE: &str = "wl.wl.merge";
+/// For tests that read the whole merge log, so nothing is deleted from it.
+const KEEP: &str = "skip-deletion=1";
 
 /// What `faulty` outputs for a `meta` record: the stream, offset and append
 /// time it was given. So the outputs show which record each step ran.
@@ -542,13 +544,13 @@ async fn a_merged_workload_trims_by_the_merge_log() {
         t.publish_all(ORDERS, [meta()]).await;
         t.publish_all(PAYMENTS, [meta()]).await;
     }
-    let mut first = t.start_agent();
+    let mut first = t.start_agent_with_faults(KEEP);
     eventually("a trim", Duration::from_secs(60), || async {
         (!trims(&t).await.is_empty()).then_some(())
     })
     .await;
     first.kill();
-    let _next = t.start_agent();
+    let _next = t.start_agent_with_faults(KEEP);
     for _ in 0..5 {
         t.publish_all(PAYMENTS, [meta()]).await;
         t.publish_all(ORDERS, [meta()]).await;
@@ -587,6 +589,157 @@ async fn a_merged_workload_trims_by_the_merge_log() {
     }
 }
 
+/// The merge log is trimmed too. A holder killed after that is replaced by one
+/// that carries on from the entries that remain: every input record is
+/// stepped once, in an order that only moves forward. `felixd check` needs
+/// the whole merge log, so it stops and says where the log now starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failover_after_the_merge_log_is_trimmed_loses_nothing() {
+    let Some(t) = test_felix().await else { return };
+    submit_with(&t, &["--snapshot-every", "4", "--keep-snapshots", "2"]).await;
+    for _ in 0..10 {
+        t.publish_all(ORDERS, [meta()]).await;
+        t.publish_all(PAYMENTS, [meta()]).await;
+    }
+    let mut first = t.start_agent();
+    let floor = eventually("the merge log trimmed", Duration::from_secs(60), || async {
+        let floor = trims(&t).await.last()?.merge_floor;
+        (floor > 0 && t.readable_from(MERGE).await >= floor).then_some(floor)
+    })
+    .await;
+    first.kill();
+    let _next = t.start_agent();
+    for _ in 0..5 {
+        t.publish_all(PAYMENTS, [meta()]).await;
+        t.publish_all(ORDERS, [meta()]).await;
+    }
+    assert_stepped_once(&t, 30).await;
+    assert!(t.readable_from(MERGE).await >= floor);
+
+    let error = t.check_error(&["--id", ID]);
+    assert!(
+        error.contains(&format!("needs {MERGE} from offset 0")),
+        "{error}"
+    );
+    assert!(error.contains("--from-snapshot"), "{error}");
+}
+
+/// Waits for `records` outputs, then checks every input record was stepped
+/// once, in an order that only moves forward. Needs no merge log, which may be
+/// trimmed.
+async fn assert_stepped_once(t: &TestFelix, records: usize) {
+    eventually("every record stepped", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= records).then_some(())
+    })
+    .await;
+    // Give a duplicate time to show up.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut seen = std::collections::HashSet::new();
+    let mut steps = Vec::new();
+    for (_, record) in t.outputs(OUTPUT).await {
+        let decoded = output::decode(&record).unwrap();
+        let (written, addressed) = decoded.output().unwrap();
+        let text = String::from_utf8(addressed.payload.to_vec()).unwrap();
+        let fields: Vec<&str> = text.split(' ').collect();
+        let record = (fields[0].to_owned(), fields[2].parse::<u64>().unwrap());
+        assert!(seen.insert(record.clone()), "{record:?} was stepped twice");
+        steps.push((written.header.input_offset, written.header.index));
+    }
+    for input in INPUTS {
+        // Not every offset holds an event: a cluster's first holds a leader's
+        // marker, which `read_range` leaves out.
+        let tail = t.felix.tail(input).await.unwrap();
+        let events = t.felix.read_range(input, 0, tail).await.unwrap();
+        assert!(events.len() >= 15, "{input} holds {} events", events.len());
+        for record in events {
+            assert!(
+                seen.contains(&(input.to_owned(), record.offset)),
+                "{input}:{}",
+                record.offset
+            );
+        }
+    }
+    assert!(steps.windows(2).all(|w| w[0] < w[1]), "{steps:?}");
+}
+
+/// Raising `keep_snapshots` while no node runs the workload leaves the next
+/// holder with kept snapshots below the last trim, whose merge entries Felix
+/// has dropped. It keeps that trim, carries on, and trims again once its
+/// kept snapshots are past it.
+///
+/// Counter 0 never changes, so its chunk is shared by every snapshot. The
+/// trim at `keep_snapshots` 1 floors `.snap` at that chunk, which keeps the
+/// older manifests while their merge entries go. Without that sharing the
+/// older manifests are deleted too and the raised setting finds fewer
+/// snapshots than it keeps, which never reaches the merge log.
+#[tokio::test(flavor = "multi_thread")]
+async fn raising_keep_snapshots_on_a_merged_workload_keeps_the_last_trim() {
+    let Some(t) = test_felix().await else { return };
+    let args = |keep: &'static str| ["--snapshot-every", "4", "--keep-snapshots", keep];
+    let module = submit_with(&t, &args("1")).await;
+    // Counter 1 is the only one touched; `touch` outputs its new value.
+    t.publish_all(ORDERS, [b"chunks:2".to_vec()]).await;
+    t.publish_all(ORDERS, (0..19).map(|_| b"touch:1".to_vec()))
+        .await;
+    t.publish_all(PAYMENTS, (0..20).map(|_| meta())).await;
+    let mut first = t.start_agent();
+    eventually("every record stepped", Duration::from_secs(60), || async {
+        (t.outputs(OUTPUT).await.len() >= 39).then_some(())
+    })
+    .await;
+    let floor = eventually("the merge log trimmed", Duration::from_secs(60), || async {
+        let floor = trims(&t).await.last()?.merge_floor;
+        (floor > 0 && t.readable_from(MERGE).await >= floor).then_some(floor)
+    })
+    .await;
+    first.kill();
+    let held = t.read_readable(common::SNAPSHOTS).await;
+    let manifests = held
+        .iter()
+        .filter(|(_, r)| matches!(snapshot::decode(r), Ok(snapshot::Record::Manifest(_))))
+        .count();
+    assert!(manifests >= 5, "{manifests} manifests survive the trim");
+    assert!(t.run_on(ID, &module, &INPUTS, &args("5")).success());
+
+    let _next = t.start_agent();
+    t.publish_all(ORDERS, (0..16).map(|_| b"touch:1".to_vec()))
+        .await;
+    t.publish_all(PAYMENTS, (0..16).map(|_| meta())).await;
+    eventually("every record stepped", Duration::from_secs(90), || async {
+        (t.outputs(OUTPUT).await.len() >= 71).then_some(())
+    })
+    .await;
+    let mut counted = Vec::new();
+    let mut parked = false;
+    for (_, record) in t.read_all(OUTPUT).await {
+        match output::decode(&record).unwrap() {
+            output::Record::NeedsOperator { .. } => parked = true,
+            decoded => {
+                if let Some((_, out)) = decoded.output()
+                    && let Some(n) = std::str::from_utf8(out.payload)
+                        .ok()
+                        .and_then(|t| t.parse::<u64>().ok())
+                {
+                    counted.push(n);
+                }
+            }
+        }
+    }
+    assert!(
+        !parked,
+        "the raised keep_snapshots left the workload to an operator"
+    );
+    // Each touch ran once, in order.
+    assert_eq!(counted, (1..=35).collect::<Vec<u64>>());
+    assert!(t.readable_from(MERGE).await >= floor);
+    eventually(
+        "a trim past the old one",
+        Duration::from_secs(60),
+        || async { (trims(&t).await.last()?.merge_floor > floor).then_some(()) },
+    )
+    .await;
+}
+
 async fn trims(t: &TestFelix) -> Vec<felixd_core::trim::Trim> {
     t.read_all(OUTPUT)
         .await
@@ -617,7 +770,7 @@ async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
         t.publish_all(ORDERS, [meta()]).await;
         t.publish_all(PAYMENTS, [meta()]).await;
     }
-    let mut first = t.start_agent();
+    let mut first = t.start_agent_with_faults(KEEP);
     eventually("a trim past the start", Duration::from_secs(60), || async {
         trims(&t)
             .await
@@ -627,7 +780,7 @@ async fn a_merged_resume_reads_nothing_below_the_trim_floors() {
     })
     .await;
     first.kill();
-    let mut next = t.start_agent_with_faults("enforce-trim-floors=1");
+    let mut next = t.start_agent_with_faults("enforce-trim-floors=1,skip-deletion=1");
     for _ in 0..5 {
         t.publish_all(PAYMENTS, [meta()]).await;
         t.publish_all(ORDERS, [meta()]).await;
