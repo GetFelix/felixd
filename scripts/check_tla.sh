@@ -53,7 +53,7 @@ felixd_expectations=(
 )
 
 # Felixd.tla with trimming on (docs/formal.md, Trimming). Its own job: the
-# configurations above take most of the 30 minutes of theirs.
+# configurations above already take up to 30 of their job's 45 minutes.
 felixd_trim_expectations=(
   "FelixdTrim pass"
   "FelixdTrimKeepTwo pass"
