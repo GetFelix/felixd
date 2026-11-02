@@ -48,7 +48,7 @@ impl<'a> MergeLog<'a> {
     ) -> Result<MergeLog<'a>> {
         let mut failures = 0;
         loop {
-            if !fence.holds() {
+            if !fence.held().await {
                 return Err(LostLease.into());
             }
             let tail = felix.tail(stream).await?;
@@ -135,7 +135,7 @@ impl<'a> MergeLog<'a> {
         let mut landed = Vec::with_capacity(entries.len());
         let mut failures = 0;
         while !batch.is_empty() {
-            if !self.fence.holds() {
+            if !self.fence.held().await {
                 return Err(LostLease.into());
             }
             faults::before_merge();

@@ -121,6 +121,20 @@ impl LeaseTiming {
         expires_at_millis != 0 && u128::from(left) > since.as_millis()
     }
 
+    /// How long a node waits before claiming a workload again after losing
+    /// it `losses` times in a row (at least 1). It starts at a sixth of the
+    /// TTL and doubles with each loss up to one TTL, scaled by `random` in
+    /// `[0, 1)` to between half and all of that.
+    ///
+    /// Leases lapse together when Felix is slow, and claiming them all back
+    /// at once makes it slower still. Spreading the claims out, and backing
+    /// off further while losses repeat, lets the cluster recover.
+    pub fn after_loss(&self, losses: u32, random: f64) -> Duration {
+        let doublings = losses.saturating_sub(1).min(8);
+        let wait = (self.ttl / 6 * (1u32 << doublings)).min(self.ttl);
+        wait.mul_f64(0.5 + random.clamp(0.0, 1.0) / 2.0)
+    }
+
     pub fn ttl_millis(&self) -> u64 {
         u64::try_from(self.ttl.as_millis()).unwrap_or(u64::MAX)
     }

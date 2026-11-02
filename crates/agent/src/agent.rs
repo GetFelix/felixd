@@ -26,7 +26,7 @@ use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::{names, output, snapshot, status};
 use felixd_runtime::Runtime;
 use tokio::sync::futures::Notified;
-use tokio::sync::{Notify, oneshot, watch};
+use tokio::sync::{Notify, Semaphore, SemaphorePermit, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::admission::{self, Gate};
@@ -34,7 +34,7 @@ use crate::assignments::{self, Assignments};
 use crate::drain;
 use crate::faults;
 use crate::felix::Felix;
-use crate::lease::{self, Confirmer, Fence, Held};
+use crate::lease::{self, Confirmer, Fence, Held, Strain};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
 use crate::runner::{
@@ -84,6 +84,14 @@ const RECORD_DIVERGENCE_TRIES: u32 = 3;
 /// How often a node leaving a workload to its assignee checks that the
 /// assignee is still up.
 const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
+
+/// How many claims a node makes at once. When many leases lapse together,
+/// the rest queue instead of all hitting Felix at once while it is slow.
+const CLAIMS_AT_ONCE: usize = 8;
+
+/// How many TTLs a workload must be held for before losing it again counts
+/// as a first loss.
+const LOSSES_FORGOTTEN_AFTER_TTLS: u32 = 6;
 
 /// Who this node is and how it holds and claims leases.
 #[derive(Clone, Debug)]
@@ -147,6 +155,10 @@ struct Node {
     /// lease claim. A claim that read the mark before it was written can
     /// still land, so the node says it is draining only when this is 0.
     claiming: AtomicUsize,
+    /// One permit per claim under way; see [`CLAIMS_AT_ONCE`].
+    claims: Semaphore,
+    /// How this node's renewals are doing. New claims wait while they are slow.
+    strain: Strain,
     /// Notified when what this node writes to `nodes` should change now.
     announce_now: Notify,
     assignments: Assignments,
@@ -268,6 +280,8 @@ pub async fn run(
         draining: watch::channel(false).0,
         mark_reads: drain::MarkReads::default(),
         claiming: AtomicUsize::new(0),
+        claims: Semaphore::new(CLAIMS_AT_ONCE),
+        strain: Strain::default(),
         announce_now: Notify::new(),
         assignments: Assignments::new(),
         blocked: AtomicBool::new(false),
@@ -700,6 +714,8 @@ async fn own(
     // being stuck. Kept here, so a new spec record, which restarts the task,
     // gives the workload a fresh start.
     let mut backoff: Option<tokio::time::Instant> = None;
+    // Times in a row this node lost the workload or failed to claim it.
+    let mut losses = 0;
     loop {
         if let Some(until) = backoff.take() {
             tokio::select! {
@@ -713,15 +729,27 @@ async fn own(
         {
             return;
         }
+        // Held through the reads before the claim too, as they cost about as
+        // much as the claim.
+        let permit = tokio::select! {
+            permit = node.claim_permit() => permit,
+            _ = stop.wait_for(|stop| *stop) => return,
+        };
+        // Someone may have claimed it while this node waited.
+        if lease.has_changed().unwrap_or(false) {
+            continue;
+        }
         match recorded_needs_operator(&node.felix, &spec).await {
             Ok(Some(reason)) => {
                 tracing::error!(workload = %id, %reason, "the output stream records that the workload needs an operator, not running it");
+                drop(permit);
                 let _ = stop.wait_for(|stop| *stop).await;
                 return;
             }
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                drop(permit);
                 if !pause(&mut stop).await {
                     return;
                 }
@@ -737,12 +765,14 @@ async fn own(
             Err(error) => {
                 if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
                     if !recordable(&spec, problem) {
+                        drop(permit);
                         needs_operator(&id, problem, &mut stop).await;
                         return;
                     }
                     pending.get_or_insert_with(|| problem.clone());
                 } else {
                     tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                    drop(permit);
                     if !pause(&mut stop).await {
                         return;
                     }
@@ -767,6 +797,7 @@ async fn own(
                 tracing::debug!(workload = %id, error = %format!("{error:#}"), "{CANNOT_READ_MARK}");
                 drop(under_way);
                 drop(slot);
+                drop(permit);
                 if !pause(&mut stop).await {
                     return;
                 }
@@ -780,9 +811,11 @@ async fn own(
         // A lease it won is in the cache before the node can say it is
         // draining.
         drop(under_way);
+        drop(permit);
         match claimed {
             Ok(Some(mut held)) => {
                 metrics::claim(Claim::Won);
+                let won_at = tokio::time::Instant::now();
                 let holding = metrics::Holding::start(&metrics::workload(&id));
                 let _named = Holds::start(&node, &id);
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
@@ -838,13 +871,22 @@ async fn own(
                         tracing::warn!(workload = %id, %class, backoff = ?node.degraded_backoff, "released after being stuck, leaving it to other nodes");
                         backoff = Some(tokio::time::Instant::now() + node.degraded_backoff);
                     }
-                    Ended::Lost => metrics::handoff(Handoff::Lost),
+                    Ended::Lost => {
+                        metrics::handoff(Handoff::Lost);
+                        if won_at.elapsed() >= node.timing.ttl * LOSSES_FORGOTTEN_AFTER_TTLS {
+                            losses = 0;
+                        }
+                        losses += 1;
+                        backoff = Some(node.after_loss(losses));
+                    }
                 }
             }
             Ok(None) => metrics::claim(Claim::Contended),
             Err(error) => {
                 metrics::claim(Claim::Error);
                 tracing::warn!(workload = %id, error = %format!("{error:#}"), "claim failed");
+                losses += 1;
+                backoff = Some(node.after_loss(losses));
             }
         }
         drop(slot);
@@ -1113,6 +1155,24 @@ impl Node {
             && NodeInfo::decode(&found.value).is_ok_and(|info| info.takes_work())
     }
 
+    /// Waits for a turn to claim: a free permit, and renewals that are not
+    /// slow, or a renewal interval of waiting on them. A node keeps the
+    /// leases it holds before it takes on more.
+    async fn claim_permit(&self) -> SemaphorePermit<'_> {
+        let permit = self
+            .claims
+            .acquire()
+            .await
+            .expect("the claim semaphore is never closed");
+        self.strain.calm(self.timing.renew_after()).await;
+        permit
+    }
+
+    /// When to try again after the `losses`th loss in a row.
+    fn after_loss(&self, losses: u32) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.timing.after_loss(losses, self.random())
+    }
+
     /// Uniform in `[0, 1)`, from an xorshift. It only spreads claims.
     fn random(&self) -> f64 {
         let mut x = self.random.load(Ordering::Relaxed);
@@ -1206,7 +1266,7 @@ async fn run_held(
         let (node, mut held) = (node.clone(), held.clone());
         async move {
             let lost = tokio::select! {
-                lost = lease::hold(&node.felix, &mut held, &deadline, &mut asks) => Some(lost),
+                lost = lease::hold(&node.felix, &mut held, &deadline, &mut asks, &node.strain) => Some(lost),
                 _ = ended => None,
             };
             (held, lost)

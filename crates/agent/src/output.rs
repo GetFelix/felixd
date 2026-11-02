@@ -289,7 +289,7 @@ async fn append_last(
 ) -> Result<Recorded> {
     let mut failures = 0;
     loop {
-        if !fence.holds() {
+        if !fence.held().await {
             return Err(LostLease.into());
         }
         let tail = felix.tail(stream).await?;
@@ -401,7 +401,7 @@ impl<'a> OutputLog<'a> {
         let mut floor = specs::claim_floor(felix, stream, start).await?.unwrap_or(0);
         let mut failures = 0;
         loop {
-            if !fence.holds() {
+            if !fence.held().await {
                 return Err(LostLease.into());
             }
             faults::before_claim();
@@ -526,7 +526,7 @@ impl<'a> OutputLog<'a> {
         let mut failures = 0;
         while !batch.is_empty() {
             let mut refused = false;
-            if !self.fence.holds() {
+            if !self.fence.held().await {
                 return Err(LostLease.into());
             }
             faults::before_append();
@@ -588,7 +588,7 @@ impl<'a> OutputLog<'a> {
     pub(crate) async fn append_trim(&mut self, record: Vec<u8>) -> Result<()> {
         let mut failures = 0;
         loop {
-            if !self.fence.holds() {
+            if !self.fence.held().await {
                 return Err(LostLease.into());
             }
             faults::before_trim();

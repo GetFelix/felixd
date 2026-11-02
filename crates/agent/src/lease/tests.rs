@@ -34,6 +34,9 @@ struct State {
     down: bool,
     /// The next put is applied but its answer is lost.
     lose_next_answer: bool,
+    /// How long each lease put takes. It is applied at the end, as on a slow
+    /// broker.
+    slow_puts: Duration,
     conditions: Vec<CacheCondition>,
 }
 
@@ -71,6 +74,8 @@ impl LeaseStore for FakeStore {
         ttl_ms: u64,
         condition: CacheCondition,
     ) -> Result<CacheConditionResult> {
+        let slow = self.state.lock().unwrap().slow_puts;
+        tokio::time::sleep(slow).await;
         let mut s = self.state.lock().unwrap();
         assert!(s.conditions.len() < 1000, "the holder keeps writing");
         if s.down {
@@ -235,7 +240,13 @@ async fn the_holder_renews_every_third_of_the_ttl_at_the_version_it_wrote() {
     let start = Instant::now();
     let holding = tokio::time::timeout(
         TTL * 3 + Duration::from_secs(1),
-        hold(&store, &mut held, &tx, &mut Confirmer::new().1),
+        hold(
+            &store,
+            &mut held,
+            &tx,
+            &mut Confirmer::new().1,
+            &Strain::default(),
+        ),
     )
     .await;
     assert!(holding.is_err(), "the lease was lost: {holding:?}");
@@ -260,8 +271,17 @@ async fn a_refused_renewal_loses_the_lease_at_once() {
     let (tx, _fence) = held.fence();
     store.overwrite();
     let start = Instant::now();
-    let lost =
-        tokio::time::timeout(TTL, hold(&store, &mut held, &tx, &mut Confirmer::new().1)).await;
+    let lost = tokio::time::timeout(
+        TTL,
+        hold(
+            &store,
+            &mut held,
+            &tx,
+            &mut Confirmer::new().1,
+            &Strain::default(),
+        ),
+    )
+    .await;
     assert_eq!(lost.expect("still holding"), Lost::Refused);
     assert_eq!(Instant::now() - start, timing().renew_after());
 }
@@ -274,8 +294,17 @@ async fn an_expired_lease_is_not_renewed() {
     // The holder was frozen past the TTL, so the broker expired the entry
     // before the renewal that was due at 3 s.
     tokio::time::advance(TTL).await;
-    let lost =
-        tokio::time::timeout(TTL, hold(&store, &mut held, &tx, &mut Confirmer::new().1)).await;
+    let lost = tokio::time::timeout(
+        TTL,
+        hold(
+            &store,
+            &mut held,
+            &tx,
+            &mut Confirmer::new().1,
+            &Strain::default(),
+        ),
+    )
+    .await;
     assert_eq!(lost.expect("still holding"), Lost::Refused);
 }
 
@@ -289,7 +318,13 @@ async fn without_felix_the_holder_stops_by_its_own_clock_at_two_thirds() {
     let holder = async {
         let lost = tokio::time::timeout(
             TTL * 2,
-            hold(&store, &mut held, &tx, &mut Confirmer::new().1),
+            hold(
+                &store,
+                &mut held,
+                &tx,
+                &mut Confirmer::new().1,
+                &Strain::default(),
+            ),
         )
         .await;
         (lost.expect("still holding"), Instant::now() - start)
@@ -316,7 +351,13 @@ async fn a_renewal_whose_answer_was_lost_is_found_by_reading_it_back() {
     store.set(|s| s.lose_next_answer = true);
     let holding = tokio::time::timeout(
         TTL * 2,
-        hold(&store, &mut held, &tx, &mut Confirmer::new().1),
+        hold(
+            &store,
+            &mut held,
+            &tx,
+            &mut Confirmer::new().1,
+            &Strain::default(),
+        ),
     )
     .await;
     assert!(holding.is_err(), "the lease was lost: {holding:?}");
@@ -345,7 +386,13 @@ async fn a_read_back_renewal_is_credited_from_the_earliest_attempt_it_may_be() {
     let holding = async {
         tokio::time::timeout(
             timing().renew_after() * 2 - Duration::from_millis(1),
-            hold(&store, &mut held, &tx, &mut Confirmer::new().1),
+            hold(
+                &store,
+                &mut held,
+                &tx,
+                &mut Confirmer::new().1,
+                &Strain::default(),
+            ),
         )
         .await
     };
@@ -377,9 +424,10 @@ async fn a_confirmation_renews_at_once() {
     let claimed = held.version;
     let (tx, _fence) = held.fence();
     let (confirmer, mut asks) = Confirmer::new();
+    let strain = Strain::default();
     let start = Instant::now();
     tokio::select! {
-        _ = hold(&store, &mut held, &tx, &mut asks) => panic!("the lease was lost"),
+        _ = hold(&store, &mut held, &tx, &mut asks, &strain) => panic!("the lease was lost"),
         confirmed = confirmer.confirm() => assert!(confirmed),
     }
     assert_eq!(Instant::now(), start);
@@ -393,9 +441,118 @@ async fn a_confirmation_is_refused_once_another_node_holds_the_lease() {
     let (tx, _fence) = held.fence();
     let (confirmer, mut asks) = Confirmer::new();
     store.overwrite();
-    let (lost, confirmed) = tokio::join!(hold(&store, &mut held, &tx, &mut asks), async {
+    let strain = Strain::default();
+    let (lost, confirmed) = tokio::join!(hold(&store, &mut held, &tx, &mut asks, &strain), async {
         confirmer.confirm().await
     });
     assert_eq!(lost, Lost::Refused);
     assert!(!confirmed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_renewal_pauses_the_fence_until_it_is_applied() {
+    let store = FakeStore::default();
+    let mut held = take(&store, "a").await.unwrap();
+    let (tx, fence) = held.fence();
+    let start = Instant::now();
+    // The renewal sent at 3 s lands at 7 s: after the holder's 6 s deadline,
+    // before the broker's 9 s expiry.
+    store.set(|s| s.slow_puts = Duration::from_secs(4));
+    let (mut asks, strain) = (Confirmer::new().1, Strain::default());
+    let holder = tokio::time::timeout(
+        Duration::from_secs(8),
+        hold(&store, &mut held, &tx, &mut asks, &strain),
+    );
+    let writer = async {
+        tokio::time::sleep(Duration::from_millis(6500)).await;
+        assert!(!fence.holds(), "the fence should lapse at 2/3 of the TTL");
+        assert!(fence.held().await, "an applied renewal should resume it");
+        Instant::now() - start
+    };
+    let (holding, resumed) = tokio::join!(holder, writer);
+    assert!(holding.is_err(), "the lease was lost: {holding:?}");
+    assert_eq!(resumed, Duration::from_secs(7));
+    assert!(fence.holds());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paused_fence_gives_up_once_the_renewals_stop() {
+    let store = FakeStore::default();
+    let mut held = take(&store, "a").await.unwrap();
+    let (tx, fence) = held.fence();
+    store.set(|s| s.down = true);
+    let (mut asks, strain) = (Confirmer::new().1, Strain::default());
+    let holder = async {
+        let lost = hold(&store, &mut held, &tx, &mut asks, &strain).await;
+        drop(tx);
+        lost
+    };
+    let (lost, held_on) = tokio::join!(holder, fence.held());
+    assert_eq!(lost, Lost::Unreachable);
+    assert!(held_on, "the fence held before the deadline");
+    assert!(!fence.held().await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_renewal_unanswered_for_a_ttl_counts_as_failed() {
+    let store = FakeStore::default();
+    let mut held = take(&store, "a").await.unwrap();
+    let (tx, _fence) = held.fence();
+    let start = Instant::now();
+    store.set(|s| s.slow_puts = TTL * 10);
+    let lost = tokio::time::timeout(
+        TTL * 3,
+        hold(
+            &store,
+            &mut held,
+            &tx,
+            &mut Confirmer::new().1,
+            &Strain::default(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        lost.expect("still waiting on the renewal"),
+        Lost::Unreachable
+    );
+    assert_eq!(Instant::now() - start, timing().renew_after() + TTL);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_renewal_holds_claims_back_for_a_renewal_interval() {
+    let strain = Strain::default();
+    let start = Instant::now();
+    // Up to half the 3 s a renewal has is not slow.
+    strain.note(Duration::from_millis(1500), timing());
+    strain.calm(TTL).await;
+    assert_eq!(Instant::now(), start);
+    strain.note(Duration::from_secs(2), timing());
+    strain.calm(TTL).await;
+    assert_eq!(Instant::now() - start, timing().renew_after());
+    // A node that stays slow still claims, after waiting at most `within`.
+    strain.note(Duration::from_secs(2), timing());
+    strain.calm(Duration::from_secs(1)).await;
+    assert_eq!(
+        Instant::now() - start,
+        timing().renew_after() + Duration::from_secs(1)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_holder_reports_slow_renewals() {
+    let store = FakeStore::default();
+    let mut held = take(&store, "a").await.unwrap();
+    let (tx, _fence) = held.fence();
+    let strain = Strain::default();
+    store.set(|s| s.slow_puts = Duration::from_secs(2));
+    let holding = tokio::time::timeout(
+        Duration::from_secs(6),
+        hold(&store, &mut held, &tx, &mut Confirmer::new().1, &strain),
+    )
+    .await;
+    assert!(holding.is_err(), "the lease was lost: {holding:?}");
+    // The renewal sent at 3 s took 2 s, so claims wait until 8 s.
+    let start = Instant::now();
+    strain.calm(TTL).await;
+    assert_eq!(Instant::now() - start, Duration::from_secs(2));
 }

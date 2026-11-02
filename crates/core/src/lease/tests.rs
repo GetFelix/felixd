@@ -114,3 +114,20 @@ fn the_freshness_window_is_at_least_half_a_ttl_and_below_a_ttl() {
     assert_eq!(within(10_000), Duration::from_secs(5));
     assert_eq!(within(60_000), Duration::from_secs(30));
 }
+
+#[test]
+fn the_wait_after_a_loss_doubles_up_to_a_ttl_and_is_spread() {
+    let timing = LeaseTiming {
+        ttl: Duration::from_secs(12),
+    };
+    let wait = |losses, random| timing.after_loss(losses, random);
+    assert_eq!(wait(1, 0.0), Duration::from_secs(1));
+    assert_eq!(wait(1, 1.0), Duration::from_secs(2));
+    assert_eq!(wait(2, 1.0), Duration::from_secs(4));
+    assert_eq!(wait(3, 1.0), Duration::from_secs(8));
+    assert_eq!(wait(4, 1.0), Duration::from_secs(12));
+    assert_eq!(wait(4, 0.0), Duration::from_secs(6));
+    assert_eq!(wait(u32::MAX, 1.0), Duration::from_secs(12));
+    // A count of zero is treated as one.
+    assert_eq!(wait(0, 1.0), Duration::from_secs(2));
+}
