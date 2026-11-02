@@ -324,9 +324,7 @@ async fn main() -> Result<()> {
             if let Some(bind) = metrics_bind {
                 felixd_agent::metrics::start(bind, &node_id, metrics_max_workloads).await?;
             }
-            let shutdown = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
+            let shutdown = shutdown_signal();
             let config = AgentConfig {
                 node_id,
                 lease: LeaseTiming {
@@ -592,6 +590,26 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Resolves on Ctrl-C or, on Unix, SIGTERM, which is what `docker stop` and
+/// `systemctl stop` send. Either way the agent stops its workloads and
+/// releases their leases.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut term) = signal(SignalKind::terminate()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn parse_target(to: &str) -> Result<Target, String> {
