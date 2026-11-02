@@ -125,7 +125,8 @@ jobs:
   # passing ones must pass and each twin must find its violation.
   tla:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The script takes 21 to 30 minutes, depending on the runner.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -135,7 +136,7 @@ jobs:
       - run: TLC_WORKERS=4 scripts/check_tla.sh
 
   # specs/Felixd.tla with trimming on, in its own job so the Felixd
-  # configurations keep the whole 30 minutes.
+  # configurations do not take longer.
   tla-trim:
     runs-on: ubuntu-latest
     timeout-minutes: 30
