@@ -533,7 +533,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
 | 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics and the upgrade check done |
-| 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
+| 5 | Self-hosting | Anyone can run a cluster from the docs | Operator docs done |
 
 ## Crates
 
@@ -550,6 +550,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 
 - [docs/design.md](docs/design.md): goals, design, data model and build order
 - [docs/records.md](docs/records.md): record formats and the resume fold
+- [docs/operating.md](docs/operating.md): running a cluster: configuration, grants, sizing, what failover guarantees, upgrades
 - [docs/metrics.md](docs/metrics.md): the Prometheus metrics a node serves
 - [Felix docs](https://docs.getfelix.dev/)
 

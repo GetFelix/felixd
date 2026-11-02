@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Operator docs (#24). `docs/operating.md` covers running a cluster: what to start, the
+  configuration of every command, the grants each role needs, sizing the lease TTL, what failover
+  and replay guarantee, a three-node failover walkthrough, what each `ps` state asks of an
+  operator, and how to upgrade a node.
 - Modules over 8 MiB (#21). A module over 8 MiB is stored in the `modules`
   cache as 4 MiB chunks under `<sha256>/<n>` with a JSON manifest under the
   module's own key, chunks first and manifest last. A module of 8 MiB or less,
