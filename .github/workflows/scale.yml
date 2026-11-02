@@ -30,7 +30,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # felix#1760 bisect: build the broker and control plane images once from the
+  # Felix commit in .felix-build, then measure them in three replicas.
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Felix commit
+        id: sha
+        run: echo "sha=$(tr -d '[:space:]' < .felix-build)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: GetFelix/felix
+          ref: ${{ steps.sha.outputs.sha }}
+          path: felix-src
+      - name: Build images
+        run: |
+          cd felix-src
+          docker build -f docker/broker.Dockerfile -t ghcr.io/getfelix/felix-broker:bisect .
+          docker build -f docker/controlplane.Dockerfile -t ghcr.io/getfelix/felix-controlplane:bisect .
+          docker save ghcr.io/getfelix/felix-broker:bisect ghcr.io/getfelix/felix-controlplane:bisect | gzip > ../images.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images
+          path: images.tar.gz
+          retention-days: 3
+
   scale:
+    needs: images
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '300') }}
     env:
@@ -49,6 +81,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+      - name: Load images
+        run: gunzip -c images.tar.gz | docker load && rm images.tar.gz
       - name: Runner
         run: |
           mkdir -p results
@@ -62,7 +99,7 @@ jobs:
         run: cargo test -p felixd --test scale --locked --no-run
       - name: Measure
         run: |
-          export FELIX_VERSION=$(sed -n 's/^version=//p' .felix-version)
+          export FELIX_VERSION=bisect
           cluster=tests/felix/cluster.yaml
           failed=0
           first=1
@@ -114,5 +151,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: scale-results
+          name: scale-results-${{ matrix.rep }}
           path: results/
