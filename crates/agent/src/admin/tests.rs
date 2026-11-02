@@ -184,6 +184,77 @@ async fn a_409_for_a_cache_that_exists_is_success() {
     );
 }
 
+const EXISTS: &str =
+    r#"{"code":"conflict","message":"stream already exists with a different configuration"}"#;
+const CACHE_EXISTS: &str =
+    r#"{"code":"conflict","message":"cache already exists with a different configuration"}"#;
+
+#[tokio::test]
+async fn a_409_that_says_the_stream_exists_is_not_read_back() {
+    let (url, served) = control_plane_replying(vec![(409, EXISTS)]);
+    ensure_stream(&settings_at(url), "s", kind()).await.unwrap();
+    assert_eq!(served.join().unwrap(), [format!("POST {STREAMS}")]);
+}
+
+#[tokio::test]
+async fn a_409_that_says_the_cache_exists_is_not_read_back() {
+    let (url, served) = control_plane_replying(vec![(409, CACHE_EXISTS)]);
+    ensure_cache(&settings_at(url), "c", kind()).await.unwrap();
+    assert_eq!(served.join().unwrap(), [format!("POST {CACHES}")]);
+}
+
+/// A refusal that also contains "already exists" must not be trusted.
+#[tokio::test]
+async fn a_deleted_name_is_read_back_whatever_else_the_409_says() {
+    const BODY: &str = r#"{"message":"a stream named s was deleted on this cluster and already exists in the log; finalize stream_incarnations"}"#;
+    let (url, served) = control_plane_replying(vec![(409, BODY), (404, "{}")]);
+    let error = ensure_stream(&settings_at(url), "s", kind())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("refused with HTTP 409"), "{error}");
+    assert_eq!(
+        served.join().unwrap(),
+        [format!("POST {STREAMS}"), format!("GET {STREAMS}/s")]
+    );
+}
+
+#[test]
+fn only_an_already_exists_message_is_trusted() {
+    assert!(says_already_exists(EXISTS));
+    assert!(says_already_exists(CACHE_EXISTS));
+    for body in ["", "{}", "not json", r#"{"message":"conflict"}"#, REUSED] {
+        assert!(!says_already_exists(body), "{body}");
+    }
+}
+
+/// Serves `requests` requests on the first connection that arrives and keeps
+/// it open. A client that opens a second connection leaves this one, and the
+/// server then panics on the closed socket.
+fn keep_alive_control_plane(requests: usize) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let served = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        for _ in 0..requests {
+            read_request(&mut socket);
+            write!(socket, "HTTP/1.1 201 X\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+        }
+    });
+    (url, served)
+}
+
+#[tokio::test]
+async fn calls_in_a_row_share_a_connection() {
+    let (url, served) = keep_alive_control_plane(3);
+    let settings = settings_at(url);
+    for stream in ["a", "b", "c"] {
+        ensure_stream(&settings, stream, kind()).await.unwrap();
+    }
+    served.join().unwrap();
+}
+
 #[tokio::test]
 async fn a_409_that_left_no_stream_is_an_error_with_the_reason() {
     let (url, served) = control_plane_replying(vec![(409, REUSED), (404, "{}")]);

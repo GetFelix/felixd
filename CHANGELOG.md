@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fewer control plane requests per `felixd run` (GetFelix/felix#1760). Since the read back
+  after a 409 (#149), each submit sent about nine extra requests to the control plane. A 409
+  that says the stream or cache already exists is no longer read back; any other 409 still
+  is. The control plane calls also share one connection.
 - Operator docs (#24). `docs/operating.md` covers running a cluster: what to start, the
   configuration of every command, the grants each role needs, sizing the lease TTL, what failover
   and replay guarantee, a three-node failover walkthrough, what each `ps` state asks of an
@@ -9,7 +13,7 @@
 - Scale test (#20). The manually run `Scale` workflow starts three Felix brokers and three agents, creates N
   workloads and reports create time, memory, and how long recovery takes when an agent and then a broker is
   killed (`crates/felixd/tests/scale.rs`, `.github/workflows/scale.yml`; see CONTRIBUTING.md). The numbers
-  are in design.md under "Scale": hundreds of workloads work on Felix 0.6.2 and 0.7.0-preview.2, 1000 do not
+  are in design.md under "Scale": hundreds of workloads work on Felix 0.6.2 and 0.7.0-preview.2, 1000 often do not
   settle on 0.7.0-preview.2 (about 17,000 claims in the 20 minute window, against about 1,100 over the 7 to 8
   minutes 0.6.2 needed to get all running) and first output at 500 took 282 s there against 6.9 s on 0.6.2.
   Creating streams (about 1.5 to 7 a second) and a broker failure are slow
@@ -75,7 +79,8 @@
   check it with `felixd replay --id admission --diff --all --module <hash>` and
   run `felixd init` with it.
 - Refused stream creates (#149). `felixd run`, `felixd init` and `felixd drain`
-  read a stream or cache back after Felix answers 409, and now exit with an
+  read a stream or cache back after Felix answers 409 (unless it says the
+  resource already exists), and now exit with an
   error carrying Felix's reason where they used to succeed and leave the next
   read waiting for a stream that was never created. Felix refuses a stream
   under the name of a deleted one until the cluster has finalized stream

@@ -361,11 +361,14 @@ admitted through intake gets its streams from admission's projector instead, wit
 admission's credential ([Submitting work](#submitting-work)). Other agents never
 create streams.
 
-A create that Felix answers with 409 counts as done only if the stream or cache can be read
-back. Felix also refuses a stream under the name of a deleted one until the cluster has finalized
-stream incarnations, and a control plane that no broker registers with, as in the single-broker
-test stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait
-for a stream that does not exist. Admission's projector, which creates an accepted workload's
+A create that Felix answers with 409 counts as done if its message says the stream or cache
+already exists, even if it exists with other settings than felixd asked for. The shared system
+streams and caches answer that way on every `felixd run`, so reading each back would send the
+control plane a request for every one. Any other 409 counts only if the stream or cache can be read back. Felix
+also refuses a stream under the name of a deleted one until the cluster has finalized stream
+incarnations, and a control plane that no broker registers with, as in the single-broker test
+stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait for
+a stream that does not exist. Admission's projector, which creates an accepted workload's
 streams, logs the same reason and retries every second, so later decisions wait behind it until an
 operator finalizes incarnations.
 
@@ -1568,13 +1571,16 @@ What the numbers say:
   [felix#1761](https://github.com/GetFelix/felix/issues/1761).
 - **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
   first output, against 6.9 s on 0.6.2.
-- **At 1000 workloads, 0.7.0-preview.2 never settles.** There were about
-  17,000 claims in the 20 minute window, against about 1,100 over the 7 to 8
-  minutes 0.6.2 needed to get all running, and almost nothing was running
-  when the window ended. 500 workloads settled on both. See
-  [felix#1760](https://github.com/GetFelix/felix/issues/1760); felixd
-  [#207](https://github.com/GetFelix/felixd/pull/207) changes what the agent
-  reads back there, so these numbers are for the build measured, not a limit.
+- **At 1000 workloads, 0.7.0-preview.2 often does not settle.** A run that
+  does not settle claims about 13,000 to 23,000 times in the 20 minute window,
+  against about 1,100 over the 7 to 8 minutes 0.6.2 needed to get all running,
+  and almost nothing is running when the window ends. Nine runs on
+  0.7.0-preview.2 with the read back after a 409 removed ([#207](https://github.com/GetFelix/felixd/pull/207)),
+  spread over felixd commits from before degraded releases (#188) to current
+  main, settled in three and collapsed in six, with both outcomes on the same
+  commit. Turning degraded releases off (`--stuck-after-ms 0`) did not change
+  that, so no felixd change decides it. 500 workloads settle on both. See
+  [felix#1760](https://github.com/GetFelix/felix/issues/1760).
 - **A node failure takes longer with more workloads.** An agent's workloads
   moved within 30 s up to 500 workloads and took 85 to 143 s at 1000,
   probably because the survivors claim and restore hundreds at once. A 30 s
