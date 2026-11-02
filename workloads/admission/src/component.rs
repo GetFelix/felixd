@@ -1,8 +1,9 @@
 // The admission component around `felixd_core::admission::decide`, shared by
-// `admission` and `admission-strict`, which differ only in `policy()`.
+// `admission`, `admission-strict` and `admission-requesters`, which differ only
+// in `policy()`.
 
 wit_bindgen::generate!({
-    path: "../../wit",
+    path: "../../wit/0.3",
     world: "workload",
 });
 
@@ -21,7 +22,14 @@ impl step::Guest for Component {
                 "admission takes no effect responses".to_string(),
             ));
         };
-        let decision = decide(&policy(), input.offset, &record.payload);
+        // The publisher is what the broker authenticated. Nothing inside the
+        // payload says who asked.
+        let decision = decide(
+            &policy(),
+            input.offset,
+            record.publisher.as_deref(),
+            &record.payload,
+        );
         let key = (!decision.id.is_empty()).then(|| decision.id.as_bytes().to_vec());
         Ok(vec![Output::Record(Addressed {
             name: "out".to_string(),

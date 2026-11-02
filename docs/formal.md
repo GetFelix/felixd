@@ -50,8 +50,9 @@ Each twin turns one mechanism off, or drops one assumption, and must find the na
 Every configuration has two nodes.
 
 Distinct states and times are from TLC 1.7.4 with `-workers 4` on the CI runner (`ubuntu-latest`),
-where the whole script takes about 21 minutes. The trimming configurations (`FelixdTrim*`) run in their
-own job, `TLA_MODULE=FelixdTrimming`, so the rest keep their 30 minutes. Their times below are from a laptop and not yet
+where the whole script takes 21 to 30 minutes, depending on the runner, under the job's 45-minute limit.
+The trimming configurations (`FelixdTrim*`) run in their own job, `TLA_MODULE=FelixdTrimming`, so they
+do not count toward that limit. Their times below are from a laptop and not yet
 measured on the runner. A twin's count varies a little between runs,
 since TLC stops at the first violation a worker finds.
 

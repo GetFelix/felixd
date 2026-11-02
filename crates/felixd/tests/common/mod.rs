@@ -558,6 +558,7 @@ pub(crate) fn input(offset: u64, timestamp_micros: u64, payload: &[u8]) -> Input
         timestamp_micros,
         key: None,
         payload,
+        publisher: None,
     }
 }
 
@@ -579,9 +580,11 @@ pub(crate) fn expected(module: &[u8], inputs: &[felix_client::StreamRecord]) -> 
     let mut records = Vec::new();
     for record in inputs {
         let offset = record.offset;
-        let stepped = workload
-            .step(input(offset, record.timestamp_micros, &record.payload))
-            .unwrap();
+        let given = Input {
+            publisher: record.publisher.as_deref(),
+            ..input(offset, record.timestamp_micros, &record.payload)
+        };
+        let stepped = workload.step(given).unwrap();
         match stepped {
             Stepped::Outputs(outputs) => {
                 for (index, out) in outputs.iter().enumerate() {

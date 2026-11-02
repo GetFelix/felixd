@@ -51,6 +51,7 @@ fn stage(module: &[u8], inputs: &[Keyed]) -> Vec<Keyed> {
             timestamp_micros: 0,
             key: key.as_deref(),
             payload,
+            publisher: None,
         };
         if let Stepped::Outputs(outputs) = workload.step(input).unwrap() {
             out.extend(

@@ -26,14 +26,17 @@ pub(crate) struct StepInput {
     timestamp_micros: u64,
     key: Option<Bytes>,
     payload: Bytes,
+    publisher: Option<String>,
 }
 
 impl StepInput {
     /// The input at `offset` on input stream `stream`, appended at
-    /// `timestamp_micros`, from its record. Every field comes from the record
-    /// and the spec. When the input is another workload's output stream,
-    /// only outputs addressed to `out` are inputs, and the step gets their
-    /// key and payload; `None` means the record is passed over.
+    /// `timestamp_micros` by `publisher`, from its record. Every field comes
+    /// from the record and the spec. When the input is another workload's
+    /// output stream, only outputs addressed to `out` are inputs, and the
+    /// step gets their key and payload but no publisher: whichever node held
+    /// the lease wrote them, which says nothing about the data. `None` means
+    /// the record is passed over.
     ///
     /// A record there of a version or kind this build does not know is
     /// [`NeedsOperator`]: a newer build wrote it, and upgrading this node is
@@ -42,13 +45,15 @@ impl StepInput {
         stream: &str,
         offset: u64,
         timestamp_micros: u64,
+        publisher: Option<&str>,
         record: &Bytes,
     ) -> anyhow::Result<Option<StepInput>> {
-        let (key, payload) = if names::is_output_stream(stream) {
+        let (key, payload, publisher) = if names::is_output_stream(stream) {
             match output::addressed_to(record, DEFAULT_NAME) {
                 Ok(Some(addressed)) => (
                     addressed.key.map(|k| record.slice_ref(k)),
                     record.slice_ref(addressed.payload),
+                    None,
                 ),
                 Ok(None) => return Ok(None),
                 Err(error) => {
@@ -64,7 +69,7 @@ impl StepInput {
                 }
             }
         } else {
-            (None, record.clone())
+            (None, record.clone(), publisher.map(str::to_owned))
         };
         Ok(Some(StepInput {
             stream: stream.to_owned(),
@@ -72,6 +77,7 @@ impl StepInput {
             timestamp_micros,
             key,
             payload,
+            publisher,
         }))
     }
 
@@ -88,6 +94,7 @@ impl StepInput {
             timestamp_micros: self.timestamp_micros,
             key: self.key.as_deref(),
             payload: &self.payload,
+            publisher: self.publisher.as_deref(),
         }
     }
 }
@@ -143,7 +150,13 @@ impl<'a> Feed<'a> {
         for record in records {
             let at = record.offset;
             let input = match &mut self.sources {
-                None => StepInput::read(&self.stream, at, record.timestamp_micros, &record.payload),
+                None => StepInput::read(
+                    &self.stream,
+                    at,
+                    record.timestamp_micros,
+                    record.publisher.as_deref(),
+                    &record.payload,
+                ),
                 Some(sources) => match merge::decode(&record.payload) {
                     Ok(merge::Record::Claim { .. }) => continue,
                     Ok(merge::Record::Entry { entry, .. }) => {
@@ -183,6 +196,7 @@ async fn merged(
         &source.stream,
         entry.offset,
         entry.timestamp_micros,
+        record.publisher.as_deref(),
         &record.payload,
     ))
 }

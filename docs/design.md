@@ -278,9 +278,11 @@ can lose its disk and rejoin.
 ## The workload contract
 
 A workload is a Wasm component that implements the WIT world in
-`wit/workload.wit`, workload contract 0.2. [contract.md](contract.md) gives the
-interface and what each side guarantees. In short, `step` gets one input
-record with its stream, offset, append time and key, and returns outputs
+`wit/0.3/workload.wit`, workload contract 0.3, or the 0.2 world in
+`wit/0.2/workload.wit`, which the host still runs. [contract.md](contract.md)
+gives the interface and what each side guarantees. In short, `step` gets one
+input record with its stream, offset, append time, key and, from 0.3, the
+authenticated publisher, and returns outputs
 addressed by name and key, or rejects the input, or poisons the workload. The
 state is snapshotted and restored in chunks, and `inspect` returns it as JSON.
 A component of the 0.1 contract is refused.
@@ -1046,7 +1048,7 @@ reaches none of them.
 |---|---|
 | Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
 | Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
-| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Admission records the requester but the shipped policy has no ownership rule, so any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it; a policy that lists requesters limits who may ask at all |
 | Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. With `--grant-trim`, also the node's `stream.trim` (below). The one direct write left. Not written by `init` |
 | Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
@@ -1411,6 +1413,22 @@ new module agrees on the inputs it has already seen.
 
 The interface, the guarantees and the record formats are in
 [contract.md](contract.md).
+
+## The workload contract, version 0.3
+
+Policy has to depend on who asked, and a step could not see that: the
+requester of a request cannot come from the payload, which any publisher can
+fill with anything. Version 0.3 adds one field, `publisher`, to the record a
+step reads: the principal the broker authenticated the write from, as the
+broker stored it. Because the host reads it from the stored record, a live
+step, a takeover, a snapshot resume, `felixd check` and `felixd replay` all
+pass the same value, so a workload that decides on it stays deterministic.
+
+The publisher is `none` when the broker recorded none, and for the output of
+another workload, which a node wrote and which names no one useful to the next
+stage. A workload that needs an identity treats `none` as unknown. The host
+runs 0.2 and 0.3 workloads side by side, so only a workload that wants the
+publisher is rebuilt. [contract.md](contract.md#the-publisher) has the rules.
 
 ## Upgrading felixd and scale
 
@@ -1863,8 +1881,8 @@ now:
    agents run only what a record says; `workloads` is still how they learn of
    a change.
 2. **Requests go to an intake stream, `sys.intake`.** A request carries the
-   module hash, the spec and the requester, taken from the authenticated
-   publisher and never from the payload. Changes, stops and removals of
+   module hash and the spec. The requester is the record's authenticated
+   publisher and never in the payload. Changes, stops and removals of
    workloads are requests on the same stream.
 3. **Admission is an ordinary deterministic felixd workload**, like the
    scheduler (#60). It reads `sys.intake`, checks the module is present and
@@ -1951,15 +1969,33 @@ Nodes can still point `workloads` at an old record, which the gate refuses as
 before, and it still checks every record, so a deployment that grants more
 than this table is no less safe than before.
 
-Not built: the requester. Felix records a record's publisher only when the
-broker is configured to and a reader asks, and the workload contract has no
-field for it, so admission decides from the payload alone and policy cannot
-depend on who asked. Any node can write `wl.admission.out`, as it can any
-output, until per-lease tokens (#74, GetFelix/felix#1625), and admission's
-projector records what it finds there. Admission's credential is node
-configuration (`--admission-token-file` and the control plane token) rather
-than a name bound in admission's spec (#97), so a node given it holds it
-whether or not it holds admission's lease.
+Built (#182): the requester. A broker stores a record's publisher when it is
+set up to (`FELIX_RECORD_PUBLISHERS=true` on a lone broker, the
+`publisher_principal` fleet feature in a cluster), and the workload contract
+0.3 hands it to a step ([contract.md](contract.md#the-publisher)). Admission
+runs on 0.3. Its decision records the requester, the principal that published
+the request, whether it accepts or rejects. Policy can depend on it in two
+ways:
+
+- A request whose publisher the broker did not record is rejected as
+  `no_requester`. Admission fails closed because without a requester there is
+  nobody to hold to a rule, and a broker not yet set to record publishers
+  would otherwise let anyone with publish rights through unseen. A deployment
+  that enables admission must enable recording first.
+- `Policy::requesters` lists the principals allowed to ask. Empty, the default,
+  allows any recorded requester, as before: the grants on `sys.intake` already
+  decide who can publish at all. With a list, any other requester is rejected
+  as `not_permitted`. The list is compiled into the admission module like every
+  other limit, so changing it is a module change that `felixd replay --diff
+  --module` checks against past requests.
+
+The requester in the payload is not read, and a payload that claims one is
+ignored. Any node can still write `wl.admission.out`, as it can any output,
+until per-lease tokens (#74, GetFelix/felix#1625), and admission's projector
+records what it finds there. Admission's credential is node configuration
+(`--admission-token-file` and the control plane token) rather than a name bound
+in admission's spec (#97), so a node given it holds it whether or not it holds
+admission's lease.
 
 Open: the quota model (per tenant, per submitter, or per namespace, and what
 it counts: workloads, module bytes, fuel and memory limits).

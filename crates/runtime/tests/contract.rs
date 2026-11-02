@@ -103,6 +103,7 @@ fn the_guest_sees_the_metadata_it_is_given() {
         timestamp_micros: 1_700_000_000_000_001,
         key: Some(b"\x01\xff"),
         payload: b"meta",
+        publisher: None,
     };
     let got = outputs(wl.step(meta).unwrap());
     assert_eq!(
@@ -113,6 +114,41 @@ fn the_guest_sees_the_metadata_it_is_given() {
     assert_eq!(
         String::from_utf8(got[0].payload.clone()).unwrap(),
         format!("{STREAM} 0 3 3000 - 6d657461")
+    );
+}
+
+#[test]
+fn a_0_3_guest_sees_the_publisher() {
+    let mut wl = load(Limits::default());
+    let mut given = input(0, b"publisher");
+    given.publisher = Some("p:alice");
+    assert_eq!(outputs(wl.step(given).unwrap())[0].payload, b"p:alice");
+    // None is none, and not an empty name.
+    assert_eq!(payloads(&mut wl, b"publisher").unwrap(), [b"-".to_vec()]);
+    let mut empty = input(1, b"publisher");
+    empty.publisher = Some("");
+    assert_eq!(outputs(wl.step(empty).unwrap())[0].payload, b"");
+}
+
+#[test]
+fn a_0_2_guest_runs_and_never_sees_the_publisher() {
+    // The counter is built against contract 0.2.
+    let component = felixd_testkit::workload("counter");
+    let run = |publisher| {
+        let mut wl = Runtime::new()
+            .unwrap()
+            .load(&component, Limits::default())
+            .unwrap();
+        let mut given = input(0, b"x");
+        given.publisher = publisher;
+        let first = wl.step(given).unwrap();
+        (first, wl.snapshot().unwrap(), wl.inspect().unwrap())
+    };
+    let with = run(Some("p:alice"));
+    assert_eq!(with, run(None));
+    assert_eq!(
+        outputs(with.0),
+        [Output::unnamed(1u64.to_be_bytes().to_vec())]
     );
 }
 
