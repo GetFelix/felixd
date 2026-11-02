@@ -228,7 +228,7 @@
   deleted starts at a record that is gone and is left to an operator
   (reason 9). `felixd replay --diff` of a cut `.out` compares from the input
   after the oldest kept snapshot; `--from-start` stops. A `felixd replay` to an
-  offset older than the oldest kept snapshot, once the input before it is gone,
+  offset older than the oldest snapshot it can restore, once the input before it is gone,
   says so and names the oldest offset it can reach, where it said it needed the
   stream from offset 0. Test agents add the new
   `skip-shared-deletion` fault by default. New `felixd_core::readers`.

@@ -98,7 +98,7 @@ pub async fn replay(
         },
     )
     .await
-    .map_err(|e| older_than_snapshots(e, &start, kept, end - 1, 0))?;
+    .map_err(|e| older_than_snapshots(e, &start, &kept, end.saturating_sub(1), 0))?;
     let state = workload.inspect().context("inspect")?;
     Ok(Replayed {
         end,
@@ -181,7 +181,7 @@ pub async fn diff(
         },
     )
     .await
-    .map_err(|e| older_than_snapshots(e, &start, kept, from, 1))?;
+    .map_err(|e| older_than_snapshots(e, &start, &kept, from, 1))?;
     let mut found_all = first.into_iter().chain(found_all);
     Ok(Diffed {
         from,
@@ -226,7 +226,7 @@ async fn end_of(felix: &Felix, stream: &str, to: Option<Target>, input_tail: u64
 /// into it, unless `from_start` asks for the initial state. Another module
 /// restores the recorded module's snapshot only when it declares it can
 /// ([`module::can_restore`]). Where the state began is returned, and the
-/// input offset of the oldest snapshot Felix holds.
+/// input offsets of the snapshots Felix holds.
 async fn start(
     felix: &Felix,
     id: &str,
@@ -234,7 +234,7 @@ async fn start(
     module: Option<&str>,
     before: u64,
     from_start: bool,
-) -> Result<(Workload, Start, Option<u64>)> {
+) -> Result<(Workload, Start, Vec<u64>)> {
     let (hash, bytes) = match module {
         Some(module) => candidate(felix, module).await?,
         None => (
@@ -247,7 +247,7 @@ async fn start(
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow!("{e}"))?;
     if from_start {
-        return Ok((workload, Start::Initial(Initial::Requested), None));
+        return Ok((workload, Start::Initial(Initial::Requested), Vec::new()));
     }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
@@ -256,7 +256,7 @@ async fn start(
     let found =
         snapshots::restorable(&snap_stream, records.iter().map(|r| (r.offset, &r.payload)))?;
     let headers = found.iter().map(|s| s.taken().header);
-    let kept = headers.clone().map(|h| h.input_offset).min();
+    let kept: Vec<u64> = headers.clone().map(|h| h.input_offset).collect();
     let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, Start::Initial(Initial::NoSnapshot), kept));
     };
@@ -270,22 +270,29 @@ async fn start(
 
 /// `error` from replaying inputs, explained. When no kept snapshot is at or
 /// below `target` and Felix has trimmed the inputs the replay then needs, the
-/// target is older than the oldest kept snapshot, so say where replay can
-/// start instead. `target` is the input offset asked for, and `after` is how
-/// far past a snapshot's input the lowest target is: a replay to the snapshot's
-/// own input restores it (0), a diff from it starts at the input after (1).
+/// target is older than the oldest snapshot replay can restore, so say where
+/// replay can start instead. That snapshot is the oldest in `kept`, the input
+/// offsets of the snapshots held, whose following input Felix still holds: an
+/// older one can survive on a chunk a newer snapshot shares. `target` is the
+/// input offset asked for, and `after` is how far past a snapshot's input the
+/// lowest target is: a replay to the snapshot's own input restores it (0), a
+/// diff from it starts at the input after (1).
 fn older_than_snapshots(
     error: anyhow::Error,
     start: &Start,
-    kept: Option<u64>,
+    kept: &[u64],
     target: u64,
     after: u64,
 ) -> anyhow::Error {
-    match (Trimmed::of(&error), start, kept) {
-        (Some(trimmed), Start::Initial(Initial::NoSnapshot), Some(oldest)) => anyhow!(
-            "felixd replay: input {target} is older than the oldest kept snapshot, which is of \
-             input {oldest}, and {} no longer holds the inputs before offset {}; the oldest \
-             offset replay can reach is {}",
+    let Some(trimmed) = Trimmed::of(&error) else {
+        return error;
+    };
+    let usable = kept.iter().filter(|&&s| s + 1 >= trimmed.oldest).min();
+    match (start, usable) {
+        (Start::Initial(Initial::NoSnapshot), Some(oldest)) => anyhow!(
+            "felixd replay: input {target} is older than the oldest snapshot it can restore, \
+             which is of input {oldest}, and {} no longer holds the inputs before offset {}; \
+             the oldest offset replay can reach is {}",
             trimmed.stream,
             trimmed.oldest,
             oldest + after,

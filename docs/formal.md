@@ -11,7 +11,7 @@ it ([Spec history](#spec-history)).
 `specs/FelixdAdmission.tla` models admission's projection and the gate a spec record passes
 before it runs, and the `tla-admission` job checks it ([Admission](#admission)).
 `Felixd.tla` and `FelixdMerge.tla` also model trimming and the deletion it allows
-([Trimming](#trimming))
+([Trimming](#trimming)).
 
 ```bash
 scripts/check_tla.sh                 # every configuration (needs Java 11+)

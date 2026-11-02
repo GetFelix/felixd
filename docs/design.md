@@ -1413,6 +1413,11 @@ needing everything, a floor of 0:
 - a workload with no trim record, such as one without `keep_snapshots` or one
   that has not yet taken K snapshots, including one that was submitted and has
   not run;
+- a workload whose spec in the cache lists other inputs than its `.out` was
+  written under (a conflicting spec parks it, and reverting resumes under the
+  old inputs): it counts as needing the inputs of both from 0. Only a workload
+  whose cached spec still lists the stream is looked at, so one edited away from
+  it is not seen;
 - a spec that does not decode, for example one written by a newer felixd. It
   may read any stream, so it holds every shared stream back;
 - any failure reading a reader's trim record or the `workloads` cache, which
@@ -1457,8 +1462,8 @@ old offset, are not workloads in the `workloads` cache, so their floors are
 unknown. A stream they read may be deleted past them, and they get Felix's "too
 old" answer when they next ask for those offsets. That is the
 risk `--grant-trim` and `keep_snapshots` accept ([Grants](#grants)). A workload
-that lists the stream and has no `keep_snapshots` pins it whole, even stopped,
-since every state counts. A producer that publishes to an input with a
+that lists the stream and has never kept snapshots pins it whole, even stopped,
+since every state counts; one that once did counts by its last trim record. A producer that publishes to an input with a
 conditional write at its tail is refused once per trim, because the trim is a
 record on the stream, and retries at the tail Felix reports.
 
@@ -1474,7 +1479,9 @@ was in it.
 
 **Cost.** A deletion pass reads the `workloads` cache once and the last trim
 record of each workload that reads one of the streams, once per snapshot of each
-workload that keeps snapshots, and again when a holder resumes.
+workload that keeps snapshots, and again when a holder resumes. A reader with
+no trim record is read back through its whole `.out` to find that out, so a
+reader that never keeps snapshots makes every pass cost the length of its `.out`.
 
 ### Spec lineage
 
@@ -1561,9 +1568,9 @@ A replay to an offset older than the oldest kept snapshot, once the input
 before it is deleted, says so and names the oldest offset it can reach:
 
 ```
-felixd replay: input 40 is older than the oldest kept snapshot, which is of
-input 120, and wl.orders.in no longer holds the inputs before offset 90; the
-oldest offset replay can reach is 120
+felixd replay: input 40 is older than the oldest snapshot it can restore,
+which is of input 120, and wl.orders.in no longer holds the inputs before
+offset 110; the oldest offset replay can reach is 120
 ```
 
 A workload whose input Felix has trimmed past what it still needs, through

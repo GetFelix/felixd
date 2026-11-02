@@ -214,7 +214,7 @@ async fn output_need(t: &TestFelix, snapshots: &str, trim: &Trim) -> u64 {
 
 /// The reason a needs-operator record on `output` gives.
 async fn parked_for(t: &TestFelix, output: &str) -> Option<OperatorReason> {
-    t.read_all(output)
+    t.read_readable(output)
         .await
         .iter()
         .find_map(|(_, r)| match output::decode(r).unwrap() {

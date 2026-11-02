@@ -10,10 +10,10 @@ use anyhow::Result;
 use felixd_core::names;
 use felixd_core::readers::Known;
 use felixd_core::spec::WorkloadSpec;
-use felixd_core::trim::Trim;
 
 use crate::felix::Felix;
 use crate::runner;
+use crate::specs;
 
 /// Every workload, as the deletion rule sees it. `own` stands in for the
 /// workload `id` itself, which is deleting from what it holds in memory
@@ -38,34 +38,56 @@ pub(crate) async fn known(
             continue;
         };
         let reads = spec.inputs.iter().any(|i| streams.contains(&i.as_str()));
-        let floors = match reads {
-            true => floors_of(felix, &other, &spec).await,
-            false => None,
-        };
-        found.push(Known {
-            inputs: Some(spec.inputs),
-            floors,
+        found.push(match reads {
+            true => reader(felix, &other, spec).await,
+            false => Known {
+                inputs: Some(spec.inputs),
+                floors: None,
+            },
         });
     }
     Ok(found)
 }
 
-/// The input floors of the last trim record on `spec`'s `.out`. `None` when
-/// there is none or it cannot be read, which holds the streams it reads back.
-async fn floors_of(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Option<Vec<u64>> {
-    match last_trim(felix, &spec.output).await {
-        Ok(trim) => trim.map(|t| t.input_floors),
-        Err(error) => {
-            tracing::warn!(workload = id, %error, "reading a reader's trim record failed, keeping what it reads");
-            None
+/// A workload that reads one of the streams. Its floors are by the inputs
+/// its `.out` was written under, which a spec in the cache can differ from
+/// (a conflicting spec parks the workload, and reverting it resumes under the
+/// old inputs). Then it counts as needing all of both. Anything unreadable
+/// holds back the streams it reads.
+async fn reader(felix: &Felix, id: &str, spec: WorkloadSpec) -> Known {
+    let held = |inputs, floors| Known {
+        inputs: Some(inputs),
+        floors,
+    };
+    let tail = match felix.read_tail_if_exists(&spec.output).await {
+        // A workload that has not run has no stream yet.
+        Ok(None) => return held(spec.inputs, None),
+        Ok(Some(tail)) => tail,
+        Err(error) => return unreadable(id, &error, spec.inputs),
+    };
+    let written = match specs::lineage(felix, id, spec.clone()).await {
+        Ok(written) => written,
+        Err(error) => return unreadable(id, &error, spec.inputs),
+    };
+    if written.inputs != spec.inputs {
+        let mut inputs = spec.inputs;
+        for input in written.inputs {
+            if !inputs.contains(&input) {
+                inputs.push(input);
+            }
         }
+        return held(inputs, None);
+    }
+    match runner::last_trim(felix, &spec.output, tail).await {
+        Ok(trim) => held(spec.inputs, trim.map(|t| t.input_floors)),
+        Err(error) => unreadable(id, &error, spec.inputs),
     }
 }
 
-async fn last_trim(felix: &Felix, output: &str) -> Result<Option<Trim>> {
-    // A workload that has not run has no stream yet.
-    match felix.read_tail_if_exists(output).await? {
-        Some(tail) => runner::last_trim(felix, output, tail).await,
-        None => Ok(None),
+fn unreadable(id: &str, error: &anyhow::Error, inputs: Vec<String>) -> Known {
+    tracing::warn!(workload = id, %error, "reading a reader's trim record failed, keeping what it reads");
+    Known {
+        inputs: Some(inputs),
+        floors: None,
     }
 }
