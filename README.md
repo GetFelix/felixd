@@ -120,6 +120,13 @@ reports outputs missing from the end of a stream, for when the workloads
 should have caught up. `--upstream` also checks the workloads a checked one
 reads from, up the pipeline. It writes nothing.
 
+If Felix refuses a create, `felixd run` stops and prints Felix's reason. The usual
+cause is a stream or cache with that name that was deleted earlier: Felix will not
+reuse a deleted name until `stream_incarnations` (or `cache_incarnations`) is
+finalized, and its reason names the call. A new cluster does this when its first
+broker registers (brokers need `FELIX_NODE_ID`). The single-broker test stack never
+does, so use a new `--id` there.
+
 A workload can read another's output stream. This pipeline counts the inputs
 on `in`, then counts the first stage's outputs:
 
