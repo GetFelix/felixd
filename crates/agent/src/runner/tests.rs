@@ -76,15 +76,32 @@ fn an_input_is_behind_only_when_its_tail_is_below_the_position() {
 
 /// Raising `keep_snapshots` on a merged workload leaves a kept snapshot below
 /// the last trim, whose merge entry Felix has dropped. That is a trim to keep,
-/// not an error that reaches the workload as lost history.
+/// not an error that reaches the workload as lost history. Felix trimming
+/// further than our own trim did is still an error.
 #[test]
 fn a_merge_entry_below_the_last_trim_is_not_an_error() {
-    let trimmed = Trimmed {
+    let trimmed = |oldest| Trimmed {
         stream: "wl.a.merge".into(),
         requested: 3,
-        oldest: 9,
+        oldest,
     };
-    assert_eq!(below_the_trim(Err(trimmed.into())).unwrap(), None);
-    assert_eq!(below_the_trim(Ok(vec![4, 5])).unwrap(), Some(vec![4, 5]));
-    assert!(below_the_trim(Err(anyhow::anyhow!("connection reset"))).is_err());
+    let last = Trim {
+        snapshot: 20,
+        step: 9,
+        snap_floor: 15,
+        merge_floor: 9,
+        input_floors: vec![4, 5],
+    };
+    assert_eq!(
+        below_the_trim(Err(trimmed(9).into()), Some(&last)).unwrap(),
+        None
+    );
+    assert!(below_the_trim(Err(trimmed(10).into()), Some(&last)).is_err());
+    assert!(below_the_trim(Err(trimmed(9).into()), None).is_err());
+    assert_eq!(
+        below_the_trim(Ok(vec![4, 5]), Some(&last)).unwrap(),
+        Some(vec![4, 5])
+    );
+    let reset = anyhow::anyhow!("connection reset");
+    assert!(below_the_trim(Err(reset), Some(&last)).is_err());
 }

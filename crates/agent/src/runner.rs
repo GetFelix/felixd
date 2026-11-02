@@ -812,11 +812,19 @@ fn enforce_floors(spec: &WorkloadSpec, trim: &Trim) {
     }
 }
 
-/// `found`, or `None` when it failed because Felix has trimmed the entry away.
-fn below_the_trim(found: Result<Vec<u64>>) -> Result<Option<Vec<u64>>> {
+/// `found`, or `None` when it failed because the entry lies below the merge
+/// floor of `last`, the trim already recorded. Felix trimmed anything
+/// further than that without our word, which is an error.
+fn below_the_trim(found: Result<Vec<u64>>, last: Option<&Trim>) -> Result<Option<Vec<u64>>> {
     match found {
         Ok(next) => Ok(Some(next)),
-        Err(error) if Trimmed::of(&error).is_some() => Ok(None),
+        Err(error)
+            if Trimmed::of(&error)
+                .zip(last)
+                .is_some_and(|(t, last)| t.oldest <= last.merge_floor) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }
@@ -1009,7 +1017,7 @@ impl Steps<'_> {
                 match oldest {
                     Some(step) => {
                         let found = merge_next_at(self.felix, self.spec, step).await;
-                        match below_the_trim(found)? {
+                        match below_the_trim(found, self.last_trim.as_ref())? {
                             Some(next) => Some(next),
                             None => {
                                 // After `keep_snapshots` is raised, a kept
