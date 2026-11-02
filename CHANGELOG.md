@@ -167,7 +167,7 @@
 - Deleting snapshots and the merge log (part of #19). After the trim record
   lands, the holder trims the workload's `.snap` and merge log with Felix's
   conditional head trim, up to the record's floors, and a holder that resumes
-  deletes whatever a crash left. Inputs and `.out` are not deleted (#150).
+  deletes whatever a crash left. Inputs and `.out` follow below (#150).
   Needs the Felix fleet to have finalized `head_trim`, which is a one-way step
   (back up first), and `stream.trim` on the node's token, which is off by
   default: `felixd init --grant-trim` grants it to the node role. Without
@@ -190,7 +190,7 @@
   `init --grant-trim` before this needs it run again and the nodes' tokens
   re-minted, and an older felixd's `init` refuses a namespace that holds the
   new rule.
-- Trimming `sys.facts` (#164). The one input that is deleted: a scheduler run
+- Trimming `sys.facts` (#164). The first input that is deleted: a scheduler run
   with `--keep-snapshots` also deletes `sys.facts` below the floor its trim
   record names for that input, the same step that deletes `.snap` and the merge
   log. Only the scheduler reads `sys.facts`, and `felixd run` now refuses a
@@ -205,8 +205,33 @@
   `--keep-snapshots 3` at the default when nodes hold 8 workloads.
   `felixd replay` of the scheduler starts from a snapshot and is unaffected. `felixd check` of a scheduler that has
   deleted history says which stream it needed and the oldest offset Felix
-  holds, as it does for the merge log. `wl.scheduler.out` is not trimmed yet
+  holds, as it does for the merge log. `wl.scheduler.out` is never trimmed
   (#150).
+- Deleting inputs and `.out` (the deletion half of #150). With
+  `--keep-snapshots` and `felixd init --grant-trim`, a holder now also deletes
+  its inputs and its own `.out`, once its trim record has landed. A stream
+  other workloads read goes only as far as the lowest floor of all of them:
+  every workload in the `workloads` cache that lists it counts, in any state,
+  by the input floor in the last trim record on its `.out`. A reader with no
+  trim record, a spec that does not decode, or a failed read counts as 0 and
+  holds the stream where it is. A workload's `.out` goes below the lower of its
+  oldest kept snapshot's output tail and its readers' lowest floor, and only
+  once its last trim record carries the first claim's spec; `wl.admission.out`
+  and `wl.scheduler.out` are never cut. `.out` is trimmed at the tail the
+  holder expects, so a superseded holder is refused; inputs are asked again at
+  the tail Felix reports. A node whose token cannot trim these streams logs one
+  warning of its own and still deletes `.snap`, the merge log and `sys.facts`.
+  No record format changes. Breaking, and the risk of `--grant-trim`: a program
+  outside felixd that reads an input or a workload's `.out` is not known to
+  this rule and can find its history gone; a conditional publisher to an input
+  is refused once per trim; a workload submitted after the history was deleted
+  starts at a record that is gone and is left to an operator (reason 9); and
+  `felixd replay --diff` stops on a cut `.out`. Test agents add the new
+  `skip-shared-deletion` fault by default. New `felixd_core::readers`.
+- Upgrading for deleted outputs and inputs (#150): upgrade every node before
+  setting `--keep-snapshots` with the grant on. A node from before trim records
+  carried the stream's lineage cannot read a `.out` whose head is cut, and
+  leaves the workload to an operator.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.
@@ -296,7 +321,6 @@
   what follows it, the merge log from the entry at its step. `--from-snapshot`
   asks for that earlier and `--from-start` refuses it. A snapshot's state is
   taken as given and outputs below its tail are not compared.
-  Deleting `.out` and the floors downstream readers need remain (#150).
 - `felixd drain <node>` makes a node release its leases, so other nodes take
   its workloads over without waiting for them to expire, and claim nothing
   until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`
@@ -310,8 +334,8 @@
   each snapshot of its own, the holder appends a trim record to the output
   stream naming the floors below which this workload's resume reads nothing:
   on the snapshot stream, the merge log and each input. It is fenced by the
-  lease epoch like an output. The output stream is not trimmed, and a shared
-  input will be trimmed only below every reader's floor (#150).
+  lease epoch like an output. A shared input is trimmed only below every
+  reader's floor (#150).
 - Upgrading: a trim record is a new output record kind (7). A node from an
   earlier build that takes over a workload with one fails it as poison, and
   one whose workload reads that output stream leaves it to an operator. Upgrade

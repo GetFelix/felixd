@@ -10,8 +10,8 @@ it ([Spec history](#spec-history)).
 `tla-merge` job checks it ([Several inputs](#several-inputs)).
 `specs/FelixdAdmission.tla` models admission's projection and the gate a spec record passes
 before it runs, and the `tla-admission` job checks it ([Admission](#admission)).
-`Felixd.tla` and `FelixdMerge.tla` also model trimming and the deletion it will allow
-([Trimming](#trimming)).
+`Felixd.tla` and `FelixdMerge.tla` also model trimming and the deletion it allows
+([Trimming](#trimming))
 
 ```bash
 scripts/check_tla.sh                 # every configuration (needs Java 11+)
@@ -124,7 +124,7 @@ Paths are from the repository root, as of workload contract 0.2.
 | `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:520-569` |
 | `TrimStep` | `Runner::trim` after a snapshot, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
 | `DeleteSnaps` | `Steps::delete_trimmed` and `retention::trim_stream`, after the trim record has landed and again when a holder resumes: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`, `crates/core/src/trim.rs`. The model does not cover the trim record taking an offset on `.snap`, which the snapshot write then meets as a changed tail, nor a trim at another writer's tail (the code gives up there) |
-| `DeleteInputs` | not built: an input is deleted only below every reader's floor ([#150](https://github.com/GetFelix/felixd/issues/150)). The model deletes what a trim record names, once the record has landed |
+| `DeleteInputs` | `Steps::delete_shared` and `felixd_core::readers`: the code deletes an input only below the lowest floor of every reader, and `.out` below the lower of its own need and its readers' floors. The model has one workload, which is every reader of its input, so it deletes what the trim record names, once the record has landed. Shared deletion is not modelled ([Not modelled](#not-modelled)) |
 | `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:814-832` |
@@ -345,7 +345,7 @@ append there first: comparing epochs alone, it steps the new record at the old o
 | `SnapTake`, `SnapGiveUp`, `SnapLand` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs` |
 | `TrimStep` | `Runner::trim`, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
 | `DeleteMerge` | `Steps::delete_trimmed` and `retention::trim_stream`: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`. The model does not cover the trim record taking a merge log offset, which the next merge append meets as a changed tail, nor a trim at another writer's tail |
-| `DeleteInputs` | not built ([#150](https://github.com/GetFelix/felixd/issues/150)) |
+| `DeleteInputs` | `Steps::delete_shared`, with one workload standing for all readers of its inputs, as in `Felixd.tla` ([Not modelled](#not-modelled)) |
 | `Deliver`, `LoseAnswer`, `Timeout`, `DeliverPrefix` | `publish_if` landing late or not at all, and the `drop-*`, `lose-*-answer` and `append-prefix` test faults: `crates/agent/src/faults.rs` |
 | `Crash` | an agent killed, or `crash-after-merge` |
 | `Recreate` | the `epochs` cache recreated |
@@ -433,9 +433,10 @@ decisions; and the module check, reduced to whether the module is there.
 
 `felixd run --keep-snapshots K` makes a holder record a trim on `.out` after each snapshot of its
 own: the floors below which this workload's resume reads nothing ([design.md](design.md#retention)).
-The holder then deletes `.snap` and the merge log up to those floors. Deleting inputs is not built
-yet ([#150](https://github.com/GetFelix/felixd/issues/150)), but the models include it, so the
-rules are checked before it exists.
+The holder then deletes `.snap` and the merge log up to those floors, and its inputs and `.out`
+as far as every reader allows. The models delete the inputs the record names as if the workload
+were their only reader, which checks that its own floors are right; the rule across readers is
+not modelled.
 
 Both `Felixd.tla` and `FelixdMerge.tla` add three things:
 
@@ -526,12 +527,14 @@ composition.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
 
 - The head trim of `.out`, with the first claim's spec record carried in the trim record so the
-  spec lineage survives it. Neither is built ([#150](https://github.com/GetFelix/felixd/issues/150)),
-  and `.out` is not trimmed today. `FelixdSpecs.tla` numbers its offsets from the start of the
-  stream, so modelling it means rewriting its first-claim and check functions on a base offset;
-  that comes with the code.
-- Trimming an input shared with other readers, which is deleted only below every reader's floor
-  (#150). The models check one workload's floors.
+  spec lineage survives it. Both are built, but `FelixdSpecs.tla` numbers its offsets from the
+  start of the stream, so modelling a cut head means rewriting its first-claim and check
+  functions on a base offset. It is covered by unit and integration tests
+  (`crates/agent/src/specs/tests.rs`, `crates/felixd/tests/retention.rs`).
+- Deleting a stream shared with other readers: an input, or a workload's `.out`, which goes only
+  below the lowest floor of every reader. The models check one workload's floors, and treat that
+  workload as the only reader. Whether the lowest floor across readers is right is covered by
+  `felixd_core::readers` unit tests and `crates/felixd/tests/retention.rs`, not by TLC.
 
 A degraded record is a fenced append that every reader passes over. It stops no node and
 raises no floor, and the release after it is a holder stopping and deleting its lease, which the

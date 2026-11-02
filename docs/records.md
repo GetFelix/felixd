@@ -229,7 +229,9 @@ A trim, kind 7, names the floors below which this workload's resume reads nothin
 `felixd replay` reads from the start while the records are there. Its holder appends it after a snapshot of its own
 when the spec sets `keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed
 deletes `.snap` and the merge log below the snapshot and merge log floors. The scheduler's holder also
-deletes `sys.facts` below the floor for that input; no other input is deleted. It continues with:
+deletes `sys.facts` below the floor for that input. The holder then deletes its `.out` and its inputs
+too, but each only below the lowest floor of every workload that reads it, found from those workloads'
+own trim records. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -262,8 +264,10 @@ uses of these fields:
   spec claimed, so a stale node is still refused when the claims are gone.
 
 A holder that finds a trim whose floors are not yet deleted, as after a crash, deletes then. An input
-floor is one reader's and nothing acts on it: an input shared with other readers is deleted only below
-all of theirs (#150).
+floor is one reader's: a stream shared with other readers is deleted only below the lowest of their
+floors, and a reader with no trim record counts as 0 ([design.md](design.md#streams-other-workloads-read)).
+A trim record only says what to keep; it has no field for what was deleted, so deleting changes no
+format. Felix's own trim of `.out` lands as a record at its tail that readers are not given.
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
