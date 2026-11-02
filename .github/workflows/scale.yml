@@ -90,7 +90,7 @@ jobs:
             pkill -f 'felixd agent' || true
             docker ps -a --format '{{.Names}}  {{.Status}}' > results/containers-$n-ttl$ttl.txt
             for b in broker-1 broker-2 broker-3; do
-              docker compose -f $cluster logs --no-color --tail 300 $b > results/log-$n-ttl$ttl-$b.txt 2>&1
+              docker compose -f $cluster logs --no-color --timestamps $b 2>&1 | gzip > results/log-$n-ttl$ttl-$b.txt.gz
             done
             docker compose -f $cluster logs --no-color felix-controlplane > results/log-$n-ttl$ttl-controlplane.txt 2>&1
             echo "::endgroup::"
