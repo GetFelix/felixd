@@ -20,6 +20,12 @@
 (* claim again; it only checks the last record (Probe). docs/formal.md     *)
 (* maps each action to the code.                                           *)
 (*                                                                         *)
+(* Trimming (docs/design.md, Retention): after a snapshot the holder      *)
+(* records a trim on `.out`, the floors below which a resume reads no     *)
+(* `.snap` record and no input. Delete then drops what a recorded trim    *)
+(* names. RestoreIntact says the snapshot a resume would restore, and the *)
+(* inputs after its step, are still there.                                *)
+(*                                                                         *)
 (* Knobs, each turned off in a twin configuration that TLC finds a        *)
 (* violation in:                                                          *)
 (*   ClaimMarker     the claim record.                                     *)
@@ -33,6 +39,13 @@
 (*                   publish_if, and the spec's `failed` follows from it.  *)
 (*   IndexFold       the fold skips outputs by (input, index), so a resume *)
 (*                   can start in the middle of a step.                   *)
+(*   TrimOwnSnap     a holder trims only once the newest snapshot is its  *)
+(*                   own. The `.out` fence already refuses a trim by a    *)
+(*                   holder a later one has superseded, so the twin passes.*)
+(*   TrimLowestStep  the input floor is the lowest step among the kept    *)
+(*                   snapshots, not the oldest kept record's.             *)
+(*   TrimAnyTime     off in the code: a holder trims right after the ack  *)
+(*                   of a snapshot it wrote, not at any later time.       *)
 (* Assumptions, each dropped in a twin:                                    *)
 (*   RecreateWhenWritten  `epochs` is recreated only while every live     *)
 (*                        epoch is on a record (design.md, Leases).        *)
@@ -54,6 +67,8 @@ CONSTANTS
     MaxRecreates,
     MaxInflight,       \* requests one node may have in flight
     MaxPartials,       \* batches that land in part (DeliverPrefix)
+    MaxTrims,          \* trim records the model appends
+    Keep,              \* snapshots a trim keeps (keep_snapshots)
     ClaimMarker,
     EpochFloor,
     Confirmer,
@@ -65,15 +80,23 @@ CONSTANTS
     LocalFaults,       \* a holder may fail the workload on its own
     TimingFaults,      \* local deadlines pass and clock faults happen
     FaultsInFailWindow,
-    RecreateWhenWritten
+    RecreateWhenWritten,
+    TrimOwnSnap,
+    TrimLowestStep,
+    TrimAnyTime
 
 ASSUME /\ NoNode \notin Nodes
        /\ \A b \in {ClaimMarker, EpochFloor, Confirmer, LaterEpochWins,
                     ReplayGuard, FoldOnEvents, FailRecord, IndexFold, LocalFaults, TimingFaults,
-                    FaultsInFailWindow, RecreateWhenWritten} : b \in BOOLEAN
+                    FaultsInFailWindow, RecreateWhenWritten, TrimOwnSnap,
+                    TrimLowestStep, TrimAnyTime} : b \in BOOLEAN
+       /\ MaxTrims \in Nat
+       /\ Keep \in Nat \ {0}
 
 \* Workload shapes for the configurations.
 One == <<1>>
+OneThenIdle == <<1, 0>>
+OneIdleOne == <<1, 0, 1>>
 OneEach == <<1, 1>>
 IdleThenTwo == <<0, 2>>
 OneThenTwo == <<1, 2>>
@@ -83,6 +106,7 @@ N == Len(Outs)
 Max(S) == CHOOSE m \in S : \A y \in S : y <= m
 Max2(a, b) == IF a > b THEN a ELSE b
 Min2(a, b) == IF a < b THEN a ELSE b
+Min(S) == CHOOSE m \in S : \A y \in S : m <= y
 
 \* `c` is the claim that wrote the record. Only the invariants read it.
 Rec(k, e, c, i, x) == [k |-> k, e |-> e, c |-> c, i |-> i, x |-> x]
@@ -111,13 +135,15 @@ VARIABLES
     spec,       \* the spec's state: "running" or "failed"
     nd,         \* each node's state
     bud,        \* fault and bound counters
+    del,        \* what Felix has deleted: .snap offsets below `snap`, inputs below `inp`
     started,    \* ghost: [e, at] once epoch e began, with the .out tail then
     staleFail,  \* ghost: a failure was written by a node not holding the lease,
                 \* or its record landed after a later owner began
     poisoned    \* ghost: some node found the streams impossible to resume
 
-vars == <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned>>
-ghosts == <<started, staleFail, poisoned>>
+vars == <<out, snap, net, lease, ctr, spec, nd, bud, del, started, staleFail, poisoned>>
+\* What most actions leave alone. `del` is Felix's, but only Delete* changes it.
+ghosts == <<del, started, staleFail, poisoned>>
 
 NodeInit == [pc |-> "idle", ep |-> 0, cid |-> 0, ok |-> FALSE, desync |-> FALSE,
              up |-> TRUE, kt |-> 0, kst |-> 0, pos |-> 0, skip |-> NoSkip,
@@ -134,7 +160,8 @@ Init ==
     /\ spec = "running"
     /\ nd = [n \in Nodes |-> NodeInit]
     /\ bud = [claims |-> 0, crashes |-> 0, clock |-> 0, gens |-> 0,
-              snaps |-> 0, recreates |-> 0, partials |-> 0]
+              snaps |-> 0, recreates |-> 0, partials |-> 0, trims |-> 0]
+    /\ del = [snap |-> 0, inp |-> 0]
     /\ started = {}
     /\ staleFail = FALSE
     /\ poisoned = FALSE
@@ -322,7 +349,8 @@ Probe(n) ==
 
 ReadSnap(n) ==
     /\ nd[n].pc = "rsnap"
-    /\ LET p == LastOf(snap, {"snap"})
+    /\ LET p0 == LastOf(snap, {"snap"})
+           p == IF p0 > del.snap THEN p0 ELSE 0     \* a deleted record is not there to read
        IN IF p > 0 /\ snap[p].e > nd[n].ep
           THEN Superseded(n)
           ELSE nd' = [nd EXCEPT ![n].pc = "rout", ![n].kst = Len(snap),
@@ -351,7 +379,7 @@ ReadOut(n) ==
                              THEN started \cup {[e |-> nd[n].ep, at |-> T]}
                              ELSE started
                /\ UNCHANGED poisoned
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, staleFail>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, staleFail>>
 
 -----------------------------------------------------------------------------
 (* Running *)
@@ -374,7 +402,7 @@ Step(n) ==
                                    ![n].pos = IF b = <<>> THEN i + 1 ELSE i,
                                    ![n].pc = IF b = <<>> THEN "post" ELSE "osend"]
                /\ UNCHANGED poisoned
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, started, staleFail>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, started, staleFail>>
 
 OSend(n) ==
     /\ nd[n].pc = "osend" /\ nd[n].ok
@@ -417,7 +445,7 @@ Reconcile(n) ==
                              ELSE [clear EXCEPT ![n].kt = T, ![n].batch = rest,
                                                 ![n].pc = "osend"]
                     /\ UNCHANGED poisoned
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, started, staleFail>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, started, staleFail>>
 
 \* After a step the owner may snapshot or go on. Choosing freely covers every
 \* snapshot_every.
@@ -447,7 +475,8 @@ SSend(n) ==
 
 SAck(n) ==
     /\ nd[n].pc = "swait" /\ nd[n].rep = "ok"
-    /\ nd' = [nd EXCEPT ![n].kst = @ + 1, ![n].pc = "run", ![n].batch = <<>>,
+    /\ nd' = [nd EXCEPT ![n].kst = @ + 1, ![n].pc = IF MaxTrims > 0 THEN "trim" ELSE "run",
+                        ![n].batch = <<>>,
                         ![n].await = NoMsg, ![n].rep = "none"]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -510,7 +539,7 @@ WriteFail(n) ==
        ELSE UNCHANGED <<spec, staleFail>>
     /\ lease' = IF Owns(n) THEN NoLease ELSE lease
     /\ nd' = Left(n)
-    /\ UNCHANGED <<out, snap, net, ctr, bud, started, poisoned>>
+    /\ UNCHANGED <<out, snap, net, ctr, bud, del, started, poisoned>>
 
 \* With FailRecord: the failure record at the tail just read, unless the last
 \* record there is from a later epoch or is already a failure. A node that
@@ -576,6 +605,69 @@ Derive(n) ==
     /\ UNCHANGED <<out, snap, net, ctr, bud, ghosts>>
 
 -----------------------------------------------------------------------------
+(* Trimming *)
+
+\* The offsets of the snapshot records Felix still holds, oldest first.
+RECURSIVE SnapsFrom(_)
+SnapsFrom(p) ==
+    IF p > Len(snap) THEN <<>>
+    ELSE (IF snap[p].k = "snap" THEN <<p>> ELSE <<>>) \o SnapsFrom(p + 1)
+Snaps == SnapsFrom(del.snap + 1)
+
+\* The floors of the last trim record on `.out`, zero before any.
+LastTrim ==
+    LET p == LastOf(out, {"trim"})
+    IN IF p = 0 THEN [i |-> 0, x |-> 0] ELSE [i |-> out[p].i, x |-> out[p].x]
+
+\* The step after an acked snapshot (Runner::trim), with trim::plan. The kept
+\* snapshots are the last Keep on `.snap`. A resume restores the newest of
+\* them and reads inputs from its step on, but the newest can have a lower
+\* step than an older kept one (a holder that replayed up to an idle input
+\* snapshots below the step an earlier holder's late write landed at), so the
+\* input floor is the lowest step among them, not the oldest record's. The
+\* trim is `publish_if` at the `.out` tail the holder expects, like an
+\* output, so a superseded holder's is refused. A trim that is not planned or
+\* not accepted is skipped; floors never go back (Skip::Regressed). It must
+\* follow the holder's own ack: a trim at any later time can land after a
+\* given-up write of the same holder has put a lower step on the stream
+\* (TrimAnyTime lets TLC show it).
+\*
+\* The code reads `.snap`, plans, then appends; here that is one step. A
+\* snapshot that lands between the read and the append leaves the same streams
+\* as one landing just after this step, which the model covers.
+TrimStep(n) ==
+    /\ (nd[n].pc = "trim" \/ (TrimAnyTime /\ nd[n].pc = "run"))
+    /\ LET kept == {Snaps[j] : j \in Len(Snaps) - Keep + 1..Len(Snaps)}
+           oldest == Snaps[Len(Snaps) - Keep + 1]
+           step == IF TrimLowestStep THEN Min({snap[q].i : q \in kept}) ELSE snap[oldest].i
+           floors == [i |-> step, x |-> oldest - 1]
+           ok == /\ bud.trims < MaxTrims /\ nd[n].ok /\ nd[n].kt = Len(out)
+                 /\ Len(Snaps) >= Keep
+                 /\ TrimOwnSnap => snap[Snaps[Len(Snaps)]].e = nd[n].ep
+                 /\ floors # LastTrim
+                 /\ floors.i >= LastTrim.i /\ floors.x >= LastTrim.x
+       IN IF ok
+          THEN /\ out' = Append(out, Rec("trim", nd[n].ep, nd[n].cid, floors.i, floors.x))
+               /\ nd' = [nd EXCEPT ![n].pc = "run", ![n].kt = @ + 1]
+               /\ bud' = [bud EXCEPT !.trims = @ + 1]
+          ELSE /\ nd' = [nd EXCEPT ![n].pc = "run"]
+               /\ UNCHANGED <<out, bud>>
+    /\ UNCHANGED <<snap, net, lease, ctr, spec, ghosts>>
+
+\* Felix deletes below a floor only after the trim record that names it has
+\* landed. The two deletions are separate steps, so a crash between them
+\* leaves less deleted than recorded.
+DeleteSnaps ==
+    /\ LastTrim.x > del.snap
+    /\ del' = [del EXCEPT !.snap = LastTrim.x]
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned>>
+
+DeleteInputs ==
+    /\ LastTrim.i > del.inp
+    /\ del' = [del EXCEPT !.inp = LastTrim.i]
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned>>
+
+-----------------------------------------------------------------------------
 (* The lease over time *)
 
 \* A renewal that matters: it puts the clocks back in step, or is refused.
@@ -639,7 +731,7 @@ Deliver(m) ==
                           \/ /\ applied /\ m.s = "out" /\ m.recs[1].k \in {"fail", "nop"}
                              /\ \E x \in started : x.e > m.recs[1].e
     /\ net' = net \ {m}
-    /\ UNCHANGED <<lease, ctr, spec, bud, poisoned>>
+    /\ UNCHANGED <<lease, ctr, spec, bud, del, poisoned>>
 
 \* A multi-record batch lands in part: a Quorum leader replicated a prefix of
 \* it and lost the shard, and the follower promoted with that prefix keeps it.
@@ -708,7 +800,7 @@ NodeStep(n) ==
     \/ Marker(n) \/ MarkerAck(n) \/ MarkerRetry(n)
     \/ Probe(n) \/ ReadSnap(n) \/ ReadOut(n)
     \/ Step(n) \/ OSend(n) \/ OAck(n) \/ Reconcile(n)
-    \/ Continue(n) \/ SnapSend(n) \/ SSend(n) \/ SAck(n) \/ SRefused(n) \/ SLost(n)
+    \/ TrimStep(n) \/ Continue(n) \/ SnapSend(n) \/ SSend(n) \/ SAck(n) \/ SRefused(n) \/ SLost(n)
     \/ Sup(n) \/ ConfirmFail(n) \/ WriteFail(n)
     \/ FailSend(n) \/ FailAck(n) \/ FailRetry(n) \/ Derive(n) \/ Park(n)
     \/ Renew(n) \/ StopLocal(n) \/ Restart(n)
@@ -723,6 +815,7 @@ Next ==
     \/ Expire
     \/ GenStart
     \/ Recreate
+    \/ DeleteSnaps \/ DeleteInputs
 
 Fairness ==
     /\ \A n \in Nodes : WF_vars(NodeStep(n))
@@ -788,6 +881,15 @@ SnapshotsSplit ==
         /\ snap[q].x <= Len(out)
         /\ \A p \in 1..Len(out) : out[p].k = "out" =>
               ((p - 1 < snap[q].x) <=> (out[p].i <= snap[q].i))
+
+\* The snapshot a resume restores, the last on `.snap`, is still held, and so
+\* are the inputs from its step on: a resume reads the record at the step for
+\* its append time and everything after it. No other output is read, since
+\* `.out` is not trimmed.
+RestoreIntact ==
+    LET p == LastOf(snap, {"snap"})
+    IN p > 0 => /\ p > del.snap
+                /\ snap[p].i >= del.inp
 
 \* A free, running workload is claimed, unless it is left to an operator.
 FreeIsClaimed ==
