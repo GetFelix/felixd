@@ -101,11 +101,12 @@ async fn assignment(t: &TestFelix, id: &str, before: Option<u64>) -> Placed {
     .await
 }
 
-/// Waits until every one of `nodes` has appended a fact.
+/// Waits until every one of `nodes` has a fact `sys.facts` still holds. A
+/// scheduler that trims the stream may already have deleted the first ones.
 async fn facts_from(t: &TestFelix, nodes: &[&str]) {
     eventually("a fact from every node", SOON, || async {
         let heard: BTreeSet<String> = t
-            .read_all(names::FACTS)
+            .read_readable(names::FACTS)
             .await
             .iter()
             .filter_map(|(_, r)| NodeFact::decode(r).ok())
@@ -519,7 +520,20 @@ async fn sys_facts_is_trimmed_below_the_schedulers_floor_and_failover_carries_on
         assert!(run_counter(&t, id).await.success());
         assignment(&t, id, None).await;
     }
-    assert!(t.readable_from(names::FACTS).await >= floor);
+    let held = t.read_readable(names::FACTS).await;
+    assert!(!held.is_empty(), "sys.facts holds nothing");
+    assert!(held[0].0 >= floor, "{} is below the floor {floor}", held[0].0);
+    assert!(
+        held.windows(2).all(|w| w[1].0 == w[0].0 + 1),
+        "sys.facts has a gap above the floor"
+    );
+    let below = t.felix.read_range(names::FACTS, 0, floor).await;
+    assert!(
+        below
+            .as_ref()
+            .is_err_and(|e| felixd_agent::felix::Trimmed::of(e).is_some()),
+        "records below the floor {floor} are still readable: {below:?}"
+    );
     let parked = t
         .read_all(&names::output_stream(names::SCHEDULER))
         .await
