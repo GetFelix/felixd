@@ -73,9 +73,9 @@ since TLC stops at the first violation a worker finds.
 | `FelixdTailFold` | `NoPoison` | the fold on event offsets off (#67) | 20 | under 1 s |
 | `FelixdNoLaterEpochWins` | `EpochMonotone` | reconcile's later-epoch rule off | about 21,000 | 2 s |
 | `FelixdPartialNoIndex` | `NoPoison` | the fold skipping whole inputs, not outputs by index | about 700,000 | 14 s |
-| `FelixdTrim` | pass | an input with an output, then one with none, two claims, a crash, a clock fault, two snapshots, a trim that keeps the last snapshot | 1,995,590 | TIME1 |
-| `FelixdTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 1,687,132 | TIME2 |
-| `FelixdTrimNoOwn` | pass | the same as `FelixdTrim`, with the own-snapshot rule off | 1,995,590 | TIME1 |
+| `FelixdTrim` | pass | an input with an output, then one with none, two claims, a crash, a clock fault, two snapshots, a trim that keeps the last snapshot | 1,995,590 | about 30 s |
+| `FelixdTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 1,687,132 | about 25 s |
+| `FelixdTrimNoOwn` | pass | the same as `FelixdTrim`, with the own-snapshot rule off | 1,995,590 | about 30 s |
 | `FelixdTrimOldest` | `RestoreIntact` | the input floor from the oldest kept record's step, not the lowest | about 25,000 | under 1 s |
 
 `FelixdFull` has everything at once, with a second input whose batch of two may land in part. The `TLA nightly` workflow walks three million random
@@ -295,8 +295,8 @@ could still write is on `.out`, the assumption design.md states.
 | `FelixdMergeNoCatchUp` | `OutputsFollowMerge` | the entries before the claim not stepped: a holder that crashed between its merge append and its steps leaves a gap | about 2,300 | under 3 s |
 | `FelixdMergeBeforeOut` | `OneWriter` | the merge log claimed before `.out`, with `epochs` recreated | about 250 | under 3 s |
 | `FelixdMergeNoSameBytes` | `StepsFollowMerge` | reconcile takes any record of its own epoch past the tail as the entry it sent | about 240 | under 3 s |
-| `FelixdMergeTrim` | pass | one record on each input, the second with no output, two holders, two snapshots, a trim that keeps the last snapshot | 86,958 | TIME3 |
-| `FelixdMergeTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 55,420 | TIME3 |
+| `FelixdMergeTrim` | pass | one record on each input, the second with no output, two holders, two snapshots, a trim that keeps the last snapshot | 86,958 | under 3 s |
+| `FelixdMergeTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 55,420 | under 3 s |
 | `FelixdMergeTrimOldest` | `RestoreIntact` | the floors from the oldest kept record's step, not the lowest | about 15,000 | under 3 s |
 
 Every configuration has two nodes. Counts and times are from the `tla-merge` job on the CI
