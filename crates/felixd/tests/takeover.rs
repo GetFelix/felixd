@@ -169,6 +169,16 @@ async fn a_full_node_leaves_workloads_to_others() {
 /// its next retry.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_released_lease_is_claimed_at_once() {
+    released_lease_is_claimed_at_once(Agent::interrupt).await;
+}
+
+/// A supervisor's stop is SIGTERM, which must release leases like Ctrl-C.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminated_node_releases_its_lease_at_once() {
+    released_lease_is_claimed_at_once(Agent::terminate).await;
+}
+
+async fn released_lease_is_claimed_at_once(stop: fn(&Agent)) {
     let Some(t) = test_felix().await else { return };
     let workloads = ids(1);
     t.submit_as(&workloads[0], "counter", &[]).await;
@@ -186,7 +196,7 @@ async fn a_released_lease_is_claimed_at_once() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let released_at = Instant::now();
-    a.interrupt();
+    stop(&a);
     eventually("b to claim it", Duration::from_secs(30), || async {
         holders(&t, &workloads)
             .await
