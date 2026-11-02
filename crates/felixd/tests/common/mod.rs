@@ -124,7 +124,7 @@ impl TestFelix {
         let child = self
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
             .args(args)
-            .env("FELIXD_FAULTS", faults)
+            .env("FELIXD_FAULTS", faults_for_tests(faults))
             .spawn()
             .expect("start felixd agent");
         Agent {
@@ -144,7 +144,7 @@ impl TestFelix {
         let child = self
             .felixd(&["agent", "--node-id", node_id, "--lease-ttl-ms", &ttl])
             .env("FELIX_AUTH_TOKEN_FILE", token_file)
-            .env("FELIXD_FAULTS", faults)
+            .env("FELIXD_FAULTS", faults_for_tests(faults))
             .spawn()
             .expect("start felixd agent");
         Agent {
@@ -451,6 +451,13 @@ impl TestFelix {
         })
         .await
     }
+}
+
+/// `faults` with `skip-shared-deletion=1` added, so a test that reads a whole
+/// input or output stream still can. A test that wants `.out` and the inputs
+/// deleted names `skip-shared-deletion=0`, which comes first and wins.
+fn faults_for_tests(faults: &str) -> String {
+    format!("{faults},skip-shared-deletion=1")
 }
 
 /// The lease TTL test agents run with.
