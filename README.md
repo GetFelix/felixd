@@ -206,16 +206,18 @@ still gets snapshots and every node takes them at the same inputs. With
 before the oldest of the last three its resume no longer reads (a trim record
 on the output stream), and then deletes the snapshot stream and the merge log
 up to there, so a long-running workload stops growing them. Deleting needs the
-Felix fleet to have finalized `head_trim`, a one-way step, and a token with
-`stream.trim`, which `felixd init` grants to the node role. Without them the
-workload runs on and the node logs a warning once. Inputs and the output stream
-are not deleted, with one exception: a scheduler run with `--keep-snapshots`
-also deletes the node facts on `sys.facts` that no kept snapshot reads, which
-keeps that stream to about `keep-snapshots x snapshot-every` facts (each about
-150 bytes plus the ids of the workloads its node holds, so 3,000 facts and
-roughly 1 MB at `--keep-snapshots 3` with the defaults). Run `felixd init` again after upgrading so nodes get the grant for it.
-[Retention](docs/design.md#retention) has the details, including what
-`felixd check` and `felixd replay` do afterwards.
+Felix fleet to have finalized `head_trim`, a one-way step, and a node token
+with `stream.trim`. That grant is off by default because it lets any node
+erase any stream in the namespace for good: run `felixd init --grant-trim` to
+turn it on, then mint the nodes new tokens. Without them the workload runs on,
+keeps its history, and the node logs a warning once. Inputs and the output
+stream are not deleted, with one exception: a scheduler run with
+`--keep-snapshots` also deletes the node facts on `sys.facts` that no kept
+snapshot reads, which keeps that stream to about `keep-snapshots x
+snapshot-every` facts (each about 150 bytes plus the ids of the workloads its
+node holds, so 3,000 facts and roughly 1 MB at `--keep-snapshots 3` with the
+defaults). [Retention](docs/design.md#retention) has the details, including
+what `felixd check` and `felixd replay` do afterwards.
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
 (`wit/workload.wit`). Each step gets the input's stream, offset, append time,
 key and payload, and returns outputs, each with a name and an optional key, or

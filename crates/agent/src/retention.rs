@@ -123,8 +123,8 @@ pub(crate) async fn trim_stream(
                         stream,
                         %error,
                         "this node's token may not trim this stream, so keep_snapshots does not \
-                         delete from it; grant stream.trim on it (felixd init adds the grants, and \
-                         stream.manage includes it)"
+                         delete from it; to let it delete, run `felixd init --grant-trim`, \
+                         finalize the head_trim fleet feature and re-mint the node's token"
                     );
                 }
                 pause(kind);

@@ -90,20 +90,36 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
 }
 
 /// Writes every rule of [`grants::policies`] the control plane does not hold,
-/// so running it again writes nothing. It first lists every rule and role
-/// assignment and refuses, writing nothing, when a felixd role holds more than
-/// [`grants::policies`] gives it or one principal holds two roles
-/// ([`grants::audit`]). Needs `rbac.view` over the whole tenant, because a
+/// and the node's [`grants::trim_policies`] when `grant_trim`, so running it
+/// again writes nothing. It first lists every rule and role assignment and
+/// refuses, writing nothing, when a felixd role holds more than
+/// [`grants::policies`] and the trim rules give it or one principal holds two
+/// roles ([`grants::audit`]). Trim rules already held stay when `grant_trim`
+/// is off, with a warning. Needs `rbac.view` over the whole tenant, because a
 /// scope-filtered listing could hide the rule that breaks the roles apart; a
 /// token with less is refused. Also needs `rbac.policy.manage`. Assigning
 /// principals to the roles is left to an operator.
-pub async fn ensure_grants(settings: &Settings) -> Result<()> {
+pub async fn ensure_grants(settings: &Settings, grant_trim: bool) -> Result<()> {
     names::validate_namespace(&settings.namespace)?;
     require_tenant_view(settings)?;
     let held: Vec<Policy> = list(settings, "rbac/policies").await?;
     let groupings: Vec<Grouping> = list(settings, "rbac/groupings").await?;
-    let missing = grants::audit(&settings.tenant, &settings.namespace, &held, &groupings)
-        .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
+    let missing = grants::audit(
+        &settings.tenant,
+        &settings.namespace,
+        &held,
+        &groupings,
+        grant_trim,
+    )
+    .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
+    let trims = grants::trim_policies(&settings.tenant, &settings.namespace);
+    if !grant_trim && held.iter().any(|p| trims.contains(p)) {
+        eprintln!(
+            "warning: nodes of {} can still delete history: the node role keeps its stream.trim \
+             rules. Remove them through the control plane's RBAC API to turn deletion off",
+            settings.namespace
+        );
+    }
     for policy in missing {
         let body = serde_json::to_value(&policy)?;
         let (status, text) = call(settings, "POST", "rbac/policies", Some(body)).await?;

@@ -20,7 +20,7 @@ Every command takes the connection flags below. Logging follows `RUST_LOG`, and 
 
 | Command | What it does |
 |---|---|
-| `felixd init <module>` | Brings admission up: creates the namespace and its system namespace, writes the grants of felixd's roles there, and writes admission's spec directly with the control plane token. Running it again with the same module changes nothing. |
+| `felixd init <module>` | Brings admission up: creates the namespace and its system namespace, writes the grants of felixd's roles there, and writes admission's spec directly with the control plane token. `--grant-trim` also lets nodes delete history under `--keep-snapshots` (off by default, see [Grants](../../docs/design.md#grants)). Running it again with the same module changes nothing. |
 | `felixd run [flags] <module>` | Where admission runs, uploads the module, publishes a request on `sys.intake` and prints admission's decision, exiting 1 on a rejection. Otherwise stores the module, creates the workload's streams and starts it. `--id` and `--input` are required; repeat `--input` for several, merged through a merge log. |
 | `felixd agent` | Runs workloads on this node: claims the lease of each free one and runs it while the lease holds. |
 | `felixd check` | Replays each workload over its input, or its merge log, and reports problems in its output stream and merge log. Exits 1 if it finds any. |
@@ -105,8 +105,8 @@ felixd run --id scheduler --input sys.specs --input sys.facts scheduler.wasm
 Nodes then follow its assignments, with first claim wins as the fallback. Stopping it (removing
 its spec) puts every node back on first claim wins. A node needs publish on `sys.facts` and read
 on `wl.scheduler.out` for this. Submit it with `--keep-snapshots` to have its holder delete the
-facts no kept snapshot reads; that needs trim on `sys.facts`, which `felixd init` grants nodes
-(run it again after upgrading). See [Retention](../../docs/design.md#retention).
+facts no kept snapshot reads; that needs trim on `sys.facts`, which `felixd init --grant-trim`
+grants nodes along with the namespace's streams (off by default). See [Retention](../../docs/design.md#retention).
 
 To admit work through admission, run `felixd init admission.wasm` (the container image has it at
 `/usr/local/share/felixd/admission.wasm`) once per namespace. From then on `felixd run` publishes

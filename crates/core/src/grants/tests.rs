@@ -75,9 +75,9 @@ fn group(user: &str, role: Role) -> Grouping {
 
 #[test]
 fn an_audit_returns_only_the_missing_rules() {
-    assert_eq!(audit("t", "prod", &[], &[]).unwrap(), all());
-    assert!(audit("t", "prod", &all(), &[]).unwrap().is_empty());
-    let missing = audit("t", "prod", &held(Role::Node), &[]).unwrap();
+    assert_eq!(audit("t", "prod", &[], &[], false).unwrap(), all());
+    assert!(audit("t", "prod", &all(), &[], false).unwrap().is_empty());
+    let missing = audit("t", "prod", &held(Role::Node), &[], false).unwrap();
     assert_eq!(missing.len(), all().len() - held(Role::Node).len());
 }
 
@@ -89,7 +89,7 @@ fn a_wider_rule_under_a_felixd_role_is_refused() {
         object: "stream:t/prod.sys/*".to_owned(),
         action: "stream.publish".to_owned(),
     });
-    assert!(audit("t", "prod", &rules, &[]).is_err());
+    assert!(audit("t", "prod", &rules, &[], false).is_err());
     // Rules of other subjects and of another namespace's roles are not ours.
     let mut other = all();
     other.push(Policy {
@@ -102,105 +102,102 @@ fn a_wider_rule_under_a_felixd_role_is_refused() {
         object: "stream:t/prod.x/*".to_owned(),
         action: "stream.publish".to_owned(),
     });
-    assert!(audit("t", "prod", &other, &[]).unwrap().is_empty());
+    assert!(audit("t", "prod", &other, &[], false).unwrap().is_empty());
     let mut unknown = all();
     unknown.push(Policy {
         subject: "role:felixd.prod.extra".to_owned(),
         object: "stream:t/prod/*".to_owned(),
         action: "stream.manage".to_owned(),
     });
-    assert!(audit("t", "prod", &unknown, &[]).is_err());
+    assert!(audit("t", "prod", &unknown, &[], false).is_err());
 }
 
 #[test]
 fn a_principal_holding_two_roles_or_a_nested_role_is_refused() {
     let one = [group("alice", Role::Node), group("bob", Role::Admission)];
-    assert!(audit("t", "prod", &all(), &one).is_ok());
+    assert!(audit("t", "prod", &all(), &one, false).is_ok());
     let both = [group("alice", Role::Node), group("alice", Role::Admission)];
-    assert!(audit("t", "prod", &all(), &both).is_err());
+    assert!(audit("t", "prod", &all(), &both, false).is_err());
     let nested = [Grouping {
         user: Role::Node.subject("prod"),
         role: "role:admin".to_owned(),
     }];
-    assert!(audit("t", "prod", &all(), &nested).is_err());
+    assert!(audit("t", "prod", &all(), &nested, false).is_err());
     let unknown = [Grouping {
         user: "alice".to_owned(),
         role: "role:felixd.prod.extra".to_owned(),
     }];
-    assert!(audit("t", "prod", &all(), &unknown).is_err());
+    assert!(audit("t", "prod", &all(), &unknown, false).is_err());
 }
 
-/// `keep_snapshots` trims `.snap` and the merge log from the node that holds
-/// the workload, so a node is granted `stream.trim` on the workload streams
-/// and no role is granted it on the system namespace as a whole. Admission's
-/// `stream.manage` includes it at the broker.
+/// Deleting history is off until the operator asks for it: no role holds
+/// `stream.trim` in what `init` always writes, and the opt-in rules are the
+/// node's: the workload namespace, and `sys.facts` by exact name (a wildcard
+/// on `sys.*` would reach `sys.specs`). (Admission's `stream.manage` includes
+/// trim at the broker.)
 #[test]
-fn a_node_may_trim_workload_streams_but_not_the_system_namespace() {
-    assert!(holds(Role::Node, "stream.trim", "stream:t/prod/*"));
-    for role in [Role::Admission, Role::Submitter] {
-        assert!(!holds(role, "stream.trim", "stream:t/prod/*"), "{role:?}");
-    }
-    assert!(!holds(Role::Node, "stream.trim", "stream:t/prod.sys/*"));
-}
-
-/// The scheduler's holder deletes the facts it no longer reads, so nodes may
-/// trim `sys.facts` and no other system stream, by exact name: Felix has no
-/// narrower grant than the name, and a wildcard would reach `sys.specs`.
-#[test]
-fn a_node_may_trim_sys_facts_and_no_other_system_stream() {
-    assert!(holds(
-        Role::Node,
-        "stream.trim",
-        "stream:t/prod.sys/sys.facts"
-    ));
-    for role in [Role::Admission, Role::Submitter] {
+fn no_role_is_granted_trim_unless_asked() {
+    for role in Role::ALL {
         assert!(
-            !holds(role, "stream.trim", "stream:t/prod.sys/sys.facts"),
+            role_policies(role, "t", "prod")
+                .iter()
+                .all(|p| p.action != "stream.trim"),
             "{role:?}"
         );
     }
-    let trims: Vec<_> = role_policies(Role::Node, "t", "prod")
-        .into_iter()
-        .filter(|p| p.action == "stream.trim" && p.object.contains("prod.sys"))
-        .map(|p| p.object)
-        .collect();
-    assert_eq!(trims, ["stream:t/prod.sys/sys.facts"]);
-}
-
-/// A namespace set up before nodes could trim `sys.facts` gets the grant when
-/// `init` runs again, and nothing else changes.
-#[test]
-fn init_adds_the_facts_trim_grant_to_a_namespace_set_up_without_it() {
-    let facts = "stream:t/prod.sys/sys.facts";
-    let held: Vec<Policy> = policies("t", "prod")
-        .into_iter()
-        .filter(|p| !(p.action == "stream.trim" && p.object == facts))
-        .collect();
-    let missing = audit("t", "prod", &held, &[]).unwrap();
+    let node = Role::Node.subject("prod");
+    let rule = |object: &str| Policy {
+        subject: node.clone(),
+        object: object.to_owned(),
+        action: "stream.trim".to_owned(),
+    };
     assert_eq!(
-        missing,
-        vec![Policy {
-            subject: Role::Node.subject("prod"),
-            object: facts.to_owned(),
-            action: "stream.trim".to_owned(),
-        }]
+        trim_policies("t", "prod"),
+        [rule("stream:t/prod/*"), rule("stream:t/prod.sys/sys.facts")]
     );
 }
 
-/// `felixd init` writes what `audit` returns as missing, so a namespace set up
-/// before `stream.trim` existed gets it for the node role when `init` runs
-/// again, and nothing else changes.
+/// `felixd init` writes what `audit` returns as missing: the trim rule only
+/// with `--grant-trim`, and only once.
 #[test]
-fn init_adds_the_trim_grant_to_a_namespace_set_up_without_it() {
-    let held: Vec<Policy> = policies("t", "prod")
-        .into_iter()
-        .filter(|p| p.action != "stream.trim")
-        .collect();
-    let missing = audit("t", "prod", &held, &[]).unwrap();
-    assert!(missing.iter().all(|p| p.action == "stream.trim"));
-    assert!(missing.contains(&Policy {
-        subject: Role::Node.subject("prod"),
-        object: "stream:t/prod/*".to_owned(),
-        action: "stream.trim".to_owned(),
-    }));
+fn init_writes_the_trim_grant_only_when_asked() {
+    assert_eq!(audit("t", "prod", &[], &[], false).unwrap(), all());
+    let mut with_trim = all();
+    with_trim.extend(trim_policies("t", "prod"));
+    assert_eq!(audit("t", "prod", &[], &[], true).unwrap(), with_trim);
+    assert_eq!(
+        audit("t", "prod", &all(), &[], true).unwrap(),
+        trim_policies("t", "prod")
+    );
+    let mut held = with_trim;
+    assert!(audit("t", "prod", &held, &[], true).unwrap().is_empty());
+    // A namespace that holds only the workload rule gets the facts rule.
+    held.pop();
+    assert_eq!(
+        audit("t", "prod", &held, &[], true).unwrap(),
+        [trim_policies("t", "prod").pop().unwrap()]
+    );
+}
+
+/// Running `init` without the flag after it was run with it neither fails nor
+/// takes the grant back.
+#[test]
+fn a_held_trim_grant_is_not_an_error_without_the_flag() {
+    let mut held = all();
+    held.extend(trim_policies("t", "prod"));
+    assert!(audit("t", "prod", &held, &[], false).unwrap().is_empty());
+    // Only that rule: the same action on the system namespace is too wide.
+    let mut wider = all();
+    wider.push(Policy {
+        object: "stream:t/prod.sys/*".to_owned(),
+        ..trim_policies("t", "prod").remove(0)
+    });
+    assert!(audit("t", "prod", &wider, &[], true).is_err());
+    // And another role does not get it.
+    let mut other = all();
+    other.push(Policy {
+        subject: Role::Submitter.subject("prod"),
+        ..trim_policies("t", "prod").remove(0)
+    });
+    assert!(audit("t", "prod", &other, &[], true).is_err());
 }

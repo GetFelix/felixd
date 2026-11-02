@@ -1042,34 +1042,42 @@ reaches none of them.
 
 | Principal | May |
 |---|---|
-| Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; trim every stream of the namespace (`stream.trim`), which `keep_snapshots` uses on `wl.*.snap` and `wl.*.merge`, and `sys.facts` by name, which the scheduler's holder trims under `keep_snapshots`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
+| Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
 | Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
 | Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
-| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. The one direct write left. Not written by `init` |
+| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. With `--grant-trim`, also the node's `stream.trim` on the namespace and `sys.facts` (below). The one direct write left. Not written by `init` |
 | Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
 
-Residual of `stream.trim`: the node role is granted it over `<namespace>/*` and
-over `<namespace>.sys/sys.facts`, the one system stream it may trim, by exact name
-so that `sys.specs` stays out of reach. It is granted over `<namespace>/*`, so
-a node's credential can trim any stream in the namespace, not only the `.snap`
-and merge log it deletes from: inputs, other workloads' outputs and
-`wl.admission.out` included. The node's publish grant has the same reach, but
-publishing only appends, and a trim erases history for every reader and cannot
-be undone. Felix grants a stream by its exact name or a whole namespace's
-streams. A grant per workload would need admission to write RBAC policies when
-it accepts a workload, and putting `.snap` and the merge log in a namespace of
-their own would rename every existing stream, so neither is done here. Per-lease
-tokens (#74) are what would narrow it. A node's token also carries `stream.trim`
-only after the fleet has finalized `head_trim` and the token is next minted or
-refreshed.
+The node role's `stream.trim` is not in the table because `felixd init`
+leaves it out unless asked. (Admission's `stream.manage` includes trim, see
+below.) `felixd init --grant-trim` adds two rules to the node role: it may trim every
+stream of the namespace, and `sys.facts` by exact name (the one system stream
+it may trim, so that `sys.specs` stays out of reach), which the scheduler's
+holder trims under `--keep-snapshots`. Without it, history deletion stays off: a workload
+with `--keep-snapshots` still records its floors, and its nodes delete nothing
+(see [What a node needs](#what-a-node-needs)). Running `init` again without
+the flag does not take the rules back; remove them with the control plane's RBAC
+API. The nodes need new tokens to carry them, and Felix puts them in a token only
+after the fleet has finalized `head_trim`.
+
+Residual of `--grant-trim`: Felix grants a stream by its exact name or a whole
+namespace's streams, so a node's credential can then trim any stream in the
+namespace, not only the `.snap` and merge log it deletes from: inputs, other
+workloads' outputs and `wl.admission.out` included. The node's publish grant
+has the same reach, but publishing only appends, and a trim erases history for
+every reader and cannot be undone. That is why it is opt-in. A grant per
+workload would need admission to write RBAC policies when it accepts a
+workload, and putting `.snap` and the merge log in a namespace of their own
+would rename every existing stream, so neither is done. Per-lease tokens
+(#74) are what would narrow it.
 
 Residuals of `stream.manage`: Felix has no create-only stream action, and
 `stream.manage` over `<namespace>/*` also covers deleting or patching a
 stream and operating its consumer groups (`group.manage`). Admission's
-credential can delete or patch any workload stream. Nothing in
-`<namespace>.sys` is in its reach.
+credential can delete, patch or trim any workload stream, with or without
+`--grant-trim`. Nothing in `<namespace>.sys` is in its reach.
 
 `felixd init` audits before it writes. It lists every rule and role
 assignment, needs `rbac.view` over the whole tenant because the control plane
@@ -1206,12 +1214,16 @@ workload:
   cannot open, so take a backup first (see `head_trim` in Felix's upgrade
   guide). `deploy/compose.yaml` and the test stacks finalize it
   after the brokers are up.
-- **The node's token carries `stream.trim`.** `felixd init` grants it to the
-  node role over the namespace's streams (see [Grants](#grants)), and
-  `stream.manage` includes it. Felix's control plane mints it into broker tokens
-  only after `head_trim` is finalized.
+- **The node's token carries `stream.trim`.** Run `felixd init --grant-trim`
+  to give it to the node role over the namespace's streams, and read the
+  residual under [Grants](#grants) first: it lets any node erase any stream in
+  the namespace. Then mint the nodes new tokens, and if the mint names the
+  actions to request, add `stream.trim`. `stream.manage` includes `stream.trim`, and
+  Felix's control plane mints it into broker tokens only after `head_trim` is
+  finalized. A node whose token lacks it, for either reason, gets a refusal
+  that looks the same, so the warning names both steps.
 
-Without either, the holder logs one warning, naming the fix, and the workload
+Without either, the holder logs one warning, and the workload
 carries on with `.snap` and the merge log growing as before. After ten
 seconds, the first snapshot or resume tries again, so the deletion starts soon
 after the fleet finalizes the feature or the grant arrives, with no restart. A trim whose answer times
@@ -1240,9 +1252,9 @@ reports, up to three more times, and then leaves it to the next snapshot. That
 is safe for the same reason as before: a trim only hides offsets below a floor
 already on `.out`.
 
-Nodes hold `stream.trim` on `sys.facts` by exact name ([Grants](#grants)), so
-run `felixd init` again after upgrading. A node whose token lacks only that
-grant logs one warning, keeps its facts and tries again after ten seconds at
+`felixd init --grant-trim` gives nodes `stream.trim` on `sys.facts` by exact
+name along with the namespace ([Grants](#grants)); mint the nodes new
+tokens afterwards. A node whose token lacks only that grant logs one warning, keeps its facts and tries again after ten seconds at
 its next scheduler snapshot; it goes on deleting `.snap` and the merge log of
 every workload it holds.
 

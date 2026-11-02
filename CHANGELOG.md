@@ -114,19 +114,24 @@
   conditional head trim, up to the record's floors, and a holder that resumes
   deletes whatever a crash left. Inputs and `.out` are not deleted (#150).
   Needs the Felix fleet to have finalized `head_trim`, which is a one-way step
-  (back up first), and `stream.trim` on the node's token. Without either, the
-  node logs one warning and the workload runs on without deleting. `felixd
-  check` and `felixd replay` read `.snap` from the oldest offset Felix holds,
-  and stop with the stream and the oldest offset when they need a merge log
-  entry that was deleted. The compose files and the cluster test stack finalize
-  `head_trim`.
-- Upgrading: `felixd init` adds `stream.trim` on the namespace's streams to the
-  node role. Run `init` again to pick it up, and re-mint node tokens once the
-  fleet has finalized `head_trim`, since Felix puts the grant in tokens only
-  after that. Felix grants a stream by its exact name or a whole namespace, so
-  a node's credential can then trim any stream in it, inputs and other
-  workloads' outputs included. Unlike publishing, a trim erases history for
-  every reader and cannot be undone.
+  (back up first), and `stream.trim` on the node's token, which is off by
+  default: `felixd init --grant-trim` grants it to the node role. Without
+  either, the node logs one warning and the workload runs on without deleting.
+  `felixd check` and `felixd replay` read `.snap` from the oldest offset Felix
+  holds, and stop with the stream and the oldest offset when they need a merge
+  log entry that was deleted. The compose files and the cluster test stack
+  finalize `head_trim`.
+- `felixd init --grant-trim` (part of #19). Grants the node role `stream.trim`
+  on the namespace's streams, so nodes can delete history. Felix grants a
+  stream by its exact name or a whole namespace, so a node's credential can
+  then trim any stream in it, inputs and other workloads' outputs included,
+  and a trim erases history for every reader and cannot be undone. Without the
+  flag `init` grants no trim and nothing is deleted. Re-mint node tokens once
+  the fleet has finalized `head_trim`, since Felix puts the grant in tokens
+  only after that. Running `init` without the flag later keeps the rules;
+  remove them with the control plane's RBAC API. The flag also grants the node
+  role `stream.trim` on `sys.facts` by exact name (#164), so the scheduler's
+  run can delete facts; without it the facts are kept.
 - Trimming `sys.facts` (#164). The one input that is deleted: a scheduler run
   with `--keep-snapshots` also deletes `sys.facts` below the floor its trim
   record names for that input, the same step that deletes `.snap` and the merge
@@ -143,10 +148,6 @@
   deleted history says which stream it needed and the oldest offset Felix
   holds, as it does for the merge log. `wl.scheduler.out` is not trimmed yet
   (#150).
-- Upgrading: `felixd init` adds `stream.trim` on `sys.facts` to the node role,
-  by exact name. Run `init` again to pick it up, and re-mint node tokens once
-  the fleet has finalized `head_trim`. A node without it logs one warning and
-  keeps the facts; it still deletes `.snap` and the merge logs it holds.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.

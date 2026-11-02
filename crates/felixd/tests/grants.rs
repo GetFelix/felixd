@@ -1,5 +1,7 @@
 //! The grants docs/design.md gives felixd's roles hold: a node runs a
-//! workload whose input it may read but not publish to; `felixd init` writes
+//! workload whose input it may read but not publish to, and one without
+//! `stream.trim` runs a `keep_snapshots` workload without deleting;
+//! `felixd init` writes
 //! the roles' grants, once however often it runs; a submitter and a node are
 //! refused on `sys.specs` and on creating streams; and with each principal
 //! holding only its role, admission records an accepted spec and the
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::{INPUT, OUTPUT, TestFelix, eventually, replication_factor, test_felix_in};
+use common::{INPUT, OUTPUT, SNAPSHOTS, TestFelix, eventually, replication_factor, test_felix_in};
 use felix_client::{BrokerError, ErrorCode};
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::admission;
@@ -27,6 +29,7 @@ use felixd_agent::felix::Felix;
 use felixd_agent::settings::{Secret, Settings};
 use felixd_core::grants::{self, Policy};
 use felixd_core::names;
+use felixd_core::output;
 use felixd_core::spec::SpecRecord;
 
 const NAMESPACE: &str = "restricted";
@@ -46,7 +49,11 @@ async fn a_node_without_publish_on_its_input_runs_the_workload() {
     let Some(t) = test_felix_in(Some(NAMESPACE)).await else {
         return;
     };
-    t.submit("counter", &[]).await;
+    t.submit(
+        "counter",
+        &["--snapshot-every", "5", "--keep-snapshots", "2"],
+    )
+    .await;
     // The namespace outlives a run against the same stack, so count from
     // what is already there.
     let before = t.read_all(INPUT).await.len();
@@ -64,6 +71,28 @@ async fn a_node_without_publish_on_its_input_runs_the_workload() {
     .await;
     assert!(agent.alive());
     assert_eq!(t.needs_operator().await.0, []);
+
+    // The token has no `stream.trim`, which is what `init` without
+    // `--grant-trim` leaves a node with. The holder records the floors it
+    // would delete to and carries on: no error, nothing deleted.
+    t.publish_all(INPUT, (3..40u64).map(|i| i.to_be_bytes().to_vec()))
+        .await;
+    let want = before + 40;
+    eventually("a trim record", Duration::from_secs(60), || async {
+        let records = t.read_all(OUTPUT).await;
+        let trimmed = records
+            .iter()
+            .any(|(_, r)| output::decode(r).is_ok_and(|r| r.trim().is_some()));
+        (trimmed && t.outputs(OUTPUT).await.len() >= want).then_some(())
+    })
+    .await;
+    assert!(agent.alive());
+    assert_eq!(t.needs_operator().await.0, []);
+    assert_eq!(
+        t.readable_from(SNAPSHOTS).await,
+        0,
+        "a node without the grant deleted"
+    );
 }
 
 /// Each role's tokens, after `felixd init` has granted the roles.
@@ -360,6 +389,45 @@ async fn init_refuses_a_felixd_role_that_holds_more_than_its_grants() {
         [wider],
         "init granted something beside the wider rule"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `felixd init` leaves `stream.trim` out unless asked, and `--grant-trim`
+/// adds the node's two rules (the namespace and `sys.facts`) once each, however often it runs and whether or not a later
+/// run repeats the flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn init_grants_trim_only_with_the_flag() {
+    // A namespace of its own, so a rule from an earlier run is not there.
+    let Some(t) = test_felix_in(None).await else {
+        return;
+    };
+    let trims = grants::trim_policies(&t.settings.tenant, &t.settings.namespace);
+    let dir = std::env::temp_dir().join(format!("felixd-trim-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("admission.wasm");
+    std::fs::write(&module, felixd_testkit::workload("admission")).unwrap();
+    let replicas = replication_factor().to_string();
+    let trim_rules = |t: &TestFelix| {
+        list_policies(&t.settings)
+            .iter()
+            .filter(|p| trims.contains(p))
+            .count()
+    };
+    for (flags, want) in [
+        (&[][..], 0),
+        (&["--grant-trim"], 2),
+        (&["--grant-trim"], 2),
+        (&[], 2),
+    ] {
+        let status = t
+            .felixd(&["init", "--replication-factor", &replicas])
+            .args(flags)
+            .arg(&module)
+            .status()
+            .unwrap();
+        assert!(status.success(), "felixd init {flags:?} failed");
+        assert_eq!(trim_rules(&t), want, "after felixd init {flags:?}");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
