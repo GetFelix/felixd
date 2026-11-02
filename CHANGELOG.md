@@ -159,6 +159,19 @@
 - `felixd ps` shows each workload's state (running, waiting, needs operator
   with the reason, failed, stopped), holder, epoch, output stream tail and how
   far it is along each input, and each node, all read from records (#17).
+- Trim records carry the stream's lineage, and `felixd check` starts from a
+  snapshot (#150). A trim record on the output stream now also holds the spec
+  record of the stream's first claim, copied from trim to trim, and the highest
+  spec record claimed so far. Once a cut head has taken the first claim, the
+  agent, `felixd run` and `felixd check` read what the stream was written under
+  from the oldest record Felix keeps, and the stale-spec check stops at a trim
+  record. Trim records without the new fields still read. `felixd check`
+  still replays from the first input; once the head of the output stream is
+  deleted it restores the oldest snapshot the last trim record keeps and checks
+  what follows it, the merge log from the entry at its step. `--from-snapshot`
+  asks for that earlier and `--from-start` refuses it. A snapshot's state is
+  taken as given and outputs below its tail are not compared.
+  Deleting `.out` and the floors downstream readers need remain (#150).
 - `felixd drain <node>` makes a node release its leases, so other nodes take
   its workloads over without waiting for them to expire, and claim nothing
   until `felixd undrain <node>` (#17). `felixd run` creates the new `drains`

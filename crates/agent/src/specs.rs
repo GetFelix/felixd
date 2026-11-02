@@ -1,7 +1,7 @@
 //! Spec records on `sys.specs`: appending one, reading one back, and folding
 //! a workload's history.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use felix_client::{CacheCondition, ConditionalWrite};
 use felixd_core::class::OperatorReason;
@@ -10,7 +10,7 @@ use felixd_core::output::{self, Record};
 use felixd_core::spec::{SpecRecord, WorkloadSpec, moves_forward};
 
 use crate::admission::{self, Gate};
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::runner::NeedsOperator;
 
 /// Appends `record` at the tail of `sys.specs` and returns its offset, which
@@ -147,42 +147,113 @@ pub(crate) async fn project(felix: &Felix, id: &str, spec: &WorkloadSpec) -> Res
 /// memory stays bounded however long the stream or large its records.
 const LOOK_RECORDS: u64 = 16;
 
-/// The spec the first claim on workload `id`'s output stream names. Owners
-/// refuse a spec whose module or input differ from it, so everything on the
-/// stream was written under that module and input. `None` for a stream with
-/// no claim, or whose first claim or output predates spec records.
+/// The spec whose module and input workload `id`'s output stream was written
+/// under. Owners refuse a spec whose module or input differ from the first
+/// claim's, so that is everything on the stream. `None` for a stream with no
+/// claim, or whose first claim or output predates spec records.
+///
+/// When Felix has deleted the stream's head, the first claim is gone. A trim
+/// record carries the first claim's spec forward, and any claim that
+/// survives names a spec with the same module and input, so the answer is
+/// the first of those.
 pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<WorkloadSpec>> {
-    let stream = names::output_stream(id);
-    let Some((offset, first)) = first_run_record(felix, &stream).await? else {
-        return Ok(None);
-    };
-    match output::decode(&first) {
-        Ok(Record::Claim {
-            spec: Some(spec), ..
-        }) => Ok(Some(read(felix, id, spec).await?)),
-        Ok(_) => Ok(None),
-        Err(error) => bail!("{stream}:{offset}: {error}"),
+    match written_record(felix, &names::output_stream(id)).await? {
+        Some(spec) => Ok(Some(read(felix, id, spec).await?)),
+        None => Ok(None),
     }
 }
 
-/// The first record on `stream` that is not a needs-operator record, with
-/// its offset. A needs-operator record can be written before any claim and
-/// ran nothing, so it never says what the stream was written under.
-/// It is judged from its header, so a reason this build cannot read counts too:
-/// a newer build may have written it, and the way out is to submit a new spec.
+/// The spec record [`written_under`] reads.
+pub(crate) async fn written_record(felix: &Felix, stream: &str) -> Result<Option<u64>> {
+    let tail = felix.tail(stream).await?;
+    written_record_in(stream, tail, |from, end| page_of(felix, stream, from, end)).await
+}
+
+/// [`written_record`] over `read`, which returns the page of records
+/// starting at `from` and below `end`, as [`Felix::read_page`] does.
+async fn written_record_in<F, Fut>(stream: &str, tail: u64, mut read: F) -> Result<Option<u64>>
+where
+    F: FnMut(u64, u64) -> Fut,
+    Fut: Future<Output = Result<Page>>,
+{
+    let (first, cut) = first_held(0, tail, ran_something, &mut read).await?;
+    let Some((offset, record)) = first else {
+        return Ok(None);
+    };
+    let mut named = spec_named(&record).map_err(|e| anyhow!("{stream}:{offset}: {e}"))?;
+    if named.is_none() && cut {
+        let carrier = |record: &[u8]| spec_named(record).is_ok_and(|spec| spec.is_some());
+        if let (Some((at, record)), _) = first_held(offset, tail, carrier, &mut read).await? {
+            named = spec_named(&record).map_err(|e| anyhow!("{stream}:{at}: {e}"))?;
+        }
+    }
+    Ok(named)
+}
+
+/// The spec record a claim names, or a trim record carries as the first
+/// claim's.
+fn spec_named(record: &[u8]) -> Result<Option<u64>, felixd_core::DecodeError> {
+    Ok(output::decode(record)?.names_spec())
+}
+
+/// The first record on `stream` that Felix still holds and that is not a
+/// needs-operator record, with its offset. A needs-operator record can be
+/// written before any claim and ran nothing, so it never says what the stream
+/// was written under. It is judged from its header, so a reason this build
+/// cannot read counts too: a newer build may have written it, and the way out
+/// is to submit a new spec.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
     let tail = felix.tail(stream).await?;
-    let mut next = 0;
+    let read = |from, end| page_of(felix, stream, from, end);
+    Ok(first_held(0, tail, ran_something, read).await?.0)
+}
+
+/// A page of `(offset, payload)` records and the offset the next one starts at.
+type Page = (Vec<(u64, Bytes)>, u64);
+
+async fn page_of(felix: &Felix, stream: &str, from: u64, end: u64) -> Result<Page> {
+    let (page, after) = felix.read_page(stream, from, end).await?;
+    Ok((
+        page.into_iter().map(|r| (r.offset, r.payload)).collect(),
+        after,
+    ))
+}
+
+/// The first record at `from..tail` that `wanted` accepts, and whether Felix
+/// had deleted the stream's head, so that the search began at the oldest
+/// record it keeps. `read` is as for [`written_record_in`].
+async fn first_held<F, Fut>(
+    from: u64,
+    tail: u64,
+    wanted: impl Fn(&[u8]) -> bool,
+    mut read: F,
+) -> Result<(Option<(u64, Bytes)>, bool)>
+where
+    F: FnMut(u64, u64) -> Fut,
+    Fut: Future<Output = Result<Page>>,
+{
+    let mut next = from;
+    let mut cut = false;
     while next < tail {
         let end = tail.min(next + LOOK_RECORDS);
-        let (page, after) = felix.read_page(stream, next, end).await?;
-        let found = page.into_iter().find(|r| ran_something(&r.payload));
-        if let Some(found) = found {
-            return Ok(Some((found.offset, found.payload)));
+        let (page, after) = match read(next, end).await {
+            Ok(read) => read,
+            // History below the oldest offset Felix holds is gone.
+            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
+                Some(oldest) if oldest > next => {
+                    next = oldest;
+                    cut = true;
+                    continue;
+                }
+                _ => return Err(error),
+            },
+        };
+        if let Some(found) = page.into_iter().find(|(_, payload)| wanted(payload)) {
+            return Ok((Some(found), cut));
         }
         next = after;
     }
-    Ok(None)
+    Ok((None, cut))
 }
 
 /// Whether `record` is anything but a needs-operator record. Judged from its
@@ -250,38 +321,49 @@ pub(crate) async fn refuse_stale_or_foreign(
 
 /// The highest spec record claimed on `stream` below `end`: the floor of
 /// the last claim, raised by any needs-operator record after it, since that
-/// record's writer passed the same refusals a claimer does. `None` if there
-/// is neither, or the last claim predates spec records and no needs-operator
-/// record follows it. It pages back from `end` a few records at a time and
-/// stops at the first claim of any kind, so it reads every output since the
-/// last takeover but holds only one page.
+/// record's writer passed the same refusals a claimer does. A trim record
+/// carries the same floor, so the walk also stops at the last one that does.
+/// `None` if there is neither, or the last claim predates spec records and
+/// no needs-operator record follows it. It pages back from `end` a few
+/// records at a time, so it reads every output since the last takeover or
+/// trim but holds only one page, and ends at the oldest record Felix holds.
 pub(crate) async fn claim_floor(felix: &Felix, stream: &str, end: u64) -> Result<Option<u64>> {
     claim_floor_in(end, |from, end| async move {
-        let records = felix.read_range(stream, from, end).await?;
-        Ok(records.into_iter().map(|r| r.payload).collect())
+        let (records, ended) = felix.read_back(stream, from, end).await?;
+        Ok((records.into_iter().map(|r| r.payload).collect(), ended))
     })
     .await
 }
 
-/// [`claim_floor`] over `read`, which returns the payloads at `from..end`.
-/// Never asks for more than [`LOOK_RECORDS`] offsets at once.
+/// [`claim_floor`] over `read`, which returns the payloads at `from..end`
+/// and whether there is nothing older to read. Never asks for more than
+/// [`LOOK_RECORDS`] offsets at once.
 async fn claim_floor_in<F, Fut, P>(end: u64, mut read: F) -> Result<Option<u64>>
 where
     F: FnMut(u64, u64) -> Fut,
-    Fut: Future<Output = Result<Vec<P>>>,
+    Fut: Future<Output = Result<(Vec<P>, bool)>>,
     P: AsRef<[u8]>,
 {
     let mut end = end;
     let mut recorded = None;
     while end > 0 {
         let from = end.saturating_sub(LOOK_RECORDS);
-        for record in read(from, end).await?.iter().rev() {
+        let (records, ended) = read(from, end).await?;
+        for record in records.iter().rev() {
             match output::decode(record.as_ref()) {
                 Ok(Record::Claim { floor, .. }) => return Ok(floor.max(recorded)),
-                Ok(found) => recorded = recorded.max(found.needs_operator_spec()),
+                Ok(found) => {
+                    if let Some(claimed) = found.trim().and_then(|t| t.claimed) {
+                        return Ok(Some(claimed).max(recorded));
+                    }
+                    recorded = recorded.max(found.needs_operator_spec());
+                }
                 // A reason this build cannot read still names the spec it parks.
                 Err(_) => recorded = recorded.max(output::needs_operator_spec_of(record.as_ref())),
             }
+        }
+        if ended {
+            break;
         }
         end = from;
     }
