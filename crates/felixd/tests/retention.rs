@@ -285,7 +285,7 @@ async fn a_shared_input_is_deleted_only_below_the_lowest_floor() {
     // steps 36 and 37, and `check --complete` counts a step still to come as
     // missing.
     eventually(
-        "both to step every input",
+        "both to step the five new inputs",
         Duration::from_secs(60),
         || async {
             (stepped(&t, "wl.fast.out", 37).await && stepped(&t, "wl.slow.out", 37).await)
