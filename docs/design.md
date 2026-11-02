@@ -1117,17 +1117,19 @@ until the kept snapshots pass it.
 The oldest kept snapshot is the one with the lowest step among the last K on
 the stream, not the first of them: a stale holder's snapshot can land after a
 newer holder's and be behind it. A holder trims only once the newest snapshot
-on `.snap` is its own. Until then an earlier holder can still land one, of a
-lower step, that the next resume would restore. Once it is, every snapshot
-written later is from this epoch or a later one and at or past a kept step, so
-the floors never go back, and `trim::plan` refuses one that would.
+on `.snap` is its own. This is a second guard: a later holder's snapshot lands
+only after its claim is on `.out`, and that claim makes this holder's trim
+append fail. Once it is the holder's own, every snapshot written later is from
+this epoch or a later one and at or past a kept step, so the floors never go
+back, and `trim::plan` refuses one that would.
 
 The record goes on `.out` with `publish_if` at the tail like an output, so a
 stale holder's is refused by the next claim. A crash before it lands changes
 nothing, and one after leaves a record the next holder passes over, like a
 claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
 
-Nothing is deleted yet. Felix trims only by age or size, which knows nothing
+Nothing is deleted yet. The TLA models include the deletion that will follow and check these
+floors against it ([formal.md](formal.md#trimming)). Felix trims only by age or size, which knows nothing
 of what a resume needs, and has no call to trim a stream before an offset
 ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). When it does,
 the floors decide different things per stream:
