@@ -14,12 +14,17 @@
 //! The holder then deletes what the record names on the streams that are the
 //! workload's own, `.snap` and the merge log ([`Trim::deletions`]), and only
 //! after the record has landed, so a crash at any point leaves less deleted
-//! than recorded. Inputs are not deleted, as other readers may need them. The
-//! one exception is `sys.facts`, which only the scheduler reads
+//! than recorded.
+//!
+//! An input, or the `.out` of a workload, is read by others too. The holder
+//! trims one only below the lowest floor of all its readers
+//! ([`crate::readers`]), after its own record has landed. `sys.facts`, which
+//! only the scheduler reads, is deleted on the scheduler's floor alone
 //! ([`Trim::facts_floor`]).
 
 use crate::codec::{DecodeError, Reader};
 use crate::names;
+use crate::readers;
 
 /// A snapshot among the last `keep`, as [`plan`] needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,13 +75,14 @@ pub enum Owned {
     MergeLog,
 }
 
-/// The floors a holder has already deleted below, on the streams it owns and
-/// on `sys.facts`. Zero where it has deleted nothing.
+/// The floors a holder has already deleted below, on the streams it owns, on
+/// its `.out` and on `sys.facts`. Zero where it has deleted nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Deleted {
     pub snap_floor: u64,
     pub merge_floor: u64,
     pub facts_floor: u64,
+    pub out_floor: u64,
 }
 
 impl Trim {
@@ -106,6 +112,29 @@ impl Trim {
         let at = inputs.iter().position(|input| input == names::FACTS)?;
         let floor = *self.input_floors.get(at)?;
         (floor > done.facts_floor).then_some(floor)
+    }
+
+    /// The inputs the holder may trim on the readers' word
+    /// ([`crate::readers::deletable_input`]) whose floor in this record is past
+    /// what `done` holds, by position, with this workload's floor. `done` is
+    /// the floor already deleted to per input, empty or short for none.
+    pub fn shared_inputs(&self, inputs: &[String], done: &[u64]) -> Vec<(usize, u64)> {
+        inputs
+            .iter()
+            .zip(&self.input_floors)
+            .enumerate()
+            .filter(|(at, (input, floor))| {
+                readers::deletable_input(input) && **floor > done.get(*at).copied().unwrap_or(0)
+            })
+            .map(|(at, (_, floor))| (at, *floor))
+            .collect()
+    }
+
+    /// Whether this record carries the first claim's spec, which is what lets
+    /// the head of `.out` go ([`crate::spec`] lineage). A stream whose first
+    /// claim named none keeps its head.
+    pub fn keeps_lineage(&self) -> bool {
+        self.first_spec.is_some()
     }
 }
 
