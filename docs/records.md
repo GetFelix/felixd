@@ -228,7 +228,8 @@ A trim, kind 7, names the floors below which this workload's resume reads nothin
 ([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names (by default only once the `.out` head is deleted), and
 `felixd replay` reads from the start while the records are there. Its holder appends it after a snapshot of its own
 when the spec sets `keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed
-deletes `.snap` and the merge log below the snapshot and merge log floors. It continues with:
+deletes `.snap` and the merge log below the snapshot and merge log floors. The scheduler's holder also
+deletes `sys.facts` below the floor for that input; no other input is deleted. It continues with:
 
 | Bytes | Field |
 |---|---|

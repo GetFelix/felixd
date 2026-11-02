@@ -108,17 +108,26 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
         .collect()
 }
 
-/// The node role's grant to delete history under `keep_snapshots`, which
-/// `felixd init --grant-trim` writes and plain `init` does not. Felix grants
-/// by name or the whole namespace, so it lets a node's credential trim any
-/// stream in the namespace, inputs and other workloads' outputs included, and
-/// a trim cannot be undone.
-pub fn trim_policy(tenant: &str, namespace: &str) -> Policy {
-    Policy {
+/// The node role's grants to delete history under `keep_snapshots`, which
+/// `felixd init --grant-trim` writes and plain `init` does not: `stream.trim`
+/// on the workload namespace, and on `sys.facts` by exact name (a grant on
+/// `sys.*` would reach `sys.specs`). Felix grants by name or the whole
+/// namespace, so the first lets a node's credential trim any stream in the
+/// namespace, inputs and other workloads' outputs included, and a trim cannot
+/// be undone.
+pub fn trim_policies(tenant: &str, namespace: &str) -> Vec<Policy> {
+    let sys = names::system_namespace(namespace);
+    [
+        format!("stream:{tenant}/{namespace}/*"),
+        format!("stream:{tenant}/{sys}/{}", names::FACTS),
+    ]
+    .into_iter()
+    .map(|object| Policy {
         subject: Role::Node.subject(namespace),
-        object: format!("stream:{tenant}/{namespace}/*"),
+        object,
         action: "stream.trim".to_owned(),
-    }
+    })
+    .collect()
 }
 
 /// One role assignment, as the control plane's grouping API has it.
@@ -138,10 +147,11 @@ fn is_felixd_subject(namespace: &str, subject: &str) -> bool {
 }
 
 /// Checks what the control plane holds for `namespace` against
-/// [`policies`] and returns the rules still missing, plus [`trim_policy`] when
-/// `grant_trim`. Holding the trim rule is fine either way: `init` without the
-/// flag does not take it back. Any other rule under a felixd role that is
-/// not in [`policies`] (a wider one, or another role) is an error, and so is any grouping that makes a felixd role inherit another
+/// [`policies`] and returns the rules still missing, plus [`trim_policies`]
+/// when `grant_trim`. Holding the trim rules is fine either way: `init`
+/// without the flag does not take them back. Any other rule under a felixd
+/// role that is not in [`policies`] (a wider one, or another role) is an
+/// error, and so is any grouping that makes a felixd role inherit another
 /// role, or gives one principal two of the roles: the roles' separation
 /// holds only if nothing else adds to them.
 pub fn audit(
@@ -152,11 +162,11 @@ pub fn audit(
     grant_trim: bool,
 ) -> Result<Vec<Policy>, String> {
     let mut wanted = policies(tenant, namespace);
-    let trim = trim_policy(tenant, namespace);
+    let trim = trim_policies(tenant, namespace);
     for policy in held {
         if is_felixd_subject(namespace, &policy.subject)
             && !wanted.contains(policy)
-            && *policy != trim
+            && !trim.contains(policy)
         {
             return Err(format!(
                 "{} holds {} on {}, which felixd does not grant it",
@@ -193,7 +203,7 @@ pub fn audit(
         }
     }
     if grant_trim {
-        wanted.push(trim);
+        wanted.extend(trim);
     }
     Ok(wanted.into_iter().filter(|p| !held.contains(p)).collect())
 }

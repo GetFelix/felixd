@@ -1138,19 +1138,21 @@ reaches none of them.
 | Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
 | Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
 | Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Admission records the requester but the shipped policy has no ownership rule, so any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it; a policy that lists requesters limits who may ask at all |
-| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. With `--grant-trim`, also the node's `stream.trim` (below). The one direct write left. Not written by `init` |
+| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. With `--grant-trim`, also the node's `stream.trim` on the namespace and `sys.facts` (below). The one direct write left. Not written by `init` |
 | Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
 
 The node role's `stream.trim` is not in the table because `felixd init`
 leaves it out unless asked. (Admission's `stream.manage` includes trim, see
-below.) `felixd init --grant-trim` adds one rule: the node role may trim every
-stream of the namespace. Without it, history deletion stays off: a workload
+below.) `felixd init --grant-trim` adds two rules to the node role: it may trim every
+stream of the namespace, and `sys.facts` by exact name (the one system stream
+it may trim, so that `sys.specs` stays out of reach), which the scheduler's
+holder trims under `--keep-snapshots`. Without it, history deletion stays off: a workload
 with `--keep-snapshots` still records its floors, and its nodes delete nothing
 (see [What a node needs](#what-a-node-needs)). Running `init` again without
-the flag does not take the rule back; remove it with the control plane's RBAC
-API. The nodes need new tokens to carry it, and Felix puts it in a token only
+the flag does not take the rules back; remove them with the control plane's RBAC
+API. The nodes need new tokens to carry them, and Felix puts them in a token only
 after the fleet has finalized `head_trim`.
 
 Residual of `--grant-trim`: Felix grants a stream by its exact name or a whole
@@ -1158,7 +1160,10 @@ namespace's streams, so a node's credential can then trim any stream in the
 namespace, not only the `.snap` and merge log it deletes from: inputs, other
 workloads' outputs and `wl.admission.out` included. The node's publish grant
 has the same reach, but publishing only appends, and a trim erases history for
-every reader and cannot be undone. That is why it is opt-in. A grant per
+every reader and cannot be undone. That is why it is opt-in. The rule on
+`sys.facts` adds one more: any node's token can trim it above the scheduler's
+floor, and the next scheduler resume then finds its history gone and needs an
+operator, which leaves placement at first claim wins until it is fixed. A grant per
 workload would need admission to write RBAC policies when it accepts a
 workload, and putting `.snap` and the merge log in a namespace of their own
 would rename every existing stream, so neither is done. Per-lease tokens
@@ -1168,8 +1173,7 @@ Residuals of `stream.manage`: Felix has no create-only stream action, and
 `stream.manage` over `<namespace>/*` also covers deleting or patching a
 stream and operating its consumer groups (`group.manage`). Admission's
 credential can delete, patch or trim any workload stream, with or without
-`--grant-trim`. Nothing in
-`<namespace>.sys` is in its reach.
+`--grant-trim`. Nothing in `<namespace>.sys` is in its reach.
 
 `felixd init` audits before it writes. It lists every rule and role
 assignment, needs `rbac.view` over the whole tenant because the control plane
@@ -1223,7 +1227,9 @@ floors below which this workload's resume reads nothing:
 The holder then deletes `.snap` and the merge log up to those floors, with
 Felix's conditional head trim (`trim_before`; see "Conditional head trim" in
 Felix's `docs/durable-storage.md`). Both streams are the workload's own, so
-only its holder deletes from them. Inputs and `.out` are never deleted by
+only its holder deletes from them. The scheduler's holder also deletes
+`sys.facts`, below its floor for that input ([The scheduler's
+facts](#the-schedulers-facts)). Other inputs and `.out` are never deleted by
 this: see below.
 
 ```mermaid
@@ -1305,12 +1311,12 @@ workload:
   guide). `deploy/compose.yaml` and the test stacks finalize it
   after the brokers are up.
 - **The node's token carries `stream.trim`.** Run `felixd init --grant-trim`
-  to give it to the node role over the namespace's streams, and read the
-  residual under [Grants](#grants) first: it lets any node erase any stream in
-  the namespace. Then mint the nodes new tokens, and if the mint names the
-  actions to request, add `stream.trim`. `stream.manage` includes `stream.trim`, and
-  Felix's control plane mints it into broker tokens only after `head_trim` is
-  finalized. A node whose token lacks it, for either reason, gets a refusal
+  to give it to the node role over the namespace's streams and `sys.facts`,
+  and read the residual under [Grants](#grants) first: it lets any node erase
+  any stream in the namespace. Then mint the nodes new tokens, and if the mint
+  names the actions to request, add `stream.trim`. `stream.manage` includes
+  `stream.trim`, and Felix's control plane mints it into broker tokens only
+  after `head_trim` is finalized. A node whose token lacks it, for either reason, gets a refusal
   that looks the same, so the warning names both steps.
 
 Without either, the holder logs one warning, and the workload
@@ -1322,6 +1328,49 @@ had landed is then a no-op. The trim record is already on
 `.out` in all these cases, so the next successful deletion catches up in one
 call.
 
+### The scheduler's facts
+
+Every node appends a fact to `sys.facts` every `--facts-every-ms` while a
+scheduler runs, so the stream grows with the number of nodes. Only the
+scheduler reads it: `felixd run` and admission refuse a system stream as the
+input of any other workload. The scheduler's trim record names a floor for it like
+for any input, and its holder deletes `sys.facts` below that floor, in the
+same step as `.snap` and the merge log and only after the record has landed.
+A scheduler restored from a snapshot reads facts from the snapshot's position
+on, so what is below the oldest kept snapshot is never read again, and a
+holder that dies mid-way leaves the next one to finish, as for the other
+streams.
+
+Because the stream has many writers, its tail moves between the holder reading
+it and Felix applying the trim. For the streams the holder owns, a refused
+tail is not chased. For `sys.facts` the holder asks again at the tail Felix
+reports, up to three more times, and then leaves it to the next snapshot. That
+is safe for the same reason as before: a trim only hides offsets below a floor
+already on `.out`.
+
+`felixd init --grant-trim` gives nodes `stream.trim` on `sys.facts` by exact
+name along with the namespace ([Grants](#grants)); mint the nodes new
+tokens afterwards. A node whose token lacks only that grant logs one warning, keeps its facts and tries again after ten seconds at
+its next scheduler snapshot; it goes on deleting `.snap` and the merge log of
+every workload it holds.
+
+What stays: the facts from the oldest kept snapshot on, so at most about
+`keep_snapshots` times `--snapshot-every` facts (`--snapshot-every` is 1,000 by default; the
+scheduler counts spec records and facts together), whatever the number of
+nodes. A fact is about 120 bytes for a node with a short id that holds
+nothing, 150 with a 36-character id, plus each held workload's id and three
+bytes. For example, `keep_snapshots 3` at the default keeps at most 3,000
+facts; if each node holds 8 workloads with 20-character ids, a fact is about
+330 bytes and the stream about 1 MB. A shorter `--snapshot-every-ms` keeps
+less: about nodes x (`keep_snapshots` x interval / `--facts-every-ms`) facts,
+so 10 nodes with `keep_snapshots` 3 at the default 30 s and a 10-minute
+interval keep about 600.
+Without `keep_snapshots` on the scheduler nothing is deleted and the stream
+grows as under [Placement](#placement).
+
+`wl.scheduler.out` is not trimmed here. It waits with the other `.out`
+streams for #150.
+
 ### What is not deleted
 
 - An input may be another workload's `.out` or a stream other workloads and
@@ -1329,7 +1378,8 @@ call.
   needs. An input is deleted only below the lowest floor of all its readers
   ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
   workload's floor. Until then the input floors in the record are advice
-  nothing acts on.
+  nothing acts on, except for `sys.facts`, which only the scheduler reads
+  (no other workload may take a system stream as input).
 - `.out` is not trimmed. It is every downstream's input, so it can be cut only
   below every downstream's floor (#150). It also holds the first claim that
   spec lineage reads.
@@ -1385,7 +1435,10 @@ which offset it still holds.
 `felixd check` and `felixd replay` read `.snap` from the oldest offset Felix
 holds, so they work on a workload that has deleted its old snapshots, and
 `felixd replay` otherwise reads each stream from the start while the records
-are there. A replay to an offset restores the nearest snapshot that is still there and whole.
+are there. The scheduler's `sys.facts` is no exception: `replay` reads it only from the
+snapshot it restores, which is above the floor, and `check` of a scheduler that
+has deleted history stops on the merge log or on `sys.facts` and names the one it
+needed. A replay to an offset restores the nearest snapshot that is still there and whole.
 A snapshot that survives but shares a chunk with an older one that was deleted
 is passed over. A merged workload's surviving snapshot whose step is below the
 merge log's floor is not: replay picks it and then fails reading the merge log,
@@ -1429,7 +1482,7 @@ snapshot's output tail, where a cut of the head would leave it.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); `--keep-snapshots` deletes `.snap` and the merge log below the floors it records, [Retention](#retention); deleting inputs waits for #150) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); `--keep-snapshots` deletes `.snap` and the merge log below the floors it records, [Retention](#retention); deleting inputs waits for #150, except `sys.facts`, which the scheduler's holder trims) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
@@ -1582,7 +1635,7 @@ and a snapshot writes only the chunks that changed since the last one, with
 separate fuel from `step`. A module is stored the same way, in chunks
 ([Modules](#modules)). Snapshots are taken by input count and by time,
 `keep_snapshots` deletes old snapshots and the merge log
-([Retention](#retention); inputs wait for #150), and each workload has a
+([Retention](#retention); inputs wait for #150, except the scheduler's `sys.facts`), and each workload has a
 recovery time budget that bounds how far a resume may replay.
 
 ## The workload contract, version 0.2
@@ -1809,7 +1862,9 @@ full node at the defaults so writes about 4.6 MB a day. The agent refuses a
 `--max-workloads` whose largest possible fact would not fit in one record
 (about 125,000). `wl.scheduler.out` gets one
 record per spec record, one per assignment change and a table every ten
-minutes of input time. Neither is trimmed yet (#164).
+minutes of input time. With `keep_snapshots` on the scheduler, `sys.facts` is
+trimmed to what the oldest kept snapshot reads ([The scheduler's
+facts](#the-schedulers-facts)); `wl.scheduler.out` is not trimmed yet (#150).
 
 Mixed versions. A node from before the scheduler ignores assignments and
 claims by first claim wins. That only takes work an assignment meant for

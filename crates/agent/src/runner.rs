@@ -29,7 +29,7 @@ use crate::merge::MergeLog;
 use crate::metrics::{self, InputMetrics, WorkloadMetrics};
 use crate::module_store::{self, Fetched};
 use crate::output::OutputLog;
-use crate::retention::{self, Deletion};
+use crate::retention::{self, Deletion, Kind};
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
 use crate::stuck::Progress;
@@ -1226,7 +1226,8 @@ impl Steps<'_> {
     }
 
     /// Deletes `.snap` and the merge log below the last trim record's floors,
-    /// as far as this owner has not already. Only a record that has landed on
+    /// as far as this owner has not already, and for the scheduler `sys.facts`
+    /// below its floor for that input. Only a record that has landed on
     /// `.out` is acted on, so a crash leaves less deleted than recorded and
     /// the next holder finishes. Never fails the workload: whatever Felix
     /// refuses is asked again at the next snapshot.
@@ -1234,20 +1235,23 @@ impl Steps<'_> {
     /// A trim is a record of its own at the stream's tail. For `.snap` that
     /// moves `snap_tail` on, so the next snapshot write is not refused for it.
     /// The merge log's own append finds its tail moved and carries on from
-    /// where Felix says, since a trim record holds no entry.
+    /// where Felix says, since a trim record holds no entry. Every node
+    /// appends to `sys.facts`, so a trim there is asked again at the tail
+    /// Felix names.
     async fn delete_trimmed(&mut self) {
         let Some(trim) = &self.last_trim else { return };
         let todo = trim.deletions(self.spec.merged(), self.deleted);
-        if todo.is_empty()
+        let Some(id) = names::output_of(&self.spec.output) else {
+            return;
+        };
+        let facts = trim.facts_floor(id, &self.spec.inputs, self.deleted);
+        if (todo.is_empty() && facts.is_none())
             || faults::skip_deletion()
             || !retention::may_delete()
             || !self.fence.holds()
         {
             return;
         }
-        let Some(id) = names::output_of(&self.spec.output) else {
-            return;
-        };
         for (owned, before) in todo {
             let deletion = match owned {
                 Owned::Snapshots => {
@@ -1256,6 +1260,7 @@ impl Steps<'_> {
                         self.snap_stream,
                         before,
                         self.snap_tail,
+                        Kind::Owned,
                     )
                     .await;
                     if let Deletion::Done { landed: Some(at) } = deletion {
@@ -1265,13 +1270,7 @@ impl Steps<'_> {
                 }
                 Owned::MergeLog => {
                     let stream = names::merge_stream(id);
-                    match self.felix.read_tail(&stream).await {
-                        Ok(tail) => retention::trim_stream(self.felix, &stream, before, tail).await,
-                        Err(error) => {
-                            tracing::warn!(stream, %error, "reading the tail to trim at failed");
-                            Deletion::Later
-                        }
-                    }
+                    self.trim_at_tail(&stream, before, Kind::Owned).await
                 }
             };
             match (deletion, owned) {
@@ -1279,6 +1278,23 @@ impl Steps<'_> {
                 (Deletion::Done { .. }, Owned::MergeLog) => self.deleted.merge_floor = before,
                 (Deletion::Unavailable, _) => return,
                 (Deletion::Later, _) => {}
+            }
+        }
+        if let Some(before) = facts.filter(|_| retention::may_delete_facts()) {
+            let deletion = self.trim_at_tail(names::FACTS, before, Kind::Facts).await;
+            if let Deletion::Done { .. } = deletion {
+                self.deleted.facts_floor = before;
+            }
+        }
+    }
+
+    /// Trims `stream` below `before` at the tail Felix reports now.
+    async fn trim_at_tail(&self, stream: &str, before: u64, kind: Kind) -> Deletion {
+        match self.felix.read_tail(stream).await {
+            Ok(tail) => retention::trim_stream(self.felix, stream, before, tail, kind).await,
+            Err(error) => {
+                tracing::warn!(stream, %error, "reading the tail to trim at failed");
+                Deletion::Later
             }
         }
     }

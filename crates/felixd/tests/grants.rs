@@ -405,7 +405,7 @@ async fn init_refuses_a_felixd_role_that_holds_more_than_its_grants() {
 }
 
 /// `felixd init` leaves `stream.trim` out unless asked, and `--grant-trim`
-/// adds the node's rule once, however often it runs and whether or not a later
+/// adds the node's two rules (the namespace and `sys.facts`) once each, however often it runs and whether or not a later
 /// run repeats the flag.
 #[tokio::test(flavor = "multi_thread")]
 async fn init_grants_trim_only_with_the_flag() {
@@ -413,7 +413,7 @@ async fn init_grants_trim_only_with_the_flag() {
     let Some(t) = test_felix_in(None).await else {
         return;
     };
-    let trim = grants::trim_policy(&t.settings.tenant, &t.settings.namespace);
+    let trims = grants::trim_policies(&t.settings.tenant, &t.settings.namespace);
     let dir = std::env::temp_dir().join(format!("felixd-trim-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let module = dir.join("admission.wasm");
@@ -422,14 +422,14 @@ async fn init_grants_trim_only_with_the_flag() {
     let trim_rules = |t: &TestFelix| {
         list_policies(&t.settings)
             .iter()
-            .filter(|p| **p == trim)
+            .filter(|p| trims.contains(p))
             .count()
     };
     for (flags, want) in [
         (&[][..], 0),
-        (&["--grant-trim"], 1),
-        (&["--grant-trim"], 1),
-        (&[], 1),
+        (&["--grant-trim"], 2),
+        (&["--grant-trim"], 2),
+        (&[], 2),
     ] {
         let status = t
             .felixd(&["init", "--replication-factor", &replicas])

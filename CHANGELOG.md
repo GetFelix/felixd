@@ -3,10 +3,13 @@
 ## Unreleased
 
 - Fewer control plane requests per `felixd run` (GetFelix/felix#1760). Since the read back
-  after a 409 (#149), each submit sent about nine extra requests to the control plane, and with
-  1000 workloads starting at once brokers lost their leases and workloads kept being
-  re-claimed. A 409 that says the stream or cache already exists is no longer read back;
-  any other 409 still is. The control plane calls also share one connection.
+  after a 409 (#149), each submit sent about nine extra requests to the control plane. A 409
+  that says the stream or cache already exists is no longer read back; any other 409 still
+  is. The control plane calls also share one connection.
+- Operator docs (#24). `docs/operating.md` covers running a cluster: what to start, the
+  configuration of every command, the grants each role needs, sizing the lease TTL, what failover
+  and replay guarantee, a three-node failover walkthrough, what each `ps` state asks of an
+  operator, and how to upgrade a node.
 - Scale test (#20). The manually run `Scale` workflow starts three Felix brokers and three agents, creates N
   workloads and reports create time, memory, and how long recovery takes when an agent and then a broker is
   killed (`crates/felixd/tests/scale.rs`, `.github/workflows/scale.yml`; see CONTRIBUTING.md). The numbers
@@ -185,8 +188,30 @@
   and a trim erases history for every reader and cannot be undone. Without the
   flag `init` grants no trim and nothing is deleted. Re-mint node tokens once
   the fleet has finalized `head_trim`, since Felix puts the grant in tokens
-  only after that. Running `init` without the flag later keeps the rule; remove
-  it with the control plane's RBAC API.
+  only after that. Running `init` without the flag later keeps the rules;
+  remove them with the control plane's RBAC API. The flag also grants the node
+  role `stream.trim` on `sys.facts` by exact name (#164), so the scheduler's
+  run can delete facts; without it the facts are kept. A namespace that ran
+  `init --grant-trim` before this needs it run again and the nodes' tokens
+  re-minted, and an older felixd's `init` refuses a namespace that holds the
+  new rule.
+- Trimming `sys.facts` (#164). The one input that is deleted: a scheduler run
+  with `--keep-snapshots` also deletes `sys.facts` below the floor its trim
+  record names for that input, the same step that deletes `.snap` and the merge
+  log. Only the scheduler reads `sys.facts`, and `felixd run` now refuses a
+  system stream as the input of any other workload, as admission already did
+  (breaking for a workload submitted without admission: one already running
+  with a system stream is not rechecked, and parks as needing an operator once
+  the scheduler trims). Every node appends to the stream, so a
+  refused tail is asked again at the one Felix reports, up to three more
+  times, where `.snap` and the merge log give up. About `keep-snapshots x
+  snapshot-every` facts stay, each about 150 bytes plus the ids of the
+  workloads its node holds (3 bytes and the id each): about 1 MB for
+  `--keep-snapshots 3` at the default when nodes hold 8 workloads.
+  `felixd replay` of the scheduler starts from a snapshot and is unaffected. `felixd check` of a scheduler that has
+  deleted history says which stream it needed and the oldest offset Felix
+  holds, as it does for the merge log. `wl.scheduler.out` is not trimmed yet
+  (#150).
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.
@@ -250,7 +275,8 @@
 - Upgrading: `felixd run` creates `sys.facts`. To use the scheduler, grant
   nodes publish on `sys.facts` and read on `wl.scheduler.out`. An older node
   ignores assignments and claims by first claim wins, which is safe; upgrade
-  every node to get the placement. `sys.facts` is not trimmed yet (#164).
+  every node to get the placement. `sys.facts` is trimmed only with
+  `--keep-snapshots` on the scheduler (#164, below).
 - `felixd agent --metrics-bind <addr>` (or `FELIXD_METRICS_BIND`) serves
   Prometheus metrics at `/metrics` on that address, and `/live`. Off unless
   given. Per node: leases held, claims by result, handoffs, workloads that

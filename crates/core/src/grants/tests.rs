@@ -131,9 +131,10 @@ fn a_principal_holding_two_roles_or_a_nested_role_is_refused() {
 }
 
 /// Deleting history is off until the operator asks for it: no role holds
-/// `stream.trim` in what `init` always writes, and the one opt-in rule is the
-/// node's, over the workload namespace only. (Admission's `stream.manage`
-/// includes it at the broker.)
+/// `stream.trim` in what `init` always writes, and the opt-in rules are the
+/// node's: the workload namespace, and `sys.facts` by exact name (a wildcard
+/// on `sys.*` would reach `sys.specs`). (Admission's `stream.manage` includes
+/// trim at the broker.)
 #[test]
 fn no_role_is_granted_trim_unless_asked() {
     for role in Role::ALL {
@@ -144,13 +145,15 @@ fn no_role_is_granted_trim_unless_asked() {
             "{role:?}"
         );
     }
+    let node = Role::Node.subject("prod");
+    let rule = |object: &str| Policy {
+        subject: node.clone(),
+        object: object.to_owned(),
+        action: "stream.trim".to_owned(),
+    };
     assert_eq!(
-        trim_policy("t", "prod"),
-        Policy {
-            subject: Role::Node.subject("prod"),
-            object: "stream:t/prod/*".to_owned(),
-            action: "stream.trim".to_owned(),
-        }
+        trim_policies("t", "prod"),
+        [rule("stream:t/prod/*"), rule("stream:t/prod.sys/sys.facts")]
     );
 }
 
@@ -160,15 +163,20 @@ fn no_role_is_granted_trim_unless_asked() {
 fn init_writes_the_trim_grant_only_when_asked() {
     assert_eq!(audit("t", "prod", &[], &[], false).unwrap(), all());
     let mut with_trim = all();
-    with_trim.push(trim_policy("t", "prod"));
+    with_trim.extend(trim_policies("t", "prod"));
     assert_eq!(audit("t", "prod", &[], &[], true).unwrap(), with_trim);
     assert_eq!(
         audit("t", "prod", &all(), &[], true).unwrap(),
-        [trim_policy("t", "prod")]
+        trim_policies("t", "prod")
     );
-    let mut held = all();
-    held.push(trim_policy("t", "prod"));
+    let mut held = with_trim;
     assert!(audit("t", "prod", &held, &[], true).unwrap().is_empty());
+    // A namespace that holds only the workload rule gets the facts rule.
+    held.pop();
+    assert_eq!(
+        audit("t", "prod", &held, &[], true).unwrap(),
+        [trim_policies("t", "prod").pop().unwrap()]
+    );
 }
 
 /// Running `init` without the flag after it was run with it neither fails nor
@@ -176,20 +184,20 @@ fn init_writes_the_trim_grant_only_when_asked() {
 #[test]
 fn a_held_trim_grant_is_not_an_error_without_the_flag() {
     let mut held = all();
-    held.push(trim_policy("t", "prod"));
+    held.extend(trim_policies("t", "prod"));
     assert!(audit("t", "prod", &held, &[], false).unwrap().is_empty());
     // Only that rule: the same action on the system namespace is too wide.
     let mut wider = all();
     wider.push(Policy {
         object: "stream:t/prod.sys/*".to_owned(),
-        ..trim_policy("t", "prod")
+        ..trim_policies("t", "prod").remove(0)
     });
     assert!(audit("t", "prod", &wider, &[], true).is_err());
     // And another role does not get it.
     let mut other = all();
     other.push(Policy {
         subject: Role::Submitter.subject("prod"),
-        ..trim_policy("t", "prod")
+        ..trim_policies("t", "prod").remove(0)
     });
     assert!(audit("t", "prod", &other, &[], true).is_err());
 }

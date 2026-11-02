@@ -256,15 +256,26 @@ impl TestFelix {
 
     /// Every record `stream` still holds, from the offset Felix has trimmed
     /// it to. A cluster's first offset is a marker, so a trim at the first
-    /// event leaves reads from 0 refused.
+    /// event leaves reads from 0 refused. A trim landing between finding
+    /// that offset and reading from it starts the read again.
     pub(crate) async fn read_readable(&self, stream: &str) -> Vec<(u64, Vec<u8>)> {
-        let from = self.readable_from(stream).await;
-        let tail = self.felix.tail(stream).await.unwrap();
-        let records = self.felix.read_range(stream, from, tail).await.unwrap();
-        records
-            .into_iter()
-            .map(|r| (r.offset, r.payload.to_vec()))
-            .collect()
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let from = self.readable_from(stream).await;
+            let tail = self.felix.tail(stream).await.unwrap();
+            match self.felix.read_range(stream, from, tail).await {
+                Ok(records) => {
+                    return records
+                        .into_iter()
+                        .map(|r| (r.offset, r.payload.to_vec()))
+                        .collect();
+                }
+                Err(error)
+                    if Instant::now() < deadline
+                        && felixd_agent::felix::Trimmed::of(&error).is_some() => {}
+                Err(error) => panic!("reading {stream}: {error:#}"),
+            }
+        }
     }
 
     /// The oldest offset reads of `stream` start at: 0 until Felix trims it.
