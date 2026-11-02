@@ -16,7 +16,7 @@ use crate::check::{judged, module_bytes};
 use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed};
 use crate::settings::Settings;
-use crate::snapshots::{self, Snapshot};
+use crate::snapshots;
 use crate::specs;
 
 /// Where a replay stops.
@@ -229,14 +229,8 @@ async fn start(
     let snap_tail = felix.tail(&snap_stream).await?;
     // From the oldest snapshot Felix holds: `keep_snapshots` deletes the rest.
     let (records, _) = felix.read_back(&snap_stream, 0, snap_tail).await?;
-    let first_held = records.first().map_or(0, |r| r.offset);
-    let mut found = Vec::with_capacity(records.len());
-    for record in &records {
-        let snapshot = Snapshot::decode(&record.payload)
-            .map_err(|e| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset))?;
-        // One whose chunks a trim took is skipped for an older or newer one.
-        found.extend(snapshot.filter(|s| s.restorable(first_held)));
-    }
+    let found =
+        snapshots::restorable(&snap_stream, records.iter().map(|r| (r.offset, &r.payload)))?;
     let headers = found.iter().map(|s| s.taken().header);
     let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, Start::Initial(Initial::NoSnapshot)));
