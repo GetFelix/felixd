@@ -336,7 +336,7 @@ async fn restore_oldest_kept(
             snapshot.taken().header.input_offset
         );
     }
-    crate::replay::restore(felix, stream, &snapshot, workload).await
+    crate::replay::restore(felix, stream, &snapshot, workload, false).await
 }
 
 /// The spec workload `id`'s output stream was written under and the limits

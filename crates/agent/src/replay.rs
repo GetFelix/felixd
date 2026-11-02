@@ -9,6 +9,7 @@ use felixd_core::check::Produced;
 use felixd_core::module::{self, ModuleInfo, SectionError, Unreadable};
 use felixd_core::names;
 use felixd_core::replay::{self, Divergence, Initial, Recorded, Start};
+use felixd_core::snapshot::SnapshotHeader;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
@@ -131,13 +132,8 @@ pub async fn diff(
     let recorded = Recorded::read(records.iter().map(|r| r.payload.as_ref()), from..end)
         .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
-<<<<<<< HEAD
-    let (mut workload, restored) = start(&felix, id, &spec, module, from).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records, false).await?;
-=======
     let (mut workload, start) = start(&felix, id, &spec, module, from, from_start).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records).await?;
->>>>>>> origin/main
+    let (_, limits) = judged(&felix, id, &spec, &records, false).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
     let first = run_inputs(
@@ -241,37 +237,29 @@ async fn start(
     let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, Start::Initial(Initial::NoSnapshot)));
     };
-<<<<<<< HEAD
-    let header = restore(felix, &snap_stream, &found[index], &mut workload).await?;
-    Ok((workload, Some(header)))
+    let swapped = hash != spec.module;
+    if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
+        return Ok((workload, Start::Initial(Initial::Unreadable(why))));
+    }
+    let header = restore(felix, &snap_stream, &found[index], &mut workload, swapped).await?;
+    Ok((workload, Start::Snapshot(header)))
 }
 
 /// Restores `snapshot`, read from `stream`, into `workload`, and returns its
-/// header.
+/// header. `swapped` says the workload runs another module than the one that
+/// took the snapshot, which changes what a failed restore is called.
 pub(crate) async fn restore(
     felix: &Felix,
     stream: &str,
     snapshot: &Snapshot,
     workload: &mut Workload,
+    swapped: bool,
 ) -> Result<SnapshotHeader> {
-=======
-    let swapped = hash != spec.module;
-    if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
-        return Ok((workload, Start::Initial(Initial::Unreadable(why))));
-    }
-    let snapshot = &found[index];
->>>>>>> origin/main
     let header = snapshot.taken().header;
     let chunks = snapshots::chunks(felix, stream, snapshot)
         .await
         .map_err(snapshots::ReadError::into_anyhow)?;
     let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
-<<<<<<< HEAD
-    workload
-        .restore(&chunks)
-        .with_context(|| format!("restore the snapshot of input {}", header.input_offset))?;
-    Ok(header)
-=======
     workload.restore(&chunks).map_err(|e| {
         let offset = header.input_offset;
         if swapped {
@@ -280,7 +268,7 @@ pub(crate) async fn restore(
             anyhow!(e).context(format!("restore the snapshot of input {offset}"))
         }
     })?;
-    Ok((workload, Start::Snapshot(header)))
+    Ok(header)
 }
 
 /// The module a replay tries, as its hash and bytes. `module` is the hash of
@@ -321,7 +309,6 @@ async fn unreadable(
         .map_err(|e| unparsed(&format!("the workload's module {}", spec.module), e))?;
     let candidate = ModuleInfo::of(candidate).map_err(|e| unparsed("the new module", e))?;
     Ok(module::can_restore(&recorded, &candidate).err())
->>>>>>> origin/main
 }
 
 /// Runs the steps at offsets `from..end` of `feed` through `workload`,
