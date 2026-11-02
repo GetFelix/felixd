@@ -9,7 +9,7 @@ name: felixd-test
 
 services:
   felix-controlplane:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     environment:
       FELIX_CONTROLPLANE_STORAGE_BACKEND: memory
       # Dev tokens let the bootstrap token mint a token for any principal. The
@@ -36,7 +36,7 @@ services:
   # caches `config` and `stats`, and writes the broker's and felixctl's tokens
   # to the felix-dev volume.
   felix-dev-auth:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.7.0-preview.2}
     network_mode: "service:felix-controlplane"
     depends_on:
       felix-controlplane:
@@ -140,7 +140,7 @@ services:
         echo "felix-dev-auth: tenant dev, namespace default, stream orders, caches config and stats; tokens written"
 
   felix-broker:
-    image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.6.2}
+    image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.7.0-preview.2}
     depends_on:
       felix-dev-auth:
         condition: service_completed_successfully

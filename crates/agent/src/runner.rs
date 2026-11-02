@@ -414,7 +414,7 @@ async fn run(
         false => None,
     };
     if let Some(trim) = &last_trim {
-        enforce_floors(spec, trim);
+        enforce_floors(felix, spec, trim).await?;
     }
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
@@ -815,21 +815,38 @@ async fn last_trim(felix: &Felix, stream: &str, tail: u64) -> Result<Option<Trim
 }
 
 /// Under the `enforce-trim-floors` fault, refuses this workload's reads
-/// below `trim`'s floors from now on, as if they were deleted.
-fn enforce_floors(spec: &WorkloadSpec, trim: &Trim) {
+/// below `trim`'s floors from now on, as if they were deleted. A resume reads
+/// `.out` from the oldest kept snapshot's output tail, so that is its floor.
+async fn enforce_floors(felix: &Felix, spec: &WorkloadSpec, trim: &Trim) -> Result<()> {
     if !faults::enforce_trim_floors() {
-        return;
+        return Ok(());
     }
     let Some(id) = names::output_of(&spec.output) else {
-        return;
+        return Ok(());
     };
-    faults::set_floor(id, &names::snapshot_stream(id), trim.snap_floor);
+    let snap_stream = names::snapshot_stream(id);
+    let found = felix
+        .read_range(&snap_stream, trim.snapshot, trim.snapshot + 1)
+        .await?;
+    let kept = found
+        .first()
+        .and_then(|r| Snapshot::decode(&r.payload).ok().flatten())
+        .map(|s| s.taken().header)
+        .with_context(|| {
+            format!(
+                "the trim names {snap_stream}:{}, not a snapshot",
+                trim.snapshot
+            )
+        })?;
+    faults::set_floor(id, &spec.output, kept.output_tail);
+    faults::set_floor(id, &snap_stream, trim.snap_floor);
     if spec.merged() {
         faults::set_floor(id, &names::merge_stream(id), trim.merge_floor);
     }
     for (input, &floor) in spec.inputs.iter().zip(&trim.input_floors) {
         faults::set_floor(id, input, floor);
     }
+    Ok(())
 }
 
 /// The input floors at merge log step `step`: the entry's `next`, where
@@ -1034,7 +1051,7 @@ impl Steps<'_> {
             |_| merge_next,
             self.last_trim.as_ref(),
         );
-        let planned = match planned {
+        let mut planned = match planned {
             Ok(planned) => planned,
             Err(trim::Skip::Regressed) => {
                 // As after `keep_snapshots` is raised: the earlier trim
@@ -1047,12 +1064,24 @@ impl Steps<'_> {
             }
             Err(_) => return Ok(()),
         };
+        // What a head cut off `.out` would take with it. The first spec is
+        // read once and copied from trim to trim after that.
+        if planned.first_spec.is_none() {
+            planned.first_spec =
+                specs::written_record(self.felix, self.spec.output.as_str()).await?;
+        }
+        // Read from the stream, not carried from this owner's claim: a
+        // needs-operator record from a node without the lease can land after
+        // the claim and raise the floor. The walk ends at the last trim or
+        // claim, so it covers one snapshot interval.
+        planned.claimed =
+            specs::claim_floor(self.felix, &self.spec.output, self.log.tail()).await?;
         if self.last_trim.as_ref() == Some(&planned) {
             return Ok(());
         }
         let record = output::encode_trim(self.fence.epoch(), &planned);
         self.log.append_trim(record).await?;
-        enforce_floors(self.spec, &planned);
+        enforce_floors(self.felix, self.spec, &planned).await?;
         self.last_trim = Some(planned);
         Ok(())
     }
