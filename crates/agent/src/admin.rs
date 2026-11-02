@@ -90,20 +90,35 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
 }
 
 /// Writes every rule of [`grants::policies`] the control plane does not hold,
-/// so running it again writes nothing. It first lists every rule and role
-/// assignment and refuses, writing nothing, when a felixd role holds more than
-/// [`grants::policies`] gives it or one principal holds two roles
-/// ([`grants::audit`]). Needs `rbac.view` over the whole tenant, because a
+/// and the node's [`grants::trim_policy`] when `grant_trim`, so running it
+/// again writes nothing. It first lists every rule and role assignment and
+/// refuses, writing nothing, when a felixd role holds more than
+/// [`grants::policies`] and the trim rule give it or one principal holds two
+/// roles ([`grants::audit`]). A trim rule already held stays when `grant_trim`
+/// is off, with a warning. Needs `rbac.view` over the whole tenant, because a
 /// scope-filtered listing could hide the rule that breaks the roles apart; a
 /// token with less is refused. Also needs `rbac.policy.manage`. Assigning
 /// principals to the roles is left to an operator.
-pub async fn ensure_grants(settings: &Settings) -> Result<()> {
+pub async fn ensure_grants(settings: &Settings, grant_trim: bool) -> Result<()> {
     names::validate_namespace(&settings.namespace)?;
     require_tenant_view(settings)?;
     let held: Vec<Policy> = list(settings, "rbac/policies").await?;
     let groupings: Vec<Grouping> = list(settings, "rbac/groupings").await?;
-    let missing = grants::audit(&settings.tenant, &settings.namespace, &held, &groupings)
-        .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
+    let missing = grants::audit(
+        &settings.tenant,
+        &settings.namespace,
+        &held,
+        &groupings,
+        grant_trim,
+    )
+    .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
+    if !grant_trim && held.contains(&grants::trim_policy(&settings.tenant, &settings.namespace)) {
+        eprintln!(
+            "warning: nodes of {} can still delete history: the node role keeps its stream.trim \
+             rule. Remove it through the control plane's RBAC API to turn deletion off",
+            settings.namespace
+        );
+    }
     for policy in missing {
         let body = serde_json::to_value(&policy)?;
         let (status, text) = call(settings, "POST", "rbac/policies", Some(body)).await?;
@@ -209,13 +224,21 @@ fn view_is_tenant_wide(token: &str, tenant: &str) -> bool {
 
 /// POSTs `body` to the collection at `/v1/tenants/{tenant}/{collection}` and
 /// accepts a 409 only if `name` is there afterwards. Felix answers 409 both
-/// when the resource exists and when a create reuses a deleted name before the
-/// cluster has finalized incarnations, and only the first leaves something to
-/// use. Reading back does not depend on the wording of the refusal.
+/// when the resource exists with other settings and when a create reuses a
+/// deleted name before the cluster has finalized incarnations, and only the
+/// first leaves something to use.
+///
+/// A 409 that says the resource already exists is trusted: every `felixd run`
+/// gets one for the shared system streams and caches, and reading each back
+/// put thousands of requests on the control plane at scale. The one gap is a
+/// control plane that answers it for a resource it then cannot find, such as
+/// a delete racing the create. Any other 409 is read back, so an unfamiliar
+/// wording is never taken for success.
 async fn create(settings: &Settings, collection: &str, name: &str, body: Value) -> Result<()> {
     let (status, text) = call(settings, "POST", collection, Some(body)).await?;
     match status {
         200..=299 => Ok(()),
+        409 if says_already_exists(&text) => Ok(()),
         409 => {
             let path = format!("{collection}/{name}");
             match call(settings, "GET", &path, None).await?.0 {
@@ -229,6 +252,28 @@ async fn create(settings: &Settings, collection: &str, name: &str, body: Value) 
         }
         _ => bail!("creating {collection}/{name} failed with HTTP {status}: {text}"),
     }
+}
+
+/// Whether a 409 body is Felix's "already exists" answer. The refusal of a
+/// deleted name never reads this way, but is excluded by its own words too.
+fn says_already_exists(body: &str) -> bool {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["message"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    message.contains("already exists") && !message.contains("was deleted")
+}
+
+/// The process's one HTTP agent, so calls in a row reuse a connection instead
+/// of opening one each.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into()
+    })
 }
 
 /// Calls `/v1/tenants/{tenant}/{path}` with the control plane token, and
@@ -252,10 +297,7 @@ async fn call(
         path
     );
     tokio::task::spawn_blocking(move || -> Result<(u16, String)> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent = agent();
         let sent = match body {
             Some(body) => agent
                 .post(&url)
