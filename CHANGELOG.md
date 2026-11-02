@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Scale test (#20). The manually run `Scale` workflow starts three Felix brokers and three agents, creates N
+  workloads and reports create time, memory, and how long recovery takes when an agent and then a broker is
+  killed (`crates/felixd/tests/scale.rs`, `.github/workflows/scale.yml`; see CONTRIBUTING.md). The numbers
+  are in design.md under "Scale": hundreds of workloads work on Felix 0.6.2 and 0.7.0-preview.2, 1000 do not
+  settle on 0.7.0-preview.2 (about 17,000 claims in the 20 minute window, against about 1,100 over the 7 to 8
+  minutes 0.6.2 needed to get all running) and first output at 500 took 282 s there against 6.9 s on 0.6.2.
+  Creating streams (about 1.5 to 7 a second) and a broker failure are slow
+  ([felix#1760](https://github.com/GetFelix/felix/issues/1760),
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761),
+  [felix#1009](https://github.com/GetFelix/felix/issues/1009)).
 - Divergence records (#73). A workload fails as poison when a node replays its
   inputs and gets an output other than the one the stream holds. The node now
   first appends a `divergence` record (output record kind 9: spec record,
