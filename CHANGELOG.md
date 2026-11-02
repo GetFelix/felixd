@@ -227,7 +227,10 @@
   is refused once per trim; and a workload submitted after the history was
   deleted starts at a record that is gone and is left to an operator
   (reason 9). `felixd replay --diff` of a cut `.out` compares from the input
-  after the oldest kept snapshot; `--from-start` stops. Test agents add the new
+  after the oldest kept snapshot; `--from-start` stops. A `felixd replay` to an
+  offset older than the oldest kept snapshot, once the input before it is gone,
+  says so and names the oldest offset it can reach, where it said it needed the
+  stream from offset 0. Test agents add the new
   `skip-shared-deletion` fault by default. New `felixd_core::readers`.
 - Upgrading for deleted outputs and inputs (#150): upgrade every node before
   setting `--keep-snapshots` with the grant on. A node from before trim records

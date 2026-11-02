@@ -1538,10 +1538,9 @@ with the message below. A replay to an offset older than every snapshot left
 starts from the initial state and replays the input, which works while the
 input is still whole.
 
-A check from the start, or a replay before the oldest kept snapshot, needs the
-history that was deleted from the merge log, an input or `.out`. They stop and
-say which stream they needed, the offset they asked for and the oldest offset
-Felix holds, for example:
+A check from the start needs the history that was deleted from the merge log,
+an input or `.out`. It stops and says which stream it needed, the offset it
+asked for and the oldest offset Felix holds, for example:
 
 ```
 felixd check needs wl.orders.merge from offset 0, but Felix holds it only from
@@ -1557,6 +1556,15 @@ Once `.out` has been cut, `felixd replay --diff` compares from the input after
 the oldest kept snapshot, the way `check` does, and says where it started;
 `--from-start` stops as above. A plain `felixd replay` does not read `.out`, and
 works from a snapshot's input on.
+
+A replay to an offset older than the oldest kept snapshot, once the input
+before it is deleted, says so and names the oldest offset it can reach:
+
+```
+felixd replay: input 40 is older than the oldest kept snapshot, which is of
+input 120, and wl.orders.in no longer holds the inputs before offset 90; the
+oldest offset replay can reach is 120
+```
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)
