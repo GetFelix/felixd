@@ -1,7 +1,6 @@
 //! `felixd run`: store a module and start a workload.
 
 use anyhow::{Result, anyhow, bail};
-use bytes::Bytes;
 use felixd_core::spec::{
     DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, WorkloadSpec, WorkloadState, validate_inputs,
 };
@@ -10,6 +9,7 @@ use felixd_runtime::Runtime;
 
 use crate::admin::{self, StreamKind};
 use crate::felix::Felix;
+use crate::module_store;
 use crate::settings::Settings;
 use crate::specs;
 
@@ -51,6 +51,11 @@ impl Submission {
 pub async fn submit(settings: &Settings, submission: Submission) -> Result<String> {
     names::validate_id(&submission.id)?;
     validate_inputs(&submission.inputs)?;
+    if let Some(why) =
+        module::size_problem(submission.module.len() as u64, module::MAX_MODULE_BYTES)
+    {
+        bail!(why);
+    }
     Runtime::new()
         .map_err(|e| anyhow!("{e}"))?
         .compile(&submission.module)
@@ -92,8 +97,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let felix = Felix::connect(settings).await?;
     let hash = module::hash(&submission.module);
     let snap_stream = names::snapshot_stream(&submission.id);
-    let module = Bytes::from(submission.module);
-    felix.cache_put(names::MODULES, &hash, module).await?;
+    module_store::put(&felix, &submission.module).await?;
     let mut spec = WorkloadSpec {
         module: hash.clone(),
         inputs: submission.inputs,
