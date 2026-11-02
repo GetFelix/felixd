@@ -1436,8 +1436,9 @@ snapshot's output tail, where a cut of the head would leave it.
 
 - **A stream per workload.** Conditional publish is per shard, so every
   workload needs its own single-shard output and snapshot streams, created
-  through the control plane. That's fine for hundreds of workloads. At tens
-  of thousands it depends on how Felix handles many small streams.
+  through the control plane. That's fine for hundreds of workloads. 1000
+  settled on Felix 0.6.2 but not on 0.7.0-preview.2, and 10000 was not
+  reached in 20 minutes on either: see [Scale](#scale).
 - **Module size.** Wasm modules can be tens of megabytes, more than one frame
   to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
@@ -1450,6 +1451,100 @@ snapshot's output tail, where a cut of the head would leave it.
 
 Anything Felix doesn't do yet that felixd needs gets an issue labelled
 `felix-gap`, with the Felix code it refers to.
+
+## Scale
+
+Every workload is two single-shard streams, so N workloads are 2N streams with
+three replicas each, plus one lease renewal per workload every TTL/3. The
+`Scale` workflow measures what that costs: it starts three Felix brokers, a
+control plane and three agents on a 4 vCPU, 16 GB GitHub runner, creates N
+counter workloads, and then kills an agent and a broker in turn
+([how to run it](../CONTRIBUTING.md#running-the-scale-test)). Each count runs
+on a fresh cluster with a 10 s lease TTL. Times are from the first
+`felixd run`. The brokers, control plane, agents and the test all share those
+4 vCPUs, and the load average was 16 to 29 at 1000 workloads, so the runner
+was saturated. Runner speed also varies, so read these as orders of magnitude.
+
+On Felix 0.6.2:
+
+| Workloads | Streams | Create | All running | First output | Peak broker memory | Peak agent memory | Agent failover |
+|---|---|---|---|---|---|---|---|
+| 100 | 210 | 29 to 33 s | 33 to 37 s | 2.3 s | 111 to 155 MiB | 73 to 96 MiB | 10 to 13 s |
+| 250 | 510 | 73 s | 73 s | 3.1 s | 235 MiB | 148 MiB | 12 s |
+| 500 | 1010 | 161 s | 237 s | 6.9 s | 290 MiB | 98 MiB | 17 s |
+| 1000 | 2010 | 373 to 424 s | 435 to 489 s | 6.8 to 19.6 s | 428 to 533 MiB | 123 to 200 MiB | 85 to 143 s |
+| 10000 | 2462 reached | 1211 submitted in 1200 s | 167 running | not measured | 447 MiB | 120 MiB | not measured |
+
+On Felix 0.7.0-preview.2:
+
+| Workloads | Streams | Create | All running | First output | Peak broker memory | Peak agent memory | Agent failover |
+|---|---|---|---|---|---|---|---|
+| 100 | 210 | 44 to 58 s | 44 to 60 s | 2.4 to 2.6 s | 87 to 88 MiB | 70 to 74 MiB | 12.5 to 12.7 s |
+| 500 | 1010 | 350 s | 361 s | 282 s | 233 MiB | 98 MiB | 28 s |
+| 1000 | 2010 | 578 to 1046 s | never; 1 to 15 running at 1200 s | not measured | 370 to 377 MiB | 104 to 107 MiB | not measured |
+| 10000 | 1840 reached | 901 submitted in 1200 s | 890 running | not measured | 358 MiB | 107 MiB | not measured |
+
+A range is the lowest and highest of the runs for that count. One of the two
+1000-workload runs on 0.7.0-preview.2 had a submit fail with a lost
+connection (w895), which is part of its 1046 s.
+
+"First output" is the time for every workload to answer one input, once all
+are running. "Agent failover" is the time from killing the agent holding the
+most workloads until every workload has answered an input published right
+after.
+
+"Peak" is the largest reading in any phase, for the largest of the three
+brokers (an idle broker uses about 8 MiB) and of the three agents. On 0.6.2
+the broker peak came during the broker failover, when the surviving brokers
+take over the dead one's shards; at 10000 it came while the workloads
+started. The 0.7.0-preview.2 runs at 1000 and 10000 never got past starting,
+so their peaks are from that phase.
+
+What the numbers say:
+
+- **Memory did not limit these runs.** With all workloads running, a broker
+  holds about 0.3 to 0.4 MiB per workload at 500 to 1000 workloads (0.39 at
+  500, 0.29 to 0.37 at 1000; the broker's reading minus its idle baseline,
+  divided by the count), and about 0.7 at 100 where the fixed cost weighs
+  more. Peaks are higher, as the table shows. An agent used 67 to 107 MiB
+  while running and up to 200 MiB in a failover. This was only measured up to
+  1000 workloads.
+- **Creating streams is slow.** The control plane placed 6.4 to 7.2 streams a
+  second at 100 workloads on 0.6.2, 4.7 to 5.4 at 1000 and 2.0 at 10000. On
+  0.7.0-preview.2 it was 2.9 at 500, 1.9 to 3.5 at 1000 and 1.5 at 10000. So
+  about 1.5 to 7 streams a second, falling as the cluster fills (the saturated
+  runner may play a part). At that rate the 20,000 streams of 10,000
+  workloads take several hours. See
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761).
+- **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
+  first output, against 6.9 s on 0.6.2.
+- **At 1000 workloads, 0.7.0-preview.2 never settles.** There were about
+  17,000 claims in the 20 minute window, against about 1,100 over the 7 to 8
+  minutes 0.6.2 needed to get all running, and almost nothing was running
+  when the window ended. 500 workloads settled on both. See
+  [felix#1760](https://github.com/GetFelix/felix/issues/1760); felixd
+  [#207](https://github.com/GetFelix/felixd/pull/207) changes what the agent
+  reads back there, so these numbers are for the build measured, not a limit.
+- **A node failure takes longer with more workloads.** An agent's workloads
+  moved within 30 s up to 500 workloads and took 85 to 143 s at 1000,
+  probably because the survivors claim and restore hundreds at once. A 30 s
+  TTL at 1000 workloads left 119 without output after the first input.
+- **A broker failure is slow.** The harness kills a broker (they lead equal
+  numbers of shards, 70 at 100 workloads and 670 at 1000; ties go to the
+  highest name). Its leaders moved in 99 to 207 s at 100 workloads. From 250
+  workloads up they had not moved when the 300 s limit ended the wait, so the
+  longer waits are unknown. Outputs resumed within 300 s in only one of four
+  100-workload runs. The wait was longer with more shards, but the runner was
+  saturated and there are few data points, so the cause is not isolated. The
+  control plane's lease path described in
+  [felix#1009](https://github.com/GetFelix/felix/issues/1009) is the likely
+  place to look. With the broker started again, outputs resumed within 40 s
+  at 500 workloads or fewer; at 1000 on 0.6.2, hundreds of workloads still
+  had none after 300 s.
+
+So plan for hundreds of workloads per cluster on these releases, not
+thousands, and keep long-lived workloads fewer and bigger where you can. The
+measurements are the evidence behind the "A stream per workload" risk above.
 
 ## Determinism
 

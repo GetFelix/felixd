@@ -473,6 +473,11 @@ impl Agent {
         }
     }
 
+    /// The agent's process id.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Asks the agent to shut down cleanly, as Ctrl-C does.
     pub(crate) fn interrupt(&self) {
         self.signal("INT");
