@@ -558,6 +558,24 @@ and `felixd check` follow that log, so the order is the same everywhere.
 - [docs/metrics.md](docs/metrics.md): the Prometheus metrics a node serves
 - [Felix docs](https://docs.getfelix.dev/)
 
+## Felix version
+
+The Felix release felixd builds on is in [`.felix-version`](.felix-version).
+When Felix publishes a release, a bot opens a "chore: use Felix <version>" PR
+that moves every pin listed in [`.github/felix-bump.sh`](.github/felix-bump.sh)
+and the lockfile.
+
+Every night a workflow ([`felix-nightly.yml`](.github/workflows/felix-nightly.yml))
+points felixd at the commit behind Felix's `nightly` tag and runs
+[`.github/felix-nightly.sh`](.github/felix-nightly.sh): it starts the test
+stacks from the `:nightly` Felix images and runs the integration tests against
+one broker and against three, then the failover check on the deploy stack. When
+a run on `main` fails it opens an issue labelled `felix-nightly`, and a green
+run closes it, so a Felix change that breaks felixd shows up before the next
+release. See the latest run with
+`gh run list -R GetFelix/felixd --workflow "Felix nightly" --limit 1`, or start
+one from the Actions tab.
+
 ## Contributing
 
 The plan is open for discussion. Start with
