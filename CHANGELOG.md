@@ -143,6 +143,32 @@
   with every log at trace level, then scans every record, cache entry, metric,
   log line and refused-credential error for the token bytes. Per-lease tokens
   wait on scoped token minting in Felix (GetFelix/felix#1625).
+- The requester (#182). Workload contract 0.3 adds `publisher` to `record-in`:
+  the principal the broker authenticated an input record's write from, `none`
+  when the broker stored none and for another workload's output. felixd runs
+  0.3 and 0.2 workloads side by side, chosen by the interfaces a component
+  exports; a 0.2 workload is unchanged and never sees the publisher, and
+  `wit/workload.wit` moved to `wit/0.2/workload.wit` beside the new
+  `wit/0.3/workload.wit`. The agent asks the broker for publishers and passes
+  the stored value on every path (live, takeover, resume, merge, `check`,
+  `replay`). Admission is built on 0.3 and records the requester in each
+  decision (`requester`, left out when none). Breaking: a request whose
+  publisher the broker did not record is rejected as `no_requester`, so a
+  deployment that brings up the 0.3 admission needs a broker that stores
+  publishers, `FELIX_RECORD_PUBLISHERS=true` on a lone broker or the
+  `publisher_principal` fleet feature finalized in a cluster (one-way: storage
+  format v6, which older brokers refuse), before `felixd init`. A deployment
+  that already runs admission keeps its 0.2 module, which records no requester,
+  until module upgrades exist: a workload's module cannot change once it has
+  written output, and admission's id is fixed. Upgrade every node and the CLI
+  before submitting a 0.3 module or running the 0.3 admission: a felixd from
+  this release on leaves a module of a newer contract to an operator, and
+  earlier builds fail the workload; an older `felixd run` cannot read the new
+  reasons. Decision `reason` now tolerates a code a newer build wrote
+  (`unknown`). New `Policy::requesters` limits who may ask (`not_permitted`; the
+  `admission-requesters` example). `felixd_runtime::Input` and
+  `felixd_core::admission::decide` take the publisher. The test stacks turn
+  recording on.
 - A scheduler that is itself a felixd workload (#60). Submit
   `scheduler.wasm` (in the container image) as `felixd run --id scheduler
   --input sys.specs --input sys.facts`. It reads spec records and node facts

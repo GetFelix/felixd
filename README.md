@@ -14,8 +14,8 @@ A node agent that runs programs across a cluster with
 > and ends with `felixd check`. `felixd replay`
 > rebuilds a workload as of any input offset or time, and `--diff` checks a
 > replay, or a new module, against the recorded outputs. Workloads implement
-> [contract 0.2](docs/contract.md): named and keyed outputs, rejections and
-> chunked snapshots. Pipelines, where one workload reads another's output,
+> [contract 0.3](docs/contract.md) (0.2 still runs): named and keyed outputs,
+> rejections, chunked snapshots and the authenticated publisher of each input. Pipelines, where one workload reads another's output,
 > survive failover at every stage. Operations so far: `felixd ps`, `felixd
 > drain`, Prometheus metrics, and an optional scheduler, itself a felixd
 > workload, whose assignments the nodes follow with first claim wins as the
@@ -212,9 +212,11 @@ before the oldest of the last three its resume no longer reads (a trim record
 on the output stream), which `felixd check --from-snapshot` starts from.
 Nothing is deleted until Felix can trim a stream
 at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
-A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
-(`wit/workload.wit`). Each step gets the input's stream, offset, append time,
-key and payload, and returns outputs, each with a name and an optional key, or
+A workload is a Wasm component of [workload contract 0.3](docs/contract.md)
+(`wit/0.3/workload.wit`); components of 0.2 (`wit/0.2/workload.wit`) run too.
+Each step gets the input's stream, offset, append time, key, payload and, from
+0.3, the publisher: the identity the broker authenticated the write from, which
+is `none` unless the broker records publishers (see below). A step returns outputs, each with a name and an optional key, or
 rejects the input. A rejection is recorded on the output stream and the
 workload carries on. Snapshots are written in chunks, and a chunk the last
 snapshot already holds is not written again. `felixd run` refuses a component
@@ -329,7 +331,16 @@ a drained node's workloads go where the scheduler moves them. See
 `felixd init admission.wasm` brings up admission, itself a felixd workload.
 From then on `felixd run` publishes a request on `sys.intake` and prints
 admission's decision, accepted or rejected with a reason code, and nodes run
-only specs admission accepted. Its decisions replay, so `felixd replay --id
+only specs admission accepted. Each decision records the requester, the
+principal the broker authenticated the request from, which admission reads from
+the record's publisher and never from the payload. That needs a broker that
+stores publishers: `FELIX_RECORD_PUBLISHERS=true` on a single broker, or the
+`publisher_principal` fleet feature finalized in a cluster
+(`POST /v1/fleet/features/publisher_principal/finalize`). Finalizing is
+one-way: records with a publisher are storage format v6, which older brokers
+refuse to open, so take a backup and read [Felix's upgrades page](https://docs.getfelix.dev/deployment/upgrades/) first. Without it admission
+fails closed and rejects every request as `no_requester`. The test stack and
+`deploy/compose.yaml` turn it on. Its decisions replay, so `felixd replay --id
 admission --diff --all --module <hash>` shows which past requests a new policy
 would decide otherwise. See [Submitting work](docs/design.md#submitting-work).
 
@@ -558,6 +569,7 @@ snapshot would take too long.
 | Snapshots | A durable stream per workload |
 | Replay to a time | `offset_for_time` and range reads |
 | What each node may write | RBAC grants on each node's token |
+| Who asked for a workload | The record's stored publisher (`FELIX_RECORD_PUBLISHERS`, or the `publisher_principal` fleet feature) |
 
 ## How it works
 
@@ -609,6 +621,24 @@ and `felixd check` follow that log, so the order is the same everywhere.
 - [docs/records.md](docs/records.md): record formats and the resume fold
 - [docs/metrics.md](docs/metrics.md): the Prometheus metrics a node serves
 - [Felix docs](https://docs.getfelix.dev/)
+
+## Felix version
+
+The Felix release felixd builds on is in [`.felix-version`](.felix-version).
+When Felix publishes a release, a bot opens a "chore: use Felix <version>" PR
+that moves every pin listed in [`.github/felix-bump.sh`](.github/felix-bump.sh)
+and the lockfile.
+
+Every night a workflow ([`felix-nightly.yml`](.github/workflows/felix-nightly.yml))
+points felixd at the commit behind Felix's `nightly` tag and runs
+[`.github/felix-nightly.sh`](.github/felix-nightly.sh): it starts the test
+stacks from the `:nightly` Felix images and runs the integration tests against
+one broker and against three, then the failover check on the deploy stack. When
+a run on `main` fails it opens an issue labelled `felix-nightly`, and a green
+run closes it, so a Felix change that breaks felixd shows up before the next
+release. See the latest run with
+`gh run list -R GetFelix/felixd --workflow "Felix nightly" --limit 1`, or start
+one from the Actions tab.
 
 ## Contributing
 

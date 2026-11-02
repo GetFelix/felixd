@@ -205,6 +205,7 @@ fn scheduler_input<'a>((stream, offset, at, payload): &'a (&str, u64, u64, Vec<u
         timestamp_micros: *at,
         key: None,
         payload,
+        publisher: None,
     }
 }
 

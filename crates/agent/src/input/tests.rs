@@ -21,7 +21,7 @@ fn named(epoch: u64, at: OutputHeader, name: &str, key: Option<&[u8]>, payload: 
 /// payload, or `None` when the record is passed over.
 fn read(input: &str, offset: u64, record: Vec<u8>) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
     let record = Bytes::from(record);
-    StepInput::read(input, offset, 7, &record)
+    StepInput::read(input, offset, 7, Some("p:alice"), &record)
         .unwrap()
         .map(|step| {
             let given = step.as_input();
@@ -29,6 +29,31 @@ fn read(input: &str, offset: u64, record: Vec<u8>) -> Option<(Option<Vec<u8>>, V
             assert_eq!((given.offset, given.timestamp_micros), (offset, 7));
             (given.key.map(<[u8]>::to_vec), given.payload.to_vec())
         })
+}
+
+/// The publisher a step is given for `record` read from `input`.
+fn publisher_of(input: &str, record: Vec<u8>) -> Option<String> {
+    let record = Bytes::from(record);
+    let step = StepInput::read(input, 0, 7, Some("p:alice"), &record)
+        .unwrap()
+        .expect("a record the step reads");
+    step.as_input().publisher.map(str::to_owned)
+}
+
+#[test]
+fn a_step_is_given_its_records_publisher_unless_the_record_is_an_output() {
+    assert_eq!(
+        publisher_of("orders", b"plain".to_vec()).as_deref(),
+        Some("p:alice")
+    );
+    let record = Bytes::from(b"plain".to_vec());
+    let step = StepInput::read("orders", 0, 7, None, &record)
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.as_input().publisher, None);
+    // Another workload's output was written by whichever node held its lease.
+    let output = named(1, header(0, 0), "out", None, b"v");
+    assert_eq!(publisher_of("wl.up.out", output), None);
 }
 
 #[test]
@@ -120,7 +145,7 @@ fn a_record_of_an_unknown_version_or_kind_needs_an_operator() {
     let mut kind = output::encode_claim(2, "node-a");
     kind[1] = 9;
     for record in [b"\x09junk".to_vec(), kind] {
-        let error = StepInput::read("wl.up.out", 4, 0, &Bytes::from(record))
+        let error = StepInput::read("wl.up.out", 4, 0, None, &Bytes::from(record))
             .err()
             .expect("an unknown record stops the reader");
         let problem = error
@@ -135,7 +160,7 @@ fn a_record_of_an_unknown_version_or_kind_needs_an_operator() {
 fn an_output_that_does_not_decode_is_poison() {
     let mut record = output::encode(header(1, 0), 1, b"p");
     record.truncate(15);
-    let error = StepInput::read("wl.up.out", 4, 0, &Bytes::from(record))
+    let error = StepInput::read("wl.up.out", 4, 0, None, &Bytes::from(record))
         .err()
         .expect("a truncated output fails the reader");
     assert!(error.is::<Poison>(), "{error:#}");
