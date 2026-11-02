@@ -342,9 +342,9 @@ async fn a_pipeline_stage_is_deleted_only_below_its_readers_floor() {
         )
         .success()
     );
-    let _agent = t.start_agent_with_faults(DELETE_SHARED);
+    let mut agent = t.start_agent_with_faults(DELETE_SHARED);
     t.publish_all(INPUT, (0..30).map(count)).await;
-    let floor = eventually(
+    eventually(
         "the downstream stage to trim",
         Duration::from_secs(90),
         || async { input_floor(&t, "wl.down.out").await.filter(|&f| f > 0) },
@@ -362,9 +362,15 @@ async fn a_pipeline_stage_is_deleted_only_below_its_readers_floor() {
     eventually(
         "the output to be deleted to the reader's floor",
         Duration::from_secs(60),
-        || async { (t.readable_from("wl.up.out").await >= floor).then_some(()) },
+        || async {
+            let floor = input_floor(&t, "wl.down.out").await?;
+            (t.readable_from("wl.up.out").await >= floor).then_some(())
+        },
     )
     .await;
+    // Stopped, so neither the floor nor the stream moves while it is read.
+    agent.kill();
+    let floor = input_floor(&t, "wl.down.out").await.unwrap();
     let kept_from = t.readable_from("wl.up.out").await;
     assert!(
         kept_from <= floor,
@@ -411,7 +417,7 @@ async fn a_failover_after_the_trim_landed_finishes_deleting_out_and_the_input() 
         "`.out` was deleted to the second record's floor before the crash"
     );
 
-    let _next = t.start_agent_with_faults(DELETE_SHARED);
+    let mut next = t.start_agent_with_faults(DELETE_SHARED);
     eventually(
         "the next holder to delete",
         Duration::from_secs(60),
@@ -431,6 +437,8 @@ async fn a_failover_after_the_trim_landed_finishes_deleting_out_and_the_input() 
         stepped(&t, OUTPUT, 25).await.then_some(())
     })
     .await;
+    // Stopped, so a later trim cannot delete what the check is reading.
+    next.kill();
     let totals = counts(&t, OUTPUT).await;
     assert!(
         totals.windows(2).all(|w| w[1] == w[0] + 1),
@@ -452,7 +460,7 @@ async fn a_diff_of_an_output_with_a_cut_head_starts_after_the_oldest_snapshot() 
         &["--snapshot-every", "5", "--keep-snapshots", "1"],
     )
     .await;
-    let _agent = t.start_agent_with_faults(DELETE_SHARED);
+    let mut agent = t.start_agent_with_faults(DELETE_SHARED);
     t.publish_all(INPUT, (0..30).map(count)).await;
     eventually(
         "`.out` to lose its head",
@@ -464,6 +472,8 @@ async fn a_diff_of_an_output_with_a_cut_head_starts_after_the_oldest_snapshot() 
         stepped(&t, OUTPUT, 30).await.then_some(())
     })
     .await;
+    // Stopped, so a later trim cannot delete what the replay is reading.
+    agent.kill();
     let (ok, report) = t.replay(&["--id", ID, "--diff"]);
     assert!(ok, "{report}");
     assert!(report.contains("outputs match"), "{report}");
