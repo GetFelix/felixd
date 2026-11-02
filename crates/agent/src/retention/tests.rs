@@ -23,8 +23,8 @@ async fn a_trim_at_the_right_tail_is_one_call() {
     assert_eq!((settled, asked), (Settled::Trimmed(Some(7)), vec![7]));
 }
 
-/// A caller knows its stream's tail, so a different one means another writer.
-/// Asking again at that tail would trim past records the caller never read.
+/// The caller's tail may be stale, as after a leader change, so a refusal
+/// is not chased: the next snapshot asks again from a fresh tail.
 #[tokio::test]
 async fn a_refused_tail_is_never_asked_again_at_the_tail_it_names() {
     let mut asked = Vec::new();

@@ -112,10 +112,11 @@ enum Settled {
     TailMoved,
 }
 
-/// Calls `call` once, at the tail the caller knows. A refusal is not retried
-/// at the tail it names: the caller knows its stream's tail exactly, so a
-/// different one means another writer, and the caller has not read what it
-/// wrote. The next snapshot asks again.
+/// Calls `call` once, at the tail the caller expects. A refusal is not retried
+/// at the tail it names. That would be safe, since a trim only hides offsets
+/// below a floor already on `.out`, but the expected tail may just be stale, so
+/// giving up is the cheap choice. It costs one snapshot interval: the next
+/// snapshot write refreshes the tail, and a resume probes it.
 async fn settle<F, Fut>(expected: u64, call: F) -> Result<Settled>
 where
     F: FnOnce(u64) -> Fut,

@@ -1065,14 +1065,17 @@ floors never go back.
 
 A trim is itself a record on the stream it trims, at the stream's tail, and
 Felix applies it only if the holder names that tail exactly. The holder
-therefore asks at the tail it knows. If Felix answers that the tail is
-different, someone else has written to a stream only this holder writes to, and
-the holder has not read what they wrote, so it does not trim at that tail. It
-leaves the deletion to the next snapshot or the next holder. The snapshot
-writer and the merge log append, which also write at the tail, carry on from the
-tail Felix reports. Felix leaves trim records out of what it returns to readers
-(felixd skips claims itself, not trim records on `.snap` or the merge log), so a
-stream with a gap in its offsets is read as before.
+therefore asks at the tail it expects. Felix may answer that the tail is
+different: another writer appended, or the holder's tail is stale, as a read
+can be after a leader change. The holder does not retry at the tail Felix
+names. Retrying would be safe, because a trim only hides offsets below a floor
+the record on `.out` already names, so giving up is a cheap, conservative
+choice. It costs at most one snapshot interval of extra history: the next
+snapshot write refreshes the `.snap` tail, and a resume probes the true tail.
+The snapshot writer and the merge log append, which also write at the tail,
+carry on from the tail Felix reports. Felix leaves trim records out of what it
+returns to readers (felixd skips claims itself, not trim records on `.snap` or
+the merge log), so a stream with a gap in its offsets is read as before.
 
 A resume reads back the last stepped record for its append time
 (`snapshot_every_ms`), so that record stays above the floor. Every read that
@@ -1147,9 +1150,11 @@ call.
 holds, so they work on a workload that has deleted its old snapshots. A
 replay to an offset restores the nearest snapshot that is still there and whole.
 A snapshot that survives but shares a chunk with an older one that was deleted
-is passed over. A replay to an offset older than every snapshot left starts
-from the initial state and replays the input, which works while the input is
-still whole.
+is passed over. A merged workload's surviving snapshot whose step is below the
+merge log's floor is not: replay picks it and then fails reading the merge log,
+with the message below. A replay to an offset older than every snapshot left
+starts from the initial state and replays the input, which works while the
+input is still whole.
 
 A merge log that has been trimmed is a different matter: `check` needs every
 entry from the start, and a replay before the oldest kept snapshot needs the
