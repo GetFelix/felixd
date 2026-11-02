@@ -92,6 +92,20 @@
   it. An accepted decision whose module does not match gets a skip record
   (`skipped`), and a projector resumes after the newest decision any verified
   record names, so an acceptance one passed over is never recorded later.
+- Deleting snapshots and the merge log (part of #19). After the trim record
+  lands, the holder trims the workload's `.snap` and merge log with Felix's
+  conditional head trim, up to the record's floors, and a holder that resumes
+  deletes whatever a crash left. Inputs and `.out` are not deleted (#150).
+  Needs the Felix fleet to have finalized `head_trim`, which is a one-way step
+  (back up first), and `stream.trim` on the node's token. Without either, the
+  node logs one warning and the workload runs on without deleting. `felixd
+  check` and `felixd replay` read `.snap` from the oldest offset Felix holds,
+  and stop with the stream and the oldest offset when they need a merge log
+  entry that was deleted. The compose files and the cluster test stack finalize
+  `head_trim`.
+- Upgrading: `felixd init` adds `stream.trim` on the namespace's streams to the
+  node role. Felix grants by namespace, so a node's credential can then hide the
+  history of any stream in it. Run `init` again to pick it up.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.
@@ -155,12 +169,8 @@
   each snapshot of its own, the holder appends a trim record to the output
   stream naming the floors below which this workload's resume reads nothing:
   on the snapshot stream, the merge log and each input. It is fenced by the
-  lease epoch like an output. Nothing is deleted yet: Felix has no call to
-  trim a stream at an offset
-  ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). `felixd
-  check` and `felixd replay` still read from the start. The output stream is
-  not trimmed, and a shared input will be trimmed only below every reader's
-  floor (#150).
+  lease epoch like an output. The output stream is not trimmed, and a shared
+  input will be trimmed only below every reader's floor (#150).
 - Upgrading: a trim record is a new output record kind (7). A node from an
   earlier build that takes over a workload with one fails it as poison, and
   one whose workload reads that output stream leaves it to an operator. Upgrade

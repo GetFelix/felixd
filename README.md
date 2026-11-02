@@ -203,8 +203,13 @@ inputs' append times on the broker, whichever comes first, so a slow input
 still gets snapshots and every node takes them at the same inputs. With
 `--keep-snapshots 3` the holder records, after each snapshot, what history
 before the oldest of the last three its resume no longer reads (a trim record
-on the output stream). Nothing is deleted until Felix can trim a stream
-at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
+on the output stream), and then deletes the snapshot stream and the merge log
+up to there, so a long-running workload stops growing them. Deleting needs the
+Felix fleet to have finalized `head_trim`, a one-way step, and a token with
+`stream.trim`, which `felixd init` grants to the node role. Without them the
+workload runs on and the node logs a warning once. Inputs and the output stream
+are not deleted. [Retention](docs/design.md#retention) has the details,
+including what `felixd check` and `felixd replay` do afterwards.
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
 (`wit/workload.wit`). Each step gets the input's stream, offset, append time,
 key and payload, and returns outputs, each with a name and an optional key, or
@@ -531,7 +536,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics and the upgrade check done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check and deleting snapshots and the merge log done; deleting inputs open |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates

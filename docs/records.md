@@ -111,9 +111,9 @@ fixes it. That includes kinds 5 and 6 read by a build from before them, so upgra
 a workload can write them. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
-([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start
-while the records are there. Its holder appends it after a snapshot of its own when the spec sets
-`keep_snapshots`, with `publish_if` at the tail like an output. It continues with:
+([design.md](design.md#retention)). Its holder appends it after a snapshot of its own when the spec sets
+`keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed deletes
+`.snap` and the merge log below the snapshot and merge log floors. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -125,8 +125,9 @@ while the records are there. Its holder appends it after a snapshot of its own w
 | 8 each | per input, in the spec's order, this workload's floor: the record the step read with one input; the entry's `next`, lowered to the entry's own record, with several |
 
 Bytes after the last floor are refused. Readers pass over a trim like a claim, and only its epoch is
-checked. Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's:
-an input shared with other readers is deleted only below all of theirs (#150).
+checked. A holder that finds a trim whose floors are not yet deleted, as after a crash, deletes then.
+An input floor is one reader's and nothing acts on it: an input shared with other readers is
+deleted only below all of theirs (#150).
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
