@@ -966,11 +966,18 @@ reaches none of them.
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
 
-Residual of `stream.trim`: Felix grants it by stream name or for a whole
-namespace, so a node's grant for deleting its own `.snap` and merge log also
-lets its credential hide the history of any stream in the namespace, inputs and
-other workloads' outputs included. It is the same reach as the node's publish
-grant, until per-lease tokens narrow both (#74).
+Residual of `stream.trim`: the node role is granted it over `<namespace>/*`, so
+a node's credential can trim any stream in the namespace, not only the `.snap`
+and merge log it deletes from: inputs, other workloads' outputs and
+`wl.admission.out` included. The node's publish grant has the same reach, but
+publishing only appends, and a trim erases history for every reader and cannot
+be undone. Felix grants a stream by its exact name or a whole namespace's
+streams. A grant per workload would need admission to write RBAC policies when
+it accepts a workload, and putting `.snap` and the merge log in a namespace of
+their own would rename every existing stream, so neither is done here. Per-lease
+tokens (#74) are what would narrow it. A node's token also carries `stream.trim`
+only after the fleet has finalized `head_trim` and the token is next minted or
+refreshed.
 
 Residuals of `stream.manage`: Felix has no create-only stream action, and
 `stream.manage` over `<namespace>/*` also covers deleting or patching a
@@ -1058,12 +1065,14 @@ floors never go back.
 
 A trim is itself a record on the stream it trims, at the stream's tail, and
 Felix applies it only if the holder names that tail exactly. The holder
-therefore asks at the tail it knows. If Felix answers that the tail has
-moved, it asks once more at the tail Felix names and otherwise leaves the
-rest to the next snapshot. The snapshot writer and the merge log append, which
-also write at the tail, carry on from the tail Felix reports, and readers
-skip trim records as they skip claims, so a stream with a gap in its offsets
-is read as before.
+therefore asks at the tail it knows. If Felix answers that the tail is
+different, someone else has written to a stream only this holder writes to, and
+the holder has not read what they wrote, so it does not trim at that tail. It
+leaves the deletion to the next snapshot or the next holder. The snapshot
+writer and the merge log append, which also write at the tail, carry on from the
+tail Felix reports. Felix leaves trim records out of what it returns to readers
+(felixd skips claims itself, not trim records on `.snap` or the merge log), so a
+stream with a gap in its offsets is read as before.
 
 A resume reads back the last stepped record for its append time
 (`snapshot_every_ms`), so that record stays above the floor. Every read that
@@ -1112,9 +1121,9 @@ workload:
   only after `head_trim` is finalized.
 
 Without either, the holder logs one warning, naming the fix, and the workload
-carries on with `.snap` and the merge log growing as before. It asks again
-about every ten seconds, so the deletion starts soon after the fleet finalizes
-the feature or the grant arrives, with no restart. A trim whose answer times
+carries on with `.snap` and the merge log growing as before. After ten
+seconds, the first snapshot or resume tries again, so the deletion starts soon
+after the fleet finalizes the feature or the grant arrives, with no restart. A trim whose answer times
 out is not a failure either: the next snapshot asks again, and a trim that
 had landed is then a no-op. The trim record is already on
 `.out` in all these cases, so the next successful deletion catches up in one
@@ -1136,9 +1145,11 @@ call.
 
 `felixd check` and `felixd replay` read `.snap` from the oldest offset Felix
 holds, so they work on a workload that has deleted its old snapshots. A
-replay to an offset restores the nearest snapshot that is still there; one to
-an offset older than the oldest kept snapshot starts from the initial state
-and replays the input, which works while the input is still whole.
+replay to an offset restores the nearest snapshot that is still there and whole.
+A snapshot that survives but shares a chunk with an older one that was deleted
+is passed over. A replay to an offset older than every snapshot left starts
+from the initial state and replays the input, which works while the input is
+still whole.
 
 A merge log that has been trimmed is a different matter: `check` needs every
 entry from the start, and a replay before the oldest kept snapshot needs the

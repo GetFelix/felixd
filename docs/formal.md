@@ -122,7 +122,7 @@ Paths are from the repository root, as of workload contract 0.2.
 | `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:393-436` |
 | `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:520-569` |
 | `TrimStep` | `Runner::trim` after a snapshot, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
-| `DeleteSnaps` | `Steps::delete_trimmed` and `retention::trim_stream`, after the trim record has landed and again when a holder resumes: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`, `crates/core/src/trim.rs` |
+| `DeleteSnaps` | `Steps::delete_trimmed` and `retention::trim_stream`, after the trim record has landed and again when a holder resumes: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`, `crates/core/src/trim.rs`. The model does not cover the trim record taking an offset on `.snap`, which the snapshot write then meets as a changed tail, nor a trim at another writer's tail (the code gives up there) |
 | `DeleteInputs` | not built: an input is deleted only below every reader's floor ([#150](https://github.com/GetFelix/felixd/issues/150)). The model deletes what a trim record names, once the record has landed |
 | `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
@@ -343,7 +343,7 @@ append there first: comparing epochs alone, it steps the new record at the old o
 | `QuietStep` | a step whose input produces no output |
 | `SnapTake`, `SnapGiveUp`, `SnapLand` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs` |
 | `TrimStep` | `Runner::trim`, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
-| `DeleteMerge` | `Steps::delete_trimmed` and `retention::trim_stream`: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs` |
+| `DeleteMerge` | `Steps::delete_trimmed` and `retention::trim_stream`: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`. The model does not cover the trim record taking a merge log offset, which the next merge append meets as a changed tail, nor a trim at another writer's tail |
 | `DeleteInputs` | not built ([#150](https://github.com/GetFelix/felixd/issues/150)) |
 | `Deliver`, `LoseAnswer`, `Timeout`, `DeliverPrefix` | `publish_if` landing late or not at all, and the `drop-*`, `lose-*-answer` and `append-prefix` test faults: `crates/agent/src/faults.rs` |
 | `Crash` | an agent killed, or `crash-after-merge` |

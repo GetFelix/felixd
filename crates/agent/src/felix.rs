@@ -373,16 +373,7 @@ impl Felix {
         from: u64,
         end: u64,
     ) -> Result<(Vec<StreamRecord>, bool)> {
-        match self.read_range(stream, from, end).await {
-            Ok(records) => Ok((records, from == 0)),
-            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
-                Some(oldest) if oldest > from && oldest >= end => Ok((Vec::new(), true)),
-                Some(oldest) if oldest > from => {
-                    Ok((self.read_range(stream, oldest, end).await?, true))
-                }
-                _ => Err(error),
-            },
-        }
+        read_held(from, end, |from| self.read_range(stream, from, end)).await
     }
 
     /// The last record of the stream, given its `tail`.
@@ -503,6 +494,32 @@ impl Felix {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)
     }
+}
+
+/// How many times a read walking back follows a trim that moves while it reads.
+const TRIM_ROUNDS: usize = 4;
+
+/// Reads `from..end` with `read`, which fails with [`Trimmed`] below what
+/// Felix holds. Then it reads again from the oldest offset held, and says the
+/// walk ends there. A trim that lands between the two reads moves that offset
+/// up, so it follows it a few rounds before giving up.
+async fn read_held<T, F, Fut>(from: u64, end: u64, mut read: F) -> Result<(Vec<T>, bool)>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<Vec<T>>>,
+{
+    let mut start = from;
+    for _ in 0..TRIM_ROUNDS {
+        match read(start).await {
+            Ok(records) => return Ok((records, start == 0 || start > from)),
+            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
+                Some(oldest) if oldest >= end => return Ok((Vec::new(), true)),
+                Some(oldest) if oldest > start => start = oldest,
+                _ => return Err(error),
+            },
+        }
+    }
+    read(start).await.map(|records| (records, true))
 }
 
 /// Calls `page` until it gets past `from`. A page stops short at what the

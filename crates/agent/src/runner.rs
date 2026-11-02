@@ -812,6 +812,15 @@ fn enforce_floors(spec: &WorkloadSpec, trim: &Trim) {
     }
 }
 
+/// `found`, or `None` when it failed because Felix has trimmed the entry away.
+fn below_the_trim(found: Result<Vec<u64>>) -> Result<Option<Vec<u64>>> {
+    match found {
+        Ok(next) => Ok(Some(next)),
+        Err(error) if Trimmed::of(&error).is_some() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// The input floors at merge log step `step`: the entry's `next`, where
 /// each input carries on, with the entry's own input lowered to its record.
 async fn merge_next_at(felix: &Felix, spec: &WorkloadSpec, step: u64) -> Result<Vec<u64>> {
@@ -998,7 +1007,23 @@ impl Steps<'_> {
             true => {
                 let oldest = newest.iter().take(keep).map(|k| k.step).min();
                 match oldest {
-                    Some(step) => Some(merge_next_at(self.felix, self.spec, step).await?),
+                    Some(step) => {
+                        let found = merge_next_at(self.felix, self.spec, step).await;
+                        match below_the_trim(found)? {
+                            Some(next) => Some(next),
+                            None => {
+                                // After `keep_snapshots` is raised, a kept
+                                // snapshot can sit below the last trim, and
+                                // Felix no longer holds its entry. As for a
+                                // floor that would go back.
+                                tracing::info!(
+                                    workload = self.snap_stream,
+                                    "a kept snapshot is below the last trim; keeping it"
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
                     None => None,
                 }
             }

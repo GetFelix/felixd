@@ -142,3 +142,23 @@ fn a_node_may_trim_workload_streams_only() {
     }
     assert!(!holds(Role::Node, "stream.trim", "stream:t/prod.sys/*"));
 }
+
+/// `felixd init` writes what `audit` returns as missing, so a namespace set up
+/// before `stream.trim` existed gets it for the node role when `init` runs
+/// again, and nothing else changes.
+#[test]
+fn init_adds_the_trim_grant_to_a_namespace_set_up_without_it() {
+    let held: Vec<Policy> = policies("t", "prod")
+        .into_iter()
+        .filter(|p| p.action != "stream.trim")
+        .collect();
+    let missing = audit("t", "prod", &held, &[]).unwrap();
+    assert_eq!(
+        missing,
+        vec![Policy {
+            subject: Role::Node.subject("prod"),
+            object: "stream:t/prod/*".to_owned(),
+            action: "stream.trim".to_owned(),
+        }]
+    );
+}

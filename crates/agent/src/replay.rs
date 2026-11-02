@@ -229,11 +229,13 @@ async fn start(
     let snap_tail = felix.tail(&snap_stream).await?;
     // From the oldest snapshot Felix holds: `keep_snapshots` deletes the rest.
     let (records, _) = felix.read_back(&snap_stream, 0, snap_tail).await?;
+    let first_held = records.first().map_or(0, |r| r.offset);
     let mut found = Vec::with_capacity(records.len());
     for record in &records {
         let snapshot = Snapshot::decode(&record.payload)
             .map_err(|e| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset))?;
-        found.extend(snapshot);
+        // One whose chunks a trim took is skipped for an older or newer one.
+        found.extend(snapshot.filter(|s| s.restorable(first_held)));
     }
     let headers = found.iter().map(|s| s.taken().header);
     let Some(index) = replay::nearest_snapshot(headers, before) else {

@@ -73,3 +73,18 @@ fn an_input_is_behind_only_when_its_tail_is_below_the_position() {
     let problem = error.downcast_ref::<NeedsOperator>().unwrap();
     assert_eq!(problem.reason, OperatorReason::InputBehind);
 }
+
+/// Raising `keep_snapshots` on a merged workload leaves a kept snapshot below
+/// the last trim, whose merge entry Felix has dropped. That is a trim to keep,
+/// not an error that reaches the workload as lost history.
+#[test]
+fn a_merge_entry_below_the_last_trim_is_not_an_error() {
+    let trimmed = Trimmed {
+        stream: "wl.a.merge".into(),
+        requested: 3,
+        oldest: 9,
+    };
+    assert_eq!(below_the_trim(Err(trimmed.into())).unwrap(), None);
+    assert_eq!(below_the_trim(Ok(vec![4, 5])).unwrap(), Some(vec![4, 5]));
+    assert!(below_the_trim(Err(anyhow::anyhow!("connection reset"))).is_err());
+}

@@ -23,36 +23,18 @@ async fn a_trim_at_the_right_tail_is_one_call() {
     assert_eq!((settled, asked), (Settled::Trimmed(Some(7)), vec![7]));
 }
 
+/// A caller knows its stream's tail, so a different one means another writer.
+/// Asking again at that tail would trim past records the caller never read.
 #[tokio::test]
-async fn a_stale_tail_is_asked_again_at_the_tail_it_names() {
+async fn a_refused_tail_is_never_asked_again_at_the_tail_it_names() {
     let mut asked = Vec::new();
     let settled = settle(7, |expected| {
         asked.push(expected);
-        async move {
-            Ok(match expected {
-                7 => ConditionalTrim::Refused { tail: 9 },
-                _ => ConditionalTrim::Trimmed {
-                    offset: Some(9),
-                    oldest: 3,
-                },
-            })
-        }
+        async { Ok(ConditionalTrim::Refused { tail: 9 }) }
     })
     .await
     .unwrap();
-    assert_eq!((settled, asked), (Settled::Trimmed(Some(9)), vec![7, 9]));
-}
-
-#[tokio::test]
-async fn a_tail_that_keeps_moving_is_given_up_on_after_one_retry() {
-    let mut calls = 0;
-    let settled = settle(7, |expected| {
-        calls += 1;
-        async move { Ok(ConditionalTrim::Refused { tail: expected + 1 }) }
-    })
-    .await
-    .unwrap();
-    assert_eq!((settled, calls), (Settled::TailMoved, 2));
+    assert_eq!((settled, asked), (Settled::TailMoved, vec![7]));
 }
 
 #[tokio::test]
@@ -73,7 +55,7 @@ async fn an_error_is_returned_without_asking_again() {
     let mut calls = 0;
     let result = settle(7, |_| {
         calls += 1;
-        async { Err(broker(ErrorCode::FeatureNotEnabled)) }
+        async { Err::<ConditionalTrim, _>(broker(ErrorCode::FeatureNotEnabled)) }
     })
     .await;
     assert!(result.is_err());

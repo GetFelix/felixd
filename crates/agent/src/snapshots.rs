@@ -35,6 +35,14 @@ impl Snapshot {
         })
     }
 
+    /// Whether the chunks it names are all on the stream from `first_held`,
+    /// the first offset Felix still serves. A manifest can survive a trim that
+    /// took a chunk it shares with an older snapshot.
+    pub(crate) fn restorable(&self, first_held: u64) -> bool {
+        self.manifest()
+            .is_none_or(|m| m.chunks.iter().all(|c| c.offset >= first_held))
+    }
+
     /// The manifest, for a chunked snapshot.
     pub(crate) fn manifest(&self) -> Option<&Manifest> {
         match self {
@@ -196,3 +204,6 @@ impl ReadError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

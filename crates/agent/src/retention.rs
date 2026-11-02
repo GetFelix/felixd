@@ -51,7 +51,7 @@ pub(crate) async fn trim_stream(felix: &Felix, stream: &str, before: u64, tail: 
             tracing::debug!(
                 stream,
                 before,
-                "the tail kept moving, trimming at the next snapshot"
+                "the tail is not the one expected, trimming at the next snapshot"
             );
             Deletion::Later
         }
@@ -108,25 +108,23 @@ fn pause() {
 enum Settled {
     /// The floor is in place; the trim record landed at the offset if any.
     Trimmed(Option<u64>),
-    /// The tail was not the one asked for, twice running.
+    /// The tail was not the one asked for.
     TailMoved,
 }
 
-/// Calls `call` with the tail Felix expects, and once more with the tail a
-/// refusal names. A third refusal means someone else is writing the stream
-/// and this gives up quietly.
-async fn settle<F, Fut>(mut expected: u64, mut call: F) -> Result<Settled>
+/// Calls `call` once, at the tail the caller knows. A refusal is not retried
+/// at the tail it names: the caller knows its stream's tail exactly, so a
+/// different one means another writer, and the caller has not read what it
+/// wrote. The next snapshot asks again.
+async fn settle<F, Fut>(expected: u64, call: F) -> Result<Settled>
 where
-    F: FnMut(u64) -> Fut,
+    F: FnOnce(u64) -> Fut,
     Fut: Future<Output = Result<ConditionalTrim>>,
 {
-    for _ in 0..2 {
-        match call(expected).await? {
-            ConditionalTrim::Trimmed { offset, .. } => return Ok(Settled::Trimmed(offset)),
-            ConditionalTrim::Refused { tail } => expected = tail,
-        }
-    }
-    Ok(Settled::TailMoved)
+    Ok(match call(expected).await? {
+        ConditionalTrim::Trimmed { offset, .. } => Settled::Trimmed(offset),
+        ConditionalTrim::Refused { .. } => Settled::TailMoved,
+    })
 }
 
 /// Why Felix did not trim.

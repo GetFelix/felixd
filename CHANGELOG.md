@@ -104,8 +104,12 @@
   entry that was deleted. The compose files and the cluster test stack finalize
   `head_trim`.
 - Upgrading: `felixd init` adds `stream.trim` on the namespace's streams to the
-  node role. Felix grants by namespace, so a node's credential can then hide the
-  history of any stream in it. Run `init` again to pick it up.
+  node role. Run `init` again to pick it up, and re-mint node tokens once the
+  fleet has finalized `head_trim`, since Felix puts the grant in tokens only
+  after that. Felix grants a stream by its exact name or a whole namespace, so
+  a node's credential can then trim any stream in it, inputs and other
+  workloads' outputs included. Unlike publishing, a trim erases history for
+  every reader and cannot be undone.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.
