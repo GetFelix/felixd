@@ -147,3 +147,18 @@ fn instances_tables_and_memories_are_bounded() {
     }
     assert_eq!(made, MAX_INSTANCES.min(MAX_TABLES).min(MAX_MEMORIES));
 }
+
+/// The versions a divergence record names are the ones the build has.
+#[test]
+fn the_abi_versions_match_what_the_build_pins() {
+    for version in [Version::V02, Version::V03] {
+        let (step, state) = version.interfaces();
+        assert!(step.ends_with(&format!("@{}", version.number())));
+        assert!(state.ends_with(&format!("@{}", version.number())));
+    }
+    let manifest = include_str!("../../../../Cargo.toml");
+    assert!(
+        manifest.contains(&format!("wasmtime = {{ version = \"={WASMTIME_VERSION}\"")),
+        "the workspace manifest pins another wasmtime"
+    );
+}

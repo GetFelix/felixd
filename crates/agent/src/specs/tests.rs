@@ -357,3 +357,60 @@ fn only_a_needs_operator_record_this_build_cannot_read_is_an_unreadable_park() {
     assert!(!unreadable_park(&output::encode_claim_under(1, 0, 0, "a")));
     assert!(!unreadable_park(&[0xff, 0xff]));
 }
+
+fn divergence(spec: u64) -> Vec<u8> {
+    use felixd_core::output::{Abi, Diverged, OutputHeader, encode_divergence};
+    encode_divergence(
+        1,
+        &Diverged {
+            spec,
+            header: OutputHeader {
+                input_offset: 0,
+                index: 0,
+            },
+            snapshot: None,
+            node: b"node-a",
+            abi: Abi {
+                contract: b"0.2.0",
+                wasmtime: b"50.0.0",
+                felixd: b"1.2.3",
+            },
+            expected: None,
+            actual: None,
+            detail: b"",
+        },
+    )
+}
+
+/// As a newer build writes it: a field this build has no reading for.
+fn unreadable_divergence(spec: u64) -> Vec<u8> {
+    let mut record = divergence(spec);
+    record[30] = 2;
+    assert!(output::decode(&record).is_err());
+    record
+}
+
+/// A divergence record is an observation, like a degraded one.
+#[tokio::test]
+async fn a_divergence_record_does_not_count_toward_the_floor() {
+    let claim = output::encode_claim_under(1, 2, 2, "a");
+    assert_eq!(floor_of(vec![claim.clone(), divergence(9)]).await, Some(2));
+    assert_eq!(floor_of(vec![divergence(9)]).await, None);
+    assert_eq!(
+        floor_of(vec![claim, unreadable_divergence(9)]).await,
+        Some(2)
+    );
+}
+
+#[test]
+fn a_divergence_record_is_not_the_first_run_whatever_its_fields() {
+    assert!(!ran_something(&divergence(3)));
+    assert!(!ran_something(&unreadable_divergence(3)));
+    assert!(ran_something(&output::encode_claim_under(1, 3, 3, "a")));
+}
+
+#[test]
+fn a_divergence_record_this_build_cannot_read_is_an_unreadable_park() {
+    assert!(unreadable_park(&unreadable_divergence(3)));
+    assert!(!unreadable_park(&divergence(3)));
+}

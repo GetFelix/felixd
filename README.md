@@ -142,8 +142,8 @@ felixd check --id second --upstream --complete
 ```
 
 A downstream gets only the records its upstream addresses to `out`, with
-their keys. Claims, failures, needs-operator, trim and degraded records,
-rejections and other names are passed over, so
+their keys. Claims, failures, needs-operator, trim, degraded and divergence
+records, rejections and other names are passed over, so
 a stage can fail over, even in the middle of a batch, without the next stage
 seeing anything but the same outputs in the same order.
 
@@ -249,7 +249,8 @@ needs an operator.
 
 `felixd ps` shows where every workload is: its state (`running`, `waiting`
 for a holder, `needs-operator` with the reason, `degraded` with the class and
-detail, `failed` with the reason, or `stopped`), the node holding it and its epoch, the output stream's tail, and
+detail, `failed` with the reason and, if it failed on a replay that differed,
+where it diverged, or `stopped`), the node holding it and its epoch, the output stream's tail, and
 for each input the next offset it steps, the input's tail and the lag between
 them. A workload with several inputs gets a line per input, for how far each
 is merged, and one for its merge log. Below that it lists the nodes: up or
@@ -308,6 +309,47 @@ first record of the stream never claims the workload and logs `could not read
 the output stream`. A workload reading that stream needs an operator. So start
 the new build with `--stuck-after-ms 0` on every node, and restart without it
 once no old node is left.
+
+A workload fails as `poison` with `replayed output differs from the record` or
+`records ... that differ from this workload's output` when a node replays its
+inputs and gets an output other than the one the stream holds. Either the
+stream was written by something else, or the workload is not deterministic, or
+the node's build runs the module differently from the one that wrote the
+stream. The node that finds it appends a `divergence` record just before the
+failure record, and `ps` prints it under the failure line:
+
+```
+WORKLOAD  STATE   HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG
+counter   failed  -       (7)    54       in     41    60    19
+counter: failed (poison): replayed output differs from the record at offset 52 of the output stream
+counter: diverged at input 41 output 0 on node-2 at epoch 7: the stream holds sha256 7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed, the replay produced sha256 3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3, started from the snapshot of input 30, contract 0.2.0, wasmtime 50.0.0, felixd 0.1.0: replayed output differs from the record at offset 52 of the output stream
+```
+
+The line gives the input and output that differ, the node and epoch that found
+it, the sha256 of what the stream holds there and of what the node's replay
+produced, the snapshot the replay started from (or the initial state), and the
+build: the workload contract, wasmtime and felixd versions. Each digest covers
+the whole output as compared (name, key and payload, not the writer's epoch),
+so it is not the payload digest `felixd replay --diff` prints. To look into it:
+
+1. Run `felixd replay --id counter --diff` on your own machine. It replays the
+   same inputs and prints the first output that differs, and says which
+   divergence record the stream holds for it.
+2. If it finds nothing, your build replays the stream cleanly, so the node that
+   found it ran something different. Compare the build in the record with
+   yours: `felixd --version` and the VERSION column of `ps` give the felixd
+   version.
+3. If it finds the same input, the stream holds a record this module did not
+   write, perhaps an older version of it. `felixd replay --id counter --diff
+   --module <old>` finds out.
+
+The record is only written for a workload that is failing already. A build
+from before it reads it as an unknown kind: an old node that claims the
+workload after its spec is submitted again fails the new spec as poison, and
+an old `ps`, `check` or `replay` reports the stream unreadable, and a
+downstream workload run by an old node needs an operator. There is no
+switch, so finish a rolling upgrade before submitting a failed workload again.
+[docs/records.md](docs/records.md) has the layout.
 
 `felixd drain node-1` takes a node out of service without waiting out lease
 TTLs: the node stops each workload it holds and deletes the lease, so another

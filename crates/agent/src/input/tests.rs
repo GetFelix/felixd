@@ -143,7 +143,7 @@ fn a_marker_with_a_code_this_build_does_not_know_is_passed_over() {
 #[test]
 fn a_record_of_an_unknown_version_or_kind_needs_an_operator() {
     let mut kind = output::encode_claim(2, "node-a");
-    kind[1] = 9;
+    kind[1] = 10;
     for record in [b"\x09junk".to_vec(), kind] {
         let error = StepInput::read("wl.up.out", 4, 0, None, &Bytes::from(record))
             .err()
@@ -175,5 +175,31 @@ fn a_stream_that_is_no_workloads_output_is_read_whole() {
             Some((None, claim.clone())),
             "{input}"
         );
+    }
+}
+
+#[test]
+fn a_divergence_record_is_passed_over_even_when_this_build_cannot_read_it() {
+    use felixd_core::output::{Abi, Diverged, encode_divergence};
+    let found = Diverged {
+        spec: 5,
+        header: header(3, 0),
+        snapshot: Some(1),
+        node: b"node-a",
+        abi: Abi {
+            contract: b"0.2.0",
+            wasmtime: b"50.0.0",
+            felixd: b"1.2.3",
+        },
+        expected: Some(&[1; 32]),
+        actual: Some(&[2; 32]),
+        detail: b"differs",
+    };
+    let readable = encode_divergence(2, &found);
+    let mut unreadable = readable.clone();
+    unreadable[30] = 2;
+    assert!(output::decode(&unreadable).is_err());
+    for record in [readable, unreadable] {
+        assert_eq!(read("wl.up.out", 5, record.clone()), None, "{record:?}");
     }
 }
