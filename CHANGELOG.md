@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Refused stream creates (#149). `felixd run`, `felixd init` and `felixd drain`
+  read a stream or cache back after Felix answers 409, and now exit with an
+  error carrying Felix's reason where they used to succeed and leave the next
+  read waiting for a stream that was never created. Felix refuses a stream
+  under the name of a deleted one until the cluster has finalized stream
+  incarnations; a control plane no broker registers with, like the
+  single-broker test stack, never finalizes them. Admission's projector hits the
+  same refusal when it creates an accepted workload's streams: it logs Felix's
+  reason and retries every second until the name can be reused, instead of
+  recording a spec whose streams do not exist.
 - Upgrade check from a snapshot (#29). `felixd replay --diff --module` and
   `replay --to ... --module` start the new module from the workload's nearest
   snapshot (before `--from` for a diff, before the end of the range for `--to`)
