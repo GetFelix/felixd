@@ -723,7 +723,9 @@ A `failed` workload whose failure is `replayed output differs` or
 `records ... that differ from this workload's output` has a divergence line
 under its failure line. The digests are of the output the stream holds and
 of the one this node's replay produced, so a different build, or a module that
-is not deterministic, shows as two different digests for one input. To dig
+is not deterministic, shows as two different digests for one input. They
+cover the whole output as compared, not only its payload, so they differ from
+the payload digests `replay --diff` prints. To dig
 further, `felixd replay --id <id> --diff` replays the inputs on your own
 machine, names the divergence record when it finds the same output differing,
 and `--module` tries another module against the recorded outputs.

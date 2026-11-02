@@ -201,7 +201,7 @@ fn a_reconciled_divergence_names_the_output_and_digests_what_was_compared() {
 #[test]
 fn a_foreign_record_that_does_not_decode_is_a_divergence_with_no_expected_digest() {
     let batch = vec![out(3, 9, b"mine")];
-    let found = divergence_in(&batch, &[b"junk"], (0, None), None);
+    let found = divergence_in(&batch, &[b"junk"], (0, Some(0)), None);
     assert_eq!(found.header, header(3));
     assert_eq!(found.expected, None);
     assert_eq!(found.actual, output::compared_digest(&out(3, 0, b"mine")));

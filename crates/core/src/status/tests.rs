@@ -274,6 +274,7 @@ fn a_divergence_record_this_build_cannot_read_still_shows() {
     let failure = output::encode_failure(2, 7, ErrorClass::Poison, "x");
     let found = recent(&[record.clone(), failure.clone()], 3).expect("shown");
     assert!(found.detail.contains("cannot read"), "{found:?}");
+    assert_eq!((found.epoch, found.input_offset, found.index), (2, 4, 1));
     assert!(found.to_string().starts_with("diverged at input"));
     assert_eq!(recent(&[record, failure], 4), None);
 }

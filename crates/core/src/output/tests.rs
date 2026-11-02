@@ -471,8 +471,8 @@ fn different_records_are_a_divergence() {
     let theirs = batch(3, &[11]);
     let at = |found, ours| Reconciled::Diverged { found, ours };
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), at(0, Some(0)));
-    // A record that does not decode takes no place in the batch.
-    assert_eq!(reconcile(7, &ours, &[b"junk"]), at(0, None));
+    // A record that does not decode takes the place of the next output.
+    assert_eq!(reconcile(7, &ours, &[b"junk"]), at(0, Some(0)));
 }
 
 #[test]
@@ -494,7 +494,23 @@ fn a_divergence_names_the_records_that_disagree() {
         reconcile(7, &ours, &refs(&theirs)),
         Reconciled::Diverged {
             found: 1,
+            ours: Some(1)
+        }
+    );
+    // The batch has nothing for a place past its end.
+    let theirs = [b"junk".to_vec()];
+    assert_eq!(
+        reconcile(7, &batch(7, &[]), &refs(&theirs)),
+        Reconciled::Diverged {
+            found: 0,
             ours: None
+        }
+    );
+    assert_eq!(
+        reconcile(7, &ours, &[b"junk"]),
+        Reconciled::Diverged {
+            found: 0,
+            ours: Some(0)
         }
     );
 }

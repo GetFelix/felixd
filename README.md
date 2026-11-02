@@ -301,8 +301,7 @@ inputs and gets an output other than the one the stream holds. Either the
 stream was written by something else, or the workload is not deterministic, or
 the node's build runs the module differently from the one that wrote the
 stream. The node that finds it appends a `divergence` record just before the
-failure record, and `ps` prints it under the failure, behind the line for the
-failure:
+failure record, and `ps` prints it under the failure line:
 
 ```
 WORKLOAD  STATE   HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG
@@ -314,22 +313,26 @@ counter: diverged at input 41 output 0 on node-2 at epoch 7: the stream holds sh
 The line gives the input and output that differ, the node and epoch that found
 it, the sha256 of what the stream holds there and of what the node's replay
 produced, the snapshot the replay started from (or the initial state), and the
-build: the workload contract, wasmtime and felixd versions. To look into it:
+build: the workload contract, wasmtime and felixd versions. Each digest covers
+the whole output as compared (name, key and payload, not the writer's epoch),
+so it is not the payload digest `felixd replay --diff` prints. To look into it:
 
 1. Run `felixd replay --id counter --diff` on your own machine. It replays the
-   same inputs and prints the first output that differs, with the digests of
-   both sides, and says which divergence record the stream holds for it.
-2. If your replay gives the digest the stream holds, the node that found it
-   ran something different. Compare the build in the record with yours:
-   `felixd --version` and the VERSION column of `ps` give the felixd version.
-3. If your replay gives the digest the node's replay produced, the stream
-   holds a record this module did not write, perhaps an older version of it.
-   `felixd replay --id counter --diff --module <old>` finds out.
+   same inputs and prints the first output that differs, and says which
+   divergence record the stream holds for it.
+2. If it finds nothing, your build replays the stream cleanly, so the node that
+   found it ran something different. Compare the build in the record with
+   yours: `felixd --version` and the VERSION column of `ps` give the felixd
+   version.
+3. If it finds the same input, the stream holds a record this module did not
+   write, perhaps an older version of it. `felixd replay --id counter --diff
+   --module <old>` finds out.
 
 The record is only written for a workload that is failing already. A build
 from before it reads it as an unknown kind: an old node that claims the
 workload after its spec is submitted again fails the new spec as poison, and
-an old `ps`, `check` or `replay` reports the stream unreadable. There is no
+an old `ps`, `check` or `replay` reports the stream unreadable, and a
+downstream workload run by an old node needs an operator. There is no
 switch, so finish a rolling upgrade before submitting a failed workload again.
 [docs/records.md](docs/records.md) has the layout.
 

@@ -166,8 +166,9 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
 }
 
 /// The first record on `stream` that is not a needs-operator, degraded or
-/// divergence record, with its offset. Each can be written before any claim
-/// and ran nothing, so it never says what the stream was written under.
+/// divergence record, with its offset. Each ran nothing, and the first two can
+/// be written before any claim, so none says what the stream was written
+/// under.
 /// It is judged from its header, so a reason this build cannot read counts too:
 /// a newer build may have written it, and the way out is to submit a new spec.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {

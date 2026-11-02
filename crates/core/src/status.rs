@@ -268,11 +268,14 @@ pub fn divergence<'a>(
             ) => {}
             Ok(_) => return None,
             Err(error) if output::divergence_spec_of(last) == Some(record) => {
+                // The epoch and the output come before the fields it cannot
+                // read, unless the record is cut short.
+                let (epoch, at) = output::divergence_position_of(last).unwrap_or_default();
                 return Some(Diverged {
                     node: String::new(),
-                    epoch: 0,
-                    input_offset: 0,
-                    index: 0,
+                    epoch,
+                    input_offset: at.input_offset,
+                    index: at.index,
                     snapshot: None,
                     contract: "?".into(),
                     wasmtime: "?".into(),

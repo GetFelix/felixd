@@ -69,7 +69,7 @@ pub use divergence::{Abi, Diverged, compared_digest, encode_divergence};
 pub const DEFAULT_NAME: &str = "out";
 
 /// Where an output record came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OutputHeader {
     /// Offset of the input record whose step produced this output.
     pub input_offset: u64,
@@ -611,6 +611,21 @@ pub fn divergence_spec_of(record: &[u8]) -> Option<u64> {
     spec_of(record, DIVERGENCE)
 }
 
+/// The epoch and the output a divergence record names, read from its header
+/// alone, for a record whose later fields this build cannot read.
+pub fn divergence_position_of(record: &[u8]) -> Option<(u64, OutputHeader)> {
+    divergence_spec_of(record)?;
+    let mut r = Reader::new(record);
+    r.bytes(2).ok()?;
+    let epoch = r.u64().ok()?;
+    r.u64().ok()?;
+    let header = OutputHeader {
+        input_offset: r.u64().ok()?,
+        index: r.u32().ok()?,
+    };
+    Some((epoch, header))
+}
+
 /// The spec record, the first field after the epoch, of a record of `kind`.
 fn spec_of(record: &[u8], kind: u8) -> Option<u64> {
     if kind_of(record).ok()? != kind {
@@ -681,8 +696,7 @@ pub enum Reconciled {
     Behind,
     /// What is there is not this workload's output. `existing[found]` is the
     /// first record that disagrees, and `batch[ours]` what this owner has
-    /// for its place, if it has one: a record that does not decode takes no
-    /// place.
+    /// for its place, if it has one: a record past the batch has none.
     Diverged { found: usize, ours: Option<usize> },
     /// A failure record is there, written under `spec_version`.
     Failed {
@@ -704,9 +718,14 @@ pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconcile
     let mut found = Vec::with_capacity(existing.len());
     for (at, &record) in existing.iter().enumerate() {
         let Ok(decoded) = decode(record) else {
+            // It sits where the next output of the batch would go.
+            let before = found
+                .iter()
+                .filter(|(r, _): &&(Record<'_>, &[u8])| r.written().is_some())
+                .count();
             return Reconciled::Diverged {
                 found: at,
-                ours: None,
+                ours: (before < batch.len()).then_some(before),
             };
         };
         found.push((decoded, record));

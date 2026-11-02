@@ -12,10 +12,13 @@
   effort, and a deposed node writes neither record. `felixd ps` prints it under
   a failed workload, `felixd replay --diff` names it when it finds the same
   output differing, and `felixd_divergences_total` counts them. Every reader
-  passes over it like a claim, and a node that cannot read one does not take
-  the workload. A build from before kind 9 reads it as an unknown kind, which
-  matters only once a workload has failed: finish a rolling upgrade before
-  submitting a failed workload again. There is no switch. This closes #73;
+  passes over it like a claim, and a node that cannot read one that is last on
+  the stream does not take the workload. A build from before kind 9 reads it
+  as an unknown kind: an old node that claims a failed workload after its spec
+  is submitted again fails the new spec, an old `ps`, `check` or `replay`
+  reports the stream unreadable, and a downstream workload run by an old node
+  needs an operator. Finish a rolling upgrade before submitting a failed
+  workload again. There is no switch. This closes #73;
   defining the records in WIT waits for the effect records, and felixd does
   not push OTLP.
 - Degraded workloads (#73). A workload that keeps failing on a transient

@@ -161,7 +161,7 @@ recorded for now; a single identifier for the ABI is not built
 Both digests are of the bytes the comparison looks at: the record's header and content, with the
 writer's epoch set to 0, so the same output written by two owners has one digest. That is the
 same comparison `output::same_output` makes. A digest is absent when the stream holds nothing that
-compares at that place: it ended, or holds a claim or a record that does not decode. The expected
+compares at that place: it ended, or holds a record that does not decode. The expected
 side is what the stream holds, because the stream is what other nodes and downstream workloads have
 read. The actual side is what this node produced.
 
