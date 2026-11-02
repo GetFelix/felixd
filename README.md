@@ -217,8 +217,13 @@ with `stream.trim`. That grant is off by default because it lets any node
 erase any stream in the namespace for good: run `felixd init --grant-trim` to
 turn it on, then mint the nodes new tokens. Without them the workload runs on,
 keeps its history, and the node logs a warning once. Inputs and the output
-stream are not deleted. [Retention](docs/design.md#retention) has the details,
-including what `felixd check` and `felixd replay` do afterwards.
+stream are not deleted, with one exception: a scheduler run with
+`--keep-snapshots` also deletes the node facts on `sys.facts` that no kept
+snapshot reads, which keeps that stream to about `keep-snapshots x
+snapshot-every` facts (each about 150 bytes plus the ids of the workloads its
+node holds, so 3,000 facts and roughly 1 MB at `--keep-snapshots 3` with the
+defaults). [Retention](docs/design.md#retention) has the details, including
+what `felixd check` and `felixd replay` do afterwards.
 A workload is a Wasm component of [workload contract 0.3](docs/contract.md)
 (`wit/0.3/workload.wit`); components of 0.2 (`wit/0.2/workload.wit`) run too.
 Each step gets the input's stream, offset, append time, key, payload and, from

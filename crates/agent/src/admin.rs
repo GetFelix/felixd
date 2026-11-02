@@ -90,11 +90,11 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
 }
 
 /// Writes every rule of [`grants::policies`] the control plane does not hold,
-/// and the node's [`grants::trim_policy`] when `grant_trim`, so running it
+/// and the node's [`grants::trim_policies`] when `grant_trim`, so running it
 /// again writes nothing. It first lists every rule and role assignment and
 /// refuses, writing nothing, when a felixd role holds more than
-/// [`grants::policies`] and the trim rule give it or one principal holds two
-/// roles ([`grants::audit`]). A trim rule already held stays when `grant_trim`
+/// [`grants::policies`] and the trim rules give it or one principal holds two
+/// roles ([`grants::audit`]). Trim rules already held stay when `grant_trim`
 /// is off, with a warning. Needs `rbac.view` over the whole tenant, because a
 /// scope-filtered listing could hide the rule that breaks the roles apart; a
 /// token with less is refused. Also needs `rbac.policy.manage`. Assigning
@@ -112,11 +112,17 @@ pub async fn ensure_grants(settings: &Settings, grant_trim: bool) -> Result<()> 
         grant_trim,
     )
     .map_err(|why| anyhow::anyhow!("refusing to continue: {why}"))?;
-    if !grant_trim && held.contains(&grants::trim_policy(&settings.tenant, &settings.namespace)) {
+    let trims = grants::trim_policies(&settings.tenant, &settings.namespace);
+    if !grant_trim && held.iter().any(|p| trims.contains(p)) {
         eprintln!(
-            "warning: nodes of {} can still delete history: the node role keeps its stream.trim \
-             rule. Remove it through the control plane's RBAC API to turn deletion off",
-            settings.namespace
+            "warning: nodes of {} can still delete history: the node role keeps a stream.trim \
+             rule. Remove {} through the control plane's RBAC API to turn deletion off",
+            settings.namespace,
+            if held.iter().filter(|p| trims.contains(p)).count() > 1 {
+                "them"
+            } else {
+                "it"
+            }
         );
     }
     for policy in missing {

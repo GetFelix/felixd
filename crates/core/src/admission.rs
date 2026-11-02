@@ -286,7 +286,8 @@ fn check(
             ),
         ));
     }
-    validate_inputs(&spec.inputs).map_err(|e| (Reason::InvalidInputs, e.to_string()))?;
+    validate_inputs(&request.id, &spec.inputs)
+        .map_err(|e| (Reason::InvalidInputs, e.to_string()))?;
     for input in &spec.inputs {
         if !input_allowed(input) {
             return Err((
