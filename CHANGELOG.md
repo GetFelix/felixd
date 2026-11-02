@@ -73,6 +73,12 @@
   admission's own only if it names a decision that accepted exactly that
   spec; any other needs an operator with the new reason `spec_unadmitted` and
   never claims. New fault `crash-after-projection-sent=N` for tests.
+- Resubmitting a workload a newer build left to an operator (#136). `felixd run`
+  from an older build submits a new spec over a needs-operator record whose
+  reason it cannot read, which is how the workload is released. Nodes on the
+  older build leave the workload alone until a node that can read the record
+  takes it. Such a record also raises the highest spec claimed, as one it can
+  read does.
 - System workloads (`admission`, `scheduler`) are refused through intake;
   `felixd run` writes their specs directly with the control plane token as
   before. A spec record runs only if no record of the workload anywhere on

@@ -289,7 +289,10 @@ not a failure: the spec stays `running`, and the node writes one
 needs-operator record with the reason to the output stream, fenced the same
 way. Every node then leaves the workload alone until its spec changes or it
 is removed. Cache values and stream records carry a format version, so an
-older felixd refuses a newer record instead of misreading it. For a workload
+older felixd refuses a newer record instead of misreading it. If a newer felixd recorded a
+reason an older one does not know, `felixd run` from the older build still submits the new
+spec. Nodes on the older build leave the workload alone, so `felixd ps` shows it as
+`waiting`; nodes on the newer build run it. For a workload
 that reads another workload's output stream, refusing means it needs an
 operator: an older felixd stops there once a record kind it does not know
 lands on the stream it reads. Upgrade every node first.
