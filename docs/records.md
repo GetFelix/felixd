@@ -41,12 +41,12 @@ their node as unknown. A new owner appends one before it resumes, so a stale own
 The floor is the highest spec record claimed on the stream so far, this claim's own included. An
 owner takes it from the last claim before its own, and from any claim it finds past the tail when
 its claim is refused, so the last claim alone says whether an older spec is being run, even when
-that claim's owner refused its spec. A needs-operator record after the last claim raises the floor
+that claim's owner refused its spec. A needs-operator record after the last claim, whatever its reason, raises the floor
 to its spec record too, since it can be written with no claim. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
 judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
 run a spec whose module or input differ from the one the stream's first claim names, or whose
-record is below the floor. Needs-operator records before the first claim ran nothing and are passed
+record is below the floor. Needs-operator records before the first claim, whatever their reason, ran nothing and are passed
 over when finding it. A failure, kind 5, continues with:
 
 | Bytes | Field |
@@ -73,7 +73,12 @@ A holder appends it the way it appends a failure, behind everything of earlier e
 releases the lease. A node that finds the problem before it claims claims only to write the record,
 with no claim record before it. A reason this build does not know is refused when reading the
 record in full, but a node checking whether to run still reads the spec record from the header and
-leaves the workload alone, so an older build never runs what a newer one parked. Any node whose spec
+leaves the workload alone, so an older build never runs what a newer one parked.
+`felixd run` from an older build passes over such a record when it looks for what the stream
+was written under, so it can still submit the spec that clears it. A node of that build does not
+claim the workload while that record is last on the stream: its claim would read the record as
+poison and fail the new spec, which never ran. A node that can read the record and holds the
+newer spec claims as usual. Any node whose spec
 names that record and that finds it last on the stream, before it claims or while claiming, leaves
 the workload alone, so it is written once per workload, spec record and reason. It is not a failure
 and the spec stays `running`. A new spec record, which `felixd run` writes for any change, or

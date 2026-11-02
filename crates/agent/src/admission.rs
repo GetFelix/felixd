@@ -35,6 +35,9 @@ use crate::specs;
 /// How often the projector and a waiting submitter look for new records.
 const POLL: Duration = Duration::from_millis(50);
 
+/// How long the projector waits after an error before starting over.
+const ERROR_WAIT: Duration = Duration::from_secs(1);
+
 /// Unread records one workload may pile up in the gate before it reads them,
 /// which bounds the gate's memory however often a workload changes.
 const MAX_UNVERIFIED: usize = 64;
@@ -339,14 +342,17 @@ pub(crate) async fn project(felix: &Felix, settings: &Settings, mut stop: watch:
             let found = projector.insert(found);
             found.catch_up(felix, settings).await
         };
+        let mut wait = POLL;
         if let Err(error) = step.await {
             tracing::warn!(error = %format!("{error:#}"), "admission's projector");
             // Start over from sys.specs, which also points workloads at the
-            // last record again if pointing it is what failed.
+            // last record again if pointing it is what failed. An error such
+            // as a refused stream create lasts, so do not retry it at POLL.
             projector = None;
+            wait = ERROR_WAIT;
         }
         tokio::select! {
-            () = tokio::time::sleep(POLL) => {}
+            () = tokio::time::sleep(wait) => {}
             _ = stop.wait_for(|stop| *stop) => return,
         }
     }
