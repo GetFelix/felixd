@@ -113,7 +113,8 @@ a workload can write them. An output that does not decode is poison.
 A trim, kind 7, names the floors below which this workload's resume reads nothing
 ([design.md](design.md#retention)). Its holder appends it after a snapshot of its own when the spec sets
 `keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed deletes
-`.snap` and the merge log below the snapshot and merge log floors. It continues with:
+`.snap` and the merge log below the snapshot and merge log floors. The scheduler's holder also
+deletes `sys.facts` below the floor for that input; no other input is deleted. It continues with:
 
 | Bytes | Field |
 |---|---|

@@ -178,12 +178,79 @@ fn nothing_is_deleted_twice() {
     let done = Deleted {
         snap_floor: 12,
         merge_floor: 10,
+        ..Deleted::default()
     };
     assert_eq!(trim.deletions(true, done), vec![(Owned::MergeLog, 40)]);
     let all = Deleted {
         snap_floor: 12,
         merge_floor: 40,
+        ..Deleted::default()
     };
     assert!(trim.deletions(true, all).is_empty());
     assert!(floors(0, 0).deletions(true, Deleted::default()).is_empty());
+}
+
+fn scheduler_trim(specs: u64, facts: u64) -> Trim {
+    Trim {
+        input_floors: vec![specs, facts],
+        ..floors(12, 40)
+    }
+}
+
+fn scheduler_inputs() -> Vec<String> {
+    vec![names::SPECS.to_owned(), names::FACTS.to_owned()]
+}
+
+/// The floor for `sys.facts` is the scheduler's own for that input, found by
+/// the input's name and not its position, and no other input's.
+#[test]
+fn the_facts_floor_is_the_schedulers_floor_for_that_input() {
+    let trim = scheduler_trim(7, 31);
+    let inputs = scheduler_inputs();
+    assert_eq!(
+        trim.facts_floor(names::SCHEDULER, &inputs, Deleted::default()),
+        Some(31)
+    );
+    let swapped = vec![names::FACTS.to_owned(), names::SPECS.to_owned()];
+    assert_eq!(
+        trim.facts_floor(names::SCHEDULER, &swapped, Deleted::default()),
+        Some(7)
+    );
+}
+
+/// `sys.facts` is deleted for the scheduler alone, and only when it reads it.
+#[test]
+fn only_the_scheduler_deletes_facts() {
+    let trim = scheduler_trim(7, 31);
+    let done = Deleted::default();
+    assert_eq!(trim.facts_floor("orders", &scheduler_inputs(), done), None);
+    let specs_only = vec![names::SPECS.to_owned()];
+    assert_eq!(trim.facts_floor(names::SCHEDULER, &specs_only, done), None);
+    // A record from a build with fewer inputs names no floor for it.
+    let short = Trim {
+        input_floors: vec![7],
+        ..floors(12, 40)
+    };
+    assert_eq!(
+        short.facts_floor(names::SCHEDULER, &scheduler_inputs(), done),
+        None
+    );
+}
+
+#[test]
+fn facts_are_not_deleted_twice_or_below_zero() {
+    let inputs = scheduler_inputs();
+    let done = Deleted {
+        facts_floor: 31,
+        ..Deleted::default()
+    };
+    let trim = scheduler_trim(7, 31);
+    assert_eq!(trim.facts_floor(names::SCHEDULER, &inputs, done), None);
+    let later = scheduler_trim(7, 50);
+    assert_eq!(later.facts_floor(names::SCHEDULER, &inputs, done), Some(50));
+    let none = scheduler_trim(0, 0);
+    assert_eq!(
+        none.facts_floor(names::SCHEDULER, &inputs, Deleted::default()),
+        None
+    );
 }

@@ -41,10 +41,24 @@ pub(crate) fn may_delete() -> bool {
     paused.is_none_or(|until| Instant::now() >= until)
 }
 
+/// How many times a trim is asked again at the tail Felix names, for a stream
+/// other writers keep appending to.
+pub(crate) const BUSY_RETRIES: usize = 3;
+
 /// Hides the records of `stream` below `before`. `tail` is the stream's next
-/// offset as far as the caller knows; the trim record lands there.
-pub(crate) async fn trim_stream(felix: &Felix, stream: &str, before: u64, tail: u64) -> Deletion {
-    let result = settle(tail, |expected| felix.trim_before(stream, before, expected)).await;
+/// offset as far as the caller knows; the trim record lands there. A refused
+/// tail is asked again at the one Felix names up to `retries` times.
+pub(crate) async fn trim_stream(
+    felix: &Felix,
+    stream: &str,
+    before: u64,
+    tail: u64,
+    retries: usize,
+) -> Deletion {
+    let result = settle(tail, retries, |expected| {
+        felix.trim_before(stream, before, expected)
+    })
+    .await;
     match result {
         Ok(Settled::Trimmed(landed)) => Deletion::Done { landed },
         Ok(Settled::TailMoved) => {
@@ -73,8 +87,9 @@ pub(crate) async fn trim_stream(felix: &Felix, stream: &str, before: u64, tail: 
                     tracing::warn!(
                         stream,
                         %error,
-                        "this node's token may not trim streams, so keep_snapshots deletes \
-                         nothing; grant stream.trim (stream.manage includes it)"
+                        "this node's token may not trim this stream, so keep_snapshots does not \
+                         delete from it; grant stream.trim on it (felixd init adds the grants, and \
+                         stream.manage includes it)"
                     );
                 }
                 pause();
@@ -112,20 +127,27 @@ enum Settled {
     TailMoved,
 }
 
-/// Calls `call` once, at the tail the caller expects. A refusal is not retried
-/// at the tail it names. That would be safe, since a trim only hides offsets
-/// below a floor already on `.out`, but the expected tail may just be stale, so
-/// giving up is the cheap choice. It costs one snapshot interval: the next
-/// snapshot write refreshes the tail, and a resume probes it.
-async fn settle<F, Fut>(expected: u64, call: F) -> Result<Settled>
+/// Calls `call` at the tail the caller expects, and after a refusal at the
+/// tail Felix names, up to `retries` more times. Retrying is safe, since a trim
+/// only hides offsets below a floor already on `.out`. The owned streams
+/// retry nothing (`retries` is 0): their expected tail may just be stale, so
+/// giving up costs one snapshot interval, as the next snapshot write refreshes
+/// it. A stream with many writers, like `sys.facts`, moves its tail between any
+/// two calls, and giving up there would never trim it.
+async fn settle<F, Fut>(expected: u64, retries: usize, mut call: F) -> Result<Settled>
 where
-    F: FnOnce(u64) -> Fut,
+    F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<ConditionalTrim>>,
 {
-    Ok(match call(expected).await? {
-        ConditionalTrim::Trimmed { offset, .. } => Settled::Trimmed(offset),
-        ConditionalTrim::Refused { .. } => Settled::TailMoved,
-    })
+    let mut at = expected;
+    for left in (0..=retries).rev() {
+        match call(at).await? {
+            ConditionalTrim::Trimmed { offset, .. } => return Ok(Settled::Trimmed(offset)),
+            ConditionalTrim::Refused { tail } if left > 0 => at = tail,
+            ConditionalTrim::Refused { .. } => break,
+        }
+    }
+    Ok(Settled::TailMoved)
 }
 
 /// Why Felix did not trim.

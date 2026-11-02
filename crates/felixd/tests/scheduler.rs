@@ -2,7 +2,8 @@
 //! claim what is assigned to them through the lease, its assignments carry
 //! on after its own node dies, nothing waits on an assignee that cannot take
 //! the work or on a scheduler with no holder, an assignee that does nothing
-//! is passed over after the bound, and a replay assigns the same way.
+//! is passed over after the bound, a replay assigns the same way, and with
+//! `keep_snapshots` its holder deletes the node facts it no longer reads.
 //!
 //! Needs a Felix broker; see `common`.
 
@@ -22,6 +23,7 @@ use felixd_core::node::NodeInfo;
 use felixd_core::output;
 use felixd_core::schedule::{NodeFact, SILENT_INTERVALS};
 use felixd_core::spec::{SpecRecord, WorkloadState};
+use felixd_core::trim::Trim;
 
 /// How long the tests wait for anything that should happen within a few
 /// lease TTLs.
@@ -52,14 +54,16 @@ fn start_with(t: &TestFelix, node: &str, bound: Duration, faults: &str, more: &[
 }
 
 /// Submits the scheduler, snapshotting often so a takeover restores from a
-/// snapshot.
-fn run_scheduler(t: &TestFelix) {
+/// snapshot, with `more` arguments.
+fn run_scheduler(t: &TestFelix, more: &[&str]) {
     let module = felixd_testkit::workload("scheduler");
+    let mut args = vec!["--snapshot-every", "5"];
+    args.extend(more);
     let status = t.run_on(
         names::SCHEDULER,
         &module,
         &[names::SPECS, names::FACTS],
-        &["--snapshot-every", "5"],
+        &args,
     );
     assert!(status.success());
 }
@@ -115,7 +119,12 @@ async fn facts_from(t: &TestFelix, nodes: &[&str]) {
 /// Starts the scheduler on `nodes` and waits until it runs and has heard
 /// from all of them. Returns its holder.
 async fn scheduler_on(t: &TestFelix, nodes: &[&str]) -> String {
-    run_scheduler(t);
+    scheduler_with(t, nodes, &[]).await
+}
+
+/// As [`scheduler_on`], submitted with `more` arguments.
+async fn scheduler_with(t: &TestFelix, nodes: &[&str], more: &[&str]) -> String {
+    run_scheduler(t, more);
     let holder = eventually("the scheduler to be claimed", SOON, || {
         holder(t, names::SCHEDULER)
     })
@@ -455,4 +464,81 @@ async fn a_replay_of_the_scheduler_gives_the_same_assignments() {
         matched >= recorded,
         "{matched} outputs match, of {recorded} recorded: {diffed}"
     );
+}
+
+/// The trim records on the scheduler's output stream, in order.
+async fn scheduler_trims(t: &TestFelix) -> Vec<Trim> {
+    t.read_all(&names::output_stream(names::SCHEDULER))
+        .await
+        .iter()
+        .filter_map(|(_, r)| output::decode(r).unwrap().trim())
+        .collect()
+}
+
+/// The offset below which a trim record has the scheduler read nothing of
+/// `sys.facts`, its second input.
+fn facts_floor(trim: &Trim) -> u64 {
+    trim.input_floors[1]
+}
+
+/// With `keep_snapshots` the scheduler's holder trims `sys.facts` below the
+/// floor its trim record names, while the nodes keep appending to it. A
+/// failover then resumes from a kept snapshot and places new workloads.
+/// `felixd check` starts from the beginning of the merge log and `sys.facts`,
+/// so it says they were trimmed; a replay starts from a snapshot and works.
+#[tokio::test]
+async fn sys_facts_is_trimmed_below_the_schedulers_floor_and_failover_carries_on() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let bound = Duration::from_secs(300);
+    let ids = ["s7-a", "s7-b"];
+    let mut agents: HashMap<&str, Agent> = ids.iter().map(|&n| (n, start(&t, n, bound))).collect();
+    let first = scheduler_with(&t, &ids, &["--keep-snapshots", "2"]).await;
+
+    // The first floor past zero is the target: later records only raise it,
+    // so it holds still while the nodes' facts keep the stream growing.
+    let floor = eventually("sys.facts trimmed", Duration::from_secs(120), || async {
+        let floor = scheduler_trims(&t)
+            .await
+            .iter()
+            .map(facts_floor)
+            .find(|&floor| floor > 0)?;
+        (t.readable_from(names::FACTS).await >= floor).then_some(floor)
+    })
+    .await;
+
+    agents.get_mut(first.as_str()).unwrap().kill();
+    let second = eventually("another node to take the scheduler over", SOON, || async {
+        holder(&t, names::SCHEDULER).await.filter(|n| *n != first)
+    })
+    .await;
+    eprintln!("{second} took the scheduler over");
+    for id in ["f-1", "f-2"] {
+        assert!(run_counter(&t, id).await.success());
+        assignment(&t, id, None).await;
+    }
+    assert!(t.readable_from(names::FACTS).await >= floor);
+    let parked = t
+        .read_all(&names::output_stream(names::SCHEDULER))
+        .await
+        .iter()
+        .any(|(_, r)| {
+            matches!(
+                output::decode(r).unwrap(),
+                output::Record::NeedsOperator { .. }
+            )
+        });
+    assert!(!parked, "the scheduler resumed into trimmed history");
+
+    let merge = names::merge_stream(names::SCHEDULER);
+    let error = t.check_error(&["--id", names::SCHEDULER]);
+    assert!(
+        error.contains("the history before was trimmed"),
+        "check did not say what was trimmed: {error}"
+    );
+    let last = t.felix.tail(&merge).await.unwrap() - 1;
+    let (ok, state) = t.replay(&["--id", names::SCHEDULER, "--to", &last.to_string()]);
+    assert!(ok, "felixd replay: {state}");
+    assert!(state.contains("f-2"), "{state}");
 }

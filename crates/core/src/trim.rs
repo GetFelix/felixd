@@ -5,9 +5,12 @@
 //! The holder then deletes what the record names on the streams that are the
 //! workload's own, `.snap` and the merge log ([`Trim::deletions`]), and only
 //! after the record has landed, so a crash at any point leaves less deleted
-//! than recorded. Inputs are not deleted: other readers may need them.
+//! than recorded. Inputs are not deleted, as other readers may need them. The
+//! one exception is `sys.facts`, which only the scheduler reads
+//! ([`Trim::facts_floor`]).
 
 use crate::codec::{DecodeError, Reader};
+use crate::names;
 
 /// A snapshot among the last `keep`, as [`plan`] needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,12 +53,13 @@ pub enum Owned {
     MergeLog,
 }
 
-/// The floors a holder has already deleted below, on the streams it owns.
-/// Zero where it has deleted nothing.
+/// The floors a holder has already deleted below, on the streams it owns and
+/// on `sys.facts`. Zero where it has deleted nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Deleted {
     pub snap_floor: u64,
     pub merge_floor: u64,
+    pub facts_floor: u64,
 }
 
 impl Trim {
@@ -71,6 +75,18 @@ impl Trim {
             left.push((Owned::MergeLog, self.merge_floor));
         }
         left
+    }
+
+    /// The offset to delete `sys.facts` below, if `workload` is the scheduler,
+    /// reads it among its `inputs`, and that floor is past what is `done`.
+    /// Only the scheduler reads `sys.facts`, so its own floor is the lowest.
+    pub fn facts_floor(&self, workload: &str, inputs: &[String], done: Deleted) -> Option<u64> {
+        if workload != names::SCHEDULER {
+            return None;
+        }
+        let at = inputs.iter().position(|input| input == names::FACTS)?;
+        let floor = *self.input_floors.get(at)?;
+        (floor > done.facts_floor).then_some(floor)
     }
 }
 

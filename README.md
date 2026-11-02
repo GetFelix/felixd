@@ -208,8 +208,12 @@ up to there, so a long-running workload stops growing them. Deleting needs the
 Felix fleet to have finalized `head_trim`, a one-way step, and a token with
 `stream.trim`, which `felixd init` grants to the node role. Without them the
 workload runs on and the node logs a warning once. Inputs and the output stream
-are not deleted. [Retention](docs/design.md#retention) has the details,
-including what `felixd check` and `felixd replay` do afterwards.
+are not deleted, with one exception: a scheduler run with `--keep-snapshots`
+also deletes the node facts on `sys.facts` that no kept snapshot reads, which
+keeps that stream to about `keep-snapshots x snapshot-every` records of 150
+bytes. Run `felixd init` again after upgrading so nodes get the grant for it.
+[Retention](docs/design.md#retention) has the details, including what
+`felixd check` and `felixd replay` do afterwards.
 A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
 (`wit/workload.wit`). Each step gets the input's stream, offset, append time,
 key and payload, and returns outputs, each with a name and an optional key, or

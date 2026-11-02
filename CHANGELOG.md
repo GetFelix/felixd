@@ -110,6 +110,22 @@
   a node's credential can then trim any stream in it, inputs and other
   workloads' outputs included. Unlike publishing, a trim erases history for
   every reader and cannot be undone.
+- Trimming `sys.facts` (#164). A scheduler run with `--keep-snapshots` now
+  also deletes `sys.facts` below the floor its trim record names for that
+  input, the same step that deletes `.snap` and the merge log. Only the
+  scheduler reads `sys.facts`, so its floor is the lowest. Every node appends to
+  the stream, so a refused tail is asked again at the one Felix reports, up to
+  three more times, where `.snap` and the merge log give up. About
+  `keep-snapshots x snapshot-every` records of 150 bytes stay: 450 KB for
+  `--keep-snapshots 3` at the default. `felixd replay` of the scheduler starts
+  from a snapshot and is unaffected. `felixd check` of a scheduler that has
+  deleted history says which stream it needed and the oldest offset Felix
+  holds, as it does for the merge log. `wl.scheduler.out` is not trimmed yet
+  (#150).
+- Upgrading: `felixd init` adds `stream.trim` on `sys.facts` to the node role,
+  by exact name. Run `init` again to pick it up, and re-mint node tokens once
+  the fleet has finalized `head_trim`. Without it the scheduler's holder logs
+  one warning and the facts stay.
 - If `felixd init` dies between appending admission's spec record and
   writing `workloads`, run it again: it writes the spec again and nodes pick
   admission up.
@@ -147,7 +163,8 @@
 - Upgrading: `felixd run` creates `sys.facts`. To use the scheduler, grant
   nodes publish on `sys.facts` and read on `wl.scheduler.out`. An older node
   ignores assignments and claims by first claim wins, which is safe; upgrade
-  every node to get the placement. `sys.facts` is not trimmed yet (#164).
+  every node to get the placement. `sys.facts` is trimmed only with
+  `--keep-snapshots` on the scheduler (#164, below).
 - `felixd agent --metrics-bind <addr>` (or `FELIXD_METRICS_BIND`) serves
   Prometheus metrics at `/metrics` on that address, and `/live`. Off unless
   given. Per node: leases held, claims by result, handoffs, workloads that

@@ -143,6 +143,50 @@ fn a_node_may_trim_workload_streams_only() {
     assert!(!holds(Role::Node, "stream.trim", "stream:t/prod.sys/*"));
 }
 
+/// The scheduler's holder deletes the facts it no longer reads, so nodes may
+/// trim `sys.facts` and no other system stream, by exact name: Felix has no
+/// narrower grant than the name, and a wildcard would reach `sys.specs`.
+#[test]
+fn a_node_may_trim_sys_facts_and_no_other_system_stream() {
+    assert!(holds(
+        Role::Node,
+        "stream.trim",
+        "stream:t/prod.sys/sys.facts"
+    ));
+    for role in [Role::Admission, Role::Submitter] {
+        assert!(
+            !holds(role, "stream.trim", "stream:t/prod.sys/sys.facts"),
+            "{role:?}"
+        );
+    }
+    let trims: Vec<_> = role_policies(Role::Node, "t", "prod")
+        .into_iter()
+        .filter(|p| p.action == "stream.trim" && p.object.contains("prod.sys"))
+        .map(|p| p.object)
+        .collect();
+    assert_eq!(trims, ["stream:t/prod.sys/sys.facts"]);
+}
+
+/// A namespace set up before nodes could trim `sys.facts` gets the grant when
+/// `init` runs again, and nothing else changes.
+#[test]
+fn init_adds_the_facts_trim_grant_to_a_namespace_set_up_without_it() {
+    let facts = "stream:t/prod.sys/sys.facts";
+    let held: Vec<Policy> = policies("t", "prod")
+        .into_iter()
+        .filter(|p| !(p.action == "stream.trim" && p.object == facts))
+        .collect();
+    let missing = audit("t", "prod", &held, &[]).unwrap();
+    assert_eq!(
+        missing,
+        vec![Policy {
+            subject: Role::Node.subject("prod"),
+            object: facts.to_owned(),
+            action: "stream.trim".to_owned(),
+        }]
+    );
+}
+
 /// `felixd init` writes what `audit` returns as missing, so a namespace set up
 /// before `stream.trim` existed gets it for the node role when `init` runs
 /// again, and nothing else changes.
@@ -153,12 +197,10 @@ fn init_adds_the_trim_grant_to_a_namespace_set_up_without_it() {
         .filter(|p| p.action != "stream.trim")
         .collect();
     let missing = audit("t", "prod", &held, &[]).unwrap();
-    assert_eq!(
-        missing,
-        vec![Policy {
-            subject: Role::Node.subject("prod"),
-            object: "stream:t/prod/*".to_owned(),
-            action: "stream.trim".to_owned(),
-        }]
-    );
+    assert!(missing.iter().all(|p| p.action == "stream.trim"));
+    assert!(missing.contains(&Policy {
+        subject: Role::Node.subject("prod"),
+        object: "stream:t/prod/*".to_owned(),
+        action: "stream.trim".to_owned(),
+    }));
 }

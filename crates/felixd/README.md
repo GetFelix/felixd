@@ -104,7 +104,9 @@ felixd run --id scheduler --input sys.specs --input sys.facts scheduler.wasm
 
 Nodes then follow its assignments, with first claim wins as the fallback. Stopping it (removing
 its spec) puts every node back on first claim wins. A node needs publish on `sys.facts` and read
-on `wl.scheduler.out` for this.
+on `wl.scheduler.out` for this. Submit it with `--keep-snapshots` to have its holder delete the
+facts no kept snapshot reads; that needs trim on `sys.facts`, which `felixd init` grants nodes
+(run it again after upgrading). See [Retention](../../docs/design.md#retention).
 
 To admit work through admission, run `felixd init admission.wasm` (the container image has it at
 `/usr/local/share/felixd/admission.wasm`) once per namespace. From then on `felixd run` publishes

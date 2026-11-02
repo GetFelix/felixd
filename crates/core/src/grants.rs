@@ -74,6 +74,9 @@ pub fn role_policies(role: Role, tenant: &str, namespace: &str) -> Vec<Policy> {
             ("stream.trim", stream(namespace, "*")),
             ("stream.subscribe", stream(&sys, "*")),
             ("stream.publish", stream(&sys, names::FACTS)),
+            // To delete the facts the scheduler no longer reads. By exact
+            // name: a grant on `sys.*` would reach `sys.specs` too.
+            ("stream.trim", stream(&sys, names::FACTS)),
             ("cache.read", cache("*")),
             ("cache.write", cache(names::LEASES)),
             ("cache.write", cache(names::EPOCHS)),
