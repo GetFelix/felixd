@@ -17,6 +17,11 @@ records and node facts and writes assignments; see [scheduler/README.md](schedul
 with a reason code; see [admission/README.md](admission/README.md). `admission-strict` is the same
 component under a stricter policy, which the tests replay against admission's recorded requests.
 
+`counter` declares its snapshot layout in a `felixd.snapshot` custom section, and has cargo features
+that build the variants the upgrade-check tests replay against it: an identical module that
+reads the old layout, a changed one, one that declares a layout it cannot restore, and one that
+declares an unrelated layout. See [counter/README.md](counter/README.md).
+
 They are a separate cargo workspace because they build for `wasm32-unknown-unknown`. The tests in
 `felixd-runtime` build them on demand with `felixd-testkit` and run them in wasmtime:
 

@@ -338,6 +338,37 @@ async fn a_record_with_an_unknown_reason_still_parks_the_workload() {
     );
 }
 
+/// An older build's `felixd run` is the way out of a park a newer build
+/// recorded, so it must not trip on the record's reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_with_an_unknown_reason_does_not_stop_a_new_spec() {
+    let Some(t) = test_felix().await else { return };
+    let module = t.submit("counter", &[]).await;
+    let parked = t.spec().await.record.unwrap();
+    let mut record = needs_operator(0, parked);
+    record[18..20].copy_from_slice(&u16::MAX.to_be_bytes());
+    t.publish_if(OUTPUT, vec![record], 0).await;
+
+    assert!(t.run(ID, &module, INPUT, &[]).success());
+    assert!(t.spec().await.record.unwrap() > parked);
+
+    // A node of this build cannot read the record, and claiming past it would
+    // fail the new spec as poison. It leaves the workload for a newer node.
+    t.publish_all(INPUT, (0..3).map(count)).await;
+    let _agent = t.start_agent();
+    tokio::time::sleep(LEASE_TTL * 3).await;
+    assert!(t.outputs(OUTPUT).await.is_empty(), "it ran");
+    assert!(
+        t.felix
+            .cache_get(names::EPOCHS, ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "a node claimed it"
+    );
+    assert_eq!(t.spec().await.failure, None);
+}
+
 fn header(input_offset: u64) -> output::OutputHeader {
     output::OutputHeader {
         input_offset,

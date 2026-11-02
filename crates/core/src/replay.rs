@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use crate::check::Produced;
 use crate::codec::DecodeError;
-use crate::module;
+use crate::module::{self, Unreadable};
 use crate::output::{self, OutputHeader, Record};
 use crate::snapshot::SnapshotHeader;
 
@@ -44,6 +44,50 @@ pub fn nearest_snapshot(
 /// initial state.
 pub fn first_input(snapshot: Option<SnapshotHeader>) -> u64 {
     snapshot.map_or(0, |s| s.input_offset + 1)
+}
+
+/// What a replay's state began as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// The snapshot with this header, restored.
+    Snapshot(SnapshotHeader),
+    /// The initial state.
+    Initial(Initial),
+}
+
+/// Why a replay began from the initial state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Initial {
+    /// No snapshot covers only inputs below the replay's first.
+    NoSnapshot,
+    /// The user asked for the whole history.
+    Requested,
+    /// The module being tried cannot restore the snapshots the recorded
+    /// module wrote.
+    Unreadable(Unreadable),
+}
+
+impl Start {
+    /// The snapshot restored, if any.
+    pub fn snapshot(&self) -> Option<SnapshotHeader> {
+        match self {
+            Start::Snapshot(header) => Some(*header),
+            Start::Initial(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Start {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Start::Snapshot(header) => write!(f, "the snapshot of input {}", header.input_offset),
+            Start::Initial(Initial::NoSnapshot) => f.write_str("the initial state"),
+            Start::Initial(Initial::Requested) => f.write_str("the initial state, as asked"),
+            Start::Initial(Initial::Unreadable(why)) => {
+                write!(f, "the initial state, since {why}")
+            }
+        }
+    }
 }
 
 /// The outputs an output stream records for a range of inputs, and the nodes

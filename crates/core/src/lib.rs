@@ -11,7 +11,8 @@
 //! - [`class`]: error classes and what an operator has to fix.
 //! - [`placement`]: which free workloads a node claims.
 //! - [`schedule`]: the scheduler workload's inputs, assignments and fold.
-//! - [`module`]: how a module is identified.
+//! - [`module`]: how a module is identified and which snapshot layouts it
+//!   declares.
 //! - [`merge`]: the merge log of a workload with several inputs.
 //! - [`resume`]: where a new owner picks a workload up.
 //! - [`replay`]: where a replay starts and stops.

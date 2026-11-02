@@ -55,12 +55,31 @@ Flags of `check`: `--id` (repeat for several; every workload by default), `--com
 also reports outputs missing from the end of a stream, and `--upstream`, which also checks every
 workload whose output a checked one reads, up the pipeline. Stages are checked upstream first.
 
-Flags of `replay`: `--id`, `--to` (an input offset or an RFC 3339 time such as
-`2026-10-29T14:02:00Z`; for a workload with several inputs, a merge log offset or a time compared
-with when entries were merged), `--diff`, `--from` (with `--diff`) and `--module`, the hash of a module in
-the `modules` cache to run instead of the workload's own. `--diff` exits 1 on a divergence.
-`--all`, with `--diff`, reports every divergence rather than the first; with `--module` on
-admission it lists each recorded request a policy change decides otherwise.
+Flags of `replay`:
+
+- `--id`: the workload.
+- `--to`: an input offset or an RFC 3339 time such as `2026-10-29T14:02:00Z`. For a workload with
+  several inputs, a merge log offset or a time compared with when entries were merged. Required
+  unless `--diff`.
+- `--diff`: compare each output with the recorded one. It exits 1 on a divergence.
+- `--from` (with `--diff`): the first input compared. It also picks the snapshot the diff starts
+  from, the nearest one before it, so the default 0 starts from the initial state.
+- `--all` (with `--diff`): report every divergence, not only the first. With `--module` on admission
+  it lists each recorded request a policy change decides otherwise.
+- `--module`: run another module instead of the workload's own, to check an upgrade. A component
+  file, or the sha256 of one in the `modules` cache.
+- `--from-start`: start from the initial state even where a snapshot could be restored.
+
+Without `--module`, a replay restores the nearest snapshot before its first input (`--from` for a
+diff, the end of the range for `--to`). A new module restores it only if the `felixd.snapshot`
+section of its component names the layout, the format of the saved state, that the workload's
+module wrote ([docs/contract.md](../../docs/contract.md#snapshot-layouts)). Otherwise it starts
+from the initial state. Stderr says where the replay started and, when a snapshot was not used,
+why. A new module that declares it reads the snapshot and then traps or runs out of fuel restoring
+it is an error, "snapshot not readable by the new module", with the snapshot's input offset. It
+exits 1 like a divergence, but writes only to stderr. A diff starts at input 0 unless `--from` says
+otherwise, and no snapshot is before input 0, so an upgrade check from a snapshot needs `--from`.
+[docs/design.md](../../docs/design.md#checking-an-upgrade) has an example and every case.
 
 Flags of `ps`: `--id` (repeat for several; every workload by default).
 

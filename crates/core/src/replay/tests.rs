@@ -28,6 +28,28 @@ fn no_snapshot_below_the_end_starts_from_the_initial_state() {
 }
 
 #[test]
+fn a_start_says_where_the_state_came_from() {
+    let from = |start: Start| start.to_string();
+    assert_eq!(from(Start::Snapshot(at(9))), "the snapshot of input 9");
+    assert_eq!(
+        from(Start::Initial(Initial::NoSnapshot)),
+        "the initial state"
+    );
+    assert_eq!(
+        from(Start::Initial(Initial::Requested)),
+        "the initial state, as asked"
+    );
+    assert_eq!(
+        from(Start::Initial(Initial::Unreadable(
+            Unreadable::CandidateUndeclared
+        ))),
+        "the initial state, since the new module declares no snapshot layout"
+    );
+    assert_eq!(Start::Snapshot(at(9)).snapshot(), Some(at(9)));
+    assert_eq!(Start::Initial(Initial::Requested).snapshot(), None);
+}
+
+#[test]
 fn snapshots_out_of_order_still_pick_the_highest() {
     // A stale owner's snapshot can land after a later one.
     assert_eq!(nearest_snapshot([at(9), at(4)], 20), Some(0));
