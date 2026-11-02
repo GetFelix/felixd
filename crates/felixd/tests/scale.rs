@@ -764,7 +764,13 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
     // A broker: the one leading the most shards.
     let items = assignments(t).await?;
     let led = led_by(&items);
-    let (broker, share) = led.iter().max_by_key(|(_, led)| **led).unwrap();
+    // The brokers lead equal numbers, so a tie goes to the highest name. A
+    // shard with no leader is not a broker.
+    let (broker, share) = led
+        .iter()
+        .filter(|(name, _)| name.as_str() != "none")
+        .max_by_key(|(_, led)| **led)
+        .context("no shard has a leader")?;
     let (broker, share) = (broker.clone(), *share);
     eprintln!("killing {broker}, which leads {share} shards");
     compose(&["kill", &broker])?;

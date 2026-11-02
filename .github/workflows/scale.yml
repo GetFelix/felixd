@@ -74,7 +74,7 @@ jobs:
             if FELIXD_SCALE_COUNT=$n FELIXD_SCALE_OUT=$PWD/results \
               FELIXD_SCALE_LEASE_TTL_SECS=$ttl FELIXD_SCALE_TIMEOUT_SECS=$BUILD_SECS \
               FELIXD_SCALE_FAILOVER_SECS=$FAILOVER_SECS FELIXD_CLUSTER=$PWD/$cluster \
-              perl -e 'alarm shift; exec @ARGV' $((BUILD_SECS + FAILOVER_SECS * 6 + 600)) \
+              timeout -k 30 $((BUILD_SECS + FAILOVER_SECS * 6 + 600)) \
               cargo test -p felixd --test scale --locked -- --nocapture; then
               ok=1
             else
@@ -88,8 +88,18 @@ jobs:
             done
             docker compose -f $cluster logs --no-color felix-controlplane > results/log-$n-ttl$ttl-controlplane.txt 2>&1
             echo "::endgroup::"
-            # A failure at the smallest count is a broken harness or cluster.
-            if [ $ok = 0 ] && [ $first = 1 ]; then break; fi
+            # The smallest count not settling means a broken harness or
+            # cluster, so do not spend hours on the larger ones. Phases that
+            # fail are notes, not test failures, so read the result.
+            if [ $first = 1 ]; then
+              reached=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["running"]["reached"])' \
+                results/scale-$n-ttl$ttl.json 2>/dev/null || echo False)
+              if [ $ok = 0 ] || [ "$reached" != True ]; then
+                echo "::error::$n workloads did not all start; stopping"
+                failed=1
+                break
+              fi
+            fi
             first=0
           done
           exit $failed

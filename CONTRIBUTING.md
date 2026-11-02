@@ -56,7 +56,9 @@ gh workflow run scale.yml -R GetFelix/felixd -f counts=1000,10000
 Or use "Run workflow" on the Scale page of the Actions tab. `counts` lists the sizes to measure, smallest
 first, each on a fresh cluster. `build_secs` bounds creating and starting the workloads, `failover_secs` bounds the first output and
 each failover, and the job gives up after `timeout_minutes`. A count can carry a lease TTL in seconds, as
-`1000:30`.
+`1000:30`. The default counts are `100,500,1000,10000`. A run took up to about 90 minutes on 0.6.2 and
+0.7.0-preview.2; the limits allow 4 hours at most for the default counts. If the smallest count never gets all
+workloads running, the run stops there (a broken cluster or harness).
 
 When the run ends, its summary page shows one row per count, and the `scale-results` artifact holds
 `scale-<N>.json` with every figure (including the lease census while the workloads started, and memory at each
@@ -68,8 +70,16 @@ phase), plus the end of each container's log. The columns:
 - **First output**: time for every workload to answer one input.
 - **Agent failover**: time from killing the agent holding the most workloads until every workload has answered
   an input published right after the kill.
-- **Broker failover**: the same, killing the broker that leads the most shards. **Leaders moved** is when the
-  control plane had no shard left on it.
+- **Broker failover**: the same, killing a broker. The brokers lead equal numbers of shards, and ties go to the
+  highest name. **Leaders moved** is when the control plane had no shard left on it.
+- **Broker memory** and **Control plane memory**: the largest broker and the control plane in the running
+  phase. [docs/design.md](docs/design.md#scale) reports peaks over all phases instead, so its figures are
+  higher.
+
+A cell reads `no` when the figure was not measured or did not happen, such as a failover after the count never
+settled. A green job does not mean every count settled: a phase that fails or times out is recorded as a note in
+`scale-<N>.json` and shown as `no`, so the next count still runs. "All running" can be a few seconds off at 1000
+workloads, because it comes from polling a lease census that is slow to read at that size.
 
 The measurements and what they showed are in [docs/design.md](docs/design.md#scale). The harness is
 `crates/felixd/tests/scale.rs`; it skips unless `FELIXD_SCALE_COUNT` is set, so `cargo test` does not run it.
