@@ -74,7 +74,8 @@ pub(crate) async fn trim_stream(felix: &Felix, stream: &str, before: u64, tail: 
                         stream,
                         %error,
                         "this node's token may not trim streams, so keep_snapshots deletes \
-                         nothing; grant stream.trim (stream.manage includes it)"
+                         nothing; run `felixd init --grant-trim` and re-mint the node's token \
+                         to let it delete"
                     );
                 }
                 pause();
