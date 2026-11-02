@@ -3,7 +3,7 @@
 `specs/Felixd.tla` models one workload: nodes that claim it through the `leases` cache, take an
 epoch from `epochs`, and fold its input into `wl.<id>.out` and `wl.<id>.snap` with
 `publish_if`. TLC checks it under each `.cfg` beside it. `scripts/check_tla.sh` runs them all
-and holds each to its registered outcome; the `tla` job in CI runs the script.
+and holds each to its registered outcome; the `tla` job in CI runs the script, and the `tla-trim` job its trimming configurations ([Trimming](#trimming)).
 `specs/FelixdSpecs.tla` models spec history on the same stream, and the `tla-specs` job checks
 it ([Spec history](#spec-history)).
 `specs/FelixdMerge.tla` models the merge log of a workload with several inputs, and the
@@ -50,7 +50,9 @@ Each twin turns one mechanism off, or drops one assumption, and must find the na
 Every configuration has two nodes.
 
 Distinct states and times are from TLC 1.7.4 with `-workers 4` on the CI runner (`ubuntu-latest`),
-where the whole script takes about 21 minutes. A twin's count varies a little between runs,
+where the whole script takes about 21 minutes. The trimming configurations (`FelixdTrim*`) run in their
+own job, `TLA_MODULE=FelixdTrimming`, so the rest keep their 30 minutes. Their times below are from a laptop and not yet
+measured on the runner. A twin's count varies a little between runs,
 since TLC stops at the first violation a worker finds.
 
 | Configuration | Expected | Model | Distinct states | Time |
@@ -75,8 +77,10 @@ since TLC stops at the first violation a worker finds.
 | `FelixdPartialNoIndex` | `NoPoison` | the fold skipping whole inputs, not outputs by index | about 700,000 | 14 s |
 | `FelixdTrim` | pass | an input with an output, then one with none, two claims, a crash, a clock fault, two snapshots, a trim that keeps the last snapshot | 1,995,590 | about 30 s |
 | `FelixdTrimKeepTwo` | pass | the same, with a trim that keeps the last two | 1,687,132 | about 25 s |
+| `FelixdTrimTwice` | pass | an output, an idle input and another output, two claims, a crash, three snapshots, two trims that each keep the last snapshot | 7,344,956 | about 1 min 45 s |
 | `FelixdTrimNoOwn` | pass | the same as `FelixdTrim`, with the own-snapshot rule off | 1,995,590 | about 30 s |
 | `FelixdTrimOldest` | `RestoreIntact` | the input floor from the oldest kept record's step, not the lowest | about 25,000 | under 1 s |
+| `FelixdTrimAnyTime` | `RestoreIntact` | a trim allowed at any time, not only right after the ack of the holder's snapshot | about 220,000 | under 5 s |
 
 `FelixdFull` has everything at once, with a second input whose batch of two may land in part. The `TLA nightly` workflow walks three million random
 behaviours of it with `TLC_SIMULATE`, which takes about five minutes on an Apple M-series laptop. A
@@ -434,7 +438,9 @@ Both `Felixd.tla` and `FelixdMerge.tla` add three things:
 - **`TrimStep`** is the step after an acked snapshot. The kept snapshots are the last `Keep` on
   `.snap`. The holder appends a trim record at the `.out` tail it expects, like an output, so a
   holder a later one has superseded cannot land one. A trim that is not planned, or is refused, is
-  skipped, and floors never go back.
+  skipped, and floors never go back. The code reads `.snap`, plans and then appends; the model does
+  all three in one step. A snapshot that lands between the read and the append leaves the same
+  streams as one landing just after the step, which the model covers.
 - **`Delete*`** drops what the last trim record names, only after that record has landed. The
   `.snap` records and the inputs go in separate steps, so a crash between them leaves less
   deleted than recorded.
@@ -460,7 +466,11 @@ Two things the models showed about the code's rules:
 - **The trim has to follow the holder's own ack.** With a trim allowed at any later time, TLC
   finds a holder whose snapshot write timed out and then landed. The holder had given up, resumed
   and replayed, and wrote a second snapshot at a lower step, which landed after a trim set from
-  the first. The code trims right after the ack of a snapshot it wrote, so the model does too.
+  the first. The code trims right after the ack of a snapshot it wrote, so the model does too;
+  `FelixdTrimAnyTime` allows a trim at any time and TLC finds this.
+- **A second trim.** `FelixdTrim` ends after one trim, because the first snapshot's floors equal
+  the empty ones and are skipped. `FelixdTrimTwice` has a third input so a second trim raises the
+  floors the first set, and holds `RestoreIntact` across both, with a crash between.
 
 Not modelled: snapshot chunks (a snapshot is its manifest), the `.snap` offsets in `FelixdMerge`
 (`Felixd.tla` checks them), and the head trim of `.out` ([Not modelled](#not-modelled)).

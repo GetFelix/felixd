@@ -46,9 +46,8 @@ pub struct Trim {
 pub enum Skip {
     /// Fewer than `keep` snapshots, so nothing is past them.
     TooFew,
-    /// The newest snapshot is not the holder's own. Until it is, a stale
-    /// holder can still land a snapshot, of a lower step, that the next
-    /// resume would restore.
+    /// The newest snapshot is not the holder's own. The trim append is also
+    /// refused once a later holder has claimed, so this is a second guard.
     NotOwn,
     /// A floor would go below the previous trim's. History below that may be
     /// gone, so this would be a bug; nothing is trimmed.

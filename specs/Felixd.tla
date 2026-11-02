@@ -44,6 +44,8 @@
 (*                   holder a later one has superseded, so the twin passes.*)
 (*   TrimLowestStep  the input floor is the lowest step among the kept    *)
 (*                   snapshots, not the oldest kept record's.             *)
+(*   TrimAnyTime     off in the code: a holder trims right after the ack  *)
+(*                   of a snapshot it wrote, not at any later time.       *)
 (* Assumptions, each dropped in a twin:                                    *)
 (*   RecreateWhenWritten  `epochs` is recreated only while every live     *)
 (*                        epoch is on a record (design.md, Leases).        *)
@@ -80,19 +82,21 @@ CONSTANTS
     FaultsInFailWindow,
     RecreateWhenWritten,
     TrimOwnSnap,
-    TrimLowestStep
+    TrimLowestStep,
+    TrimAnyTime
 
 ASSUME /\ NoNode \notin Nodes
        /\ \A b \in {ClaimMarker, EpochFloor, Confirmer, LaterEpochWins,
                     ReplayGuard, FoldOnEvents, FailRecord, IndexFold, LocalFaults, TimingFaults,
                     FaultsInFailWindow, RecreateWhenWritten, TrimOwnSnap,
-                    TrimLowestStep} : b \in BOOLEAN
+                    TrimLowestStep, TrimAnyTime} : b \in BOOLEAN
        /\ MaxTrims \in Nat
        /\ Keep \in Nat \ {0}
 
 \* Workload shapes for the configurations.
 One == <<1>>
 OneThenIdle == <<1, 0>>
+OneIdleOne == <<1, 0, 1>>
 OneEach == <<1, 1>>
 IdleThenTwo == <<0, 2>>
 OneThenTwo == <<1, 2>>
@@ -625,9 +629,14 @@ LastTrim ==
 \* output, so a superseded holder's is refused. A trim that is not planned or
 \* not accepted is skipped; floors never go back (Skip::Regressed). It must
 \* follow the holder's own ack: a trim at any later time can land after a
-\* given-up write of the same holder has put a lower step on the stream.
+\* given-up write of the same holder has put a lower step on the stream
+\* (TrimAnyTime lets TLC show it).
+\*
+\* The code reads `.snap`, plans, then appends; here that is one step. A
+\* snapshot that lands between the read and the append leaves the same streams
+\* as one landing just after this step, which the model covers.
 TrimStep(n) ==
-    /\ nd[n].pc = "trim"
+    /\ (nd[n].pc = "trim" \/ (TrimAnyTime /\ nd[n].pc = "run"))
     /\ LET kept == {Snaps[j] : j \in Len(Snaps) - Keep + 1..Len(Snaps)}
            oldest == Snaps[Len(Snaps) - Keep + 1]
            step == IF TrimLowestStep THEN Min({snap[q].i : q \in kept}) ELSE snap[oldest].i
