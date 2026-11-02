@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Modules over 8 MiB (#21). A module over 8 MiB is stored in the `modules`
+  cache as 4 MiB chunks under `<sha256>/<n>` with a JSON manifest under the
+  module's own key, chunks first and manifest last. A module of 8 MiB or less,
+  which is all a build before this could hold, is stored as before. Readers
+  (nodes, `felixd check`, `felixd replay`, admission's projector) read four
+  chunks at a time, check each chunk and then the whole against the hash; a
+  missing chunk is the `module missing` needs-operator reason and a wrong one
+  fails the workload as poison. Admission's default `max_module_bytes` and
+  `felixd run`'s limit are now 64 MiB, up from 8 MiB. New
+  `felixd_agent::module_store` and `felixd_core::module` items;
+  `felixd-testkit` gains `padded`.
+- Upgrading for module chunks (#21): upgrade every node before submitting a
+  module over 8 MiB, since an older node reads the manifest as a module that
+  does not match its hash. An admission module already running keeps the
+  8 MiB limit it was built with; to raise it, build the new admission module,
+  check it with `felixd replay --id admission --diff --all --module <hash>` and
+  run `felixd init` with it.
 - Refused stream creates (#149). `felixd run`, `felixd init` and `felixd drain`
   read a stream or cache back after Felix answers 409, and now exit with an
   error carrying Felix's reason where they used to succeed and leave the next
