@@ -979,6 +979,13 @@ or a step whose output (or a snapshot) is larger than one write to Felix may
 hold (8 MiB, against Felix's 16 MiB frame limit). The owner logs an error and
 marks the workload failed with the reason. Only Felix errors are retried.
 
+Every write to Felix is measured first. A request that would not fit in the client's frame limit
+(16 MiB by default; cache values and conditional publishes travel as base64, so about 12 MiB of
+payload) fails with `TooLarge`, which names the key or stream and the most Felix takes. Felix
+itself drops the connection for an oversized frame, which the client reports as a failed write
+and reconnects on, so the caller could not tell it from a broker going away and would retry it
+forever. `TooLarge` is not retried, and an output append that gets it marks the workload failed.
+
 Snapshots are written every N inputs (default 1000) and, with
 `snapshot_every_ms`, at the first input of each interval of that length,
 counted from the Unix epoch: an input whose append time falls in a later

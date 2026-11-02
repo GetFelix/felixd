@@ -6,7 +6,7 @@ use felixd_core::class;
 use felixd_core::output::{self, Abi, Diverged, OutputHeader, Reconciled, Record};
 
 use crate::faults;
-use crate::felix::Felix;
+use crate::felix::{Felix, TooLarge};
 use crate::lease::Fence;
 use crate::metrics::WorkloadMetrics;
 use crate::runner::{
@@ -565,6 +565,10 @@ impl<'a> OutputLog<'a> {
                 Ok(ConditionalWrite::Refused { tail }) => {
                     refused = true;
                     tail
+                }
+                // The same batch will not fit on the next try either.
+                Err(error) if error.is::<TooLarge>() => {
+                    return Err(poison(format!("append to {}: {error}", self.stream)));
                 }
                 Err(error) => {
                     failures += 1;
