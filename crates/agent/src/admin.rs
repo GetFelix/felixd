@@ -115,9 +115,14 @@ pub async fn ensure_grants(settings: &Settings, grant_trim: bool) -> Result<()> 
     let trims = grants::trim_policies(&settings.tenant, &settings.namespace);
     if !grant_trim && held.iter().any(|p| trims.contains(p)) {
         eprintln!(
-            "warning: nodes of {} can still delete history: the node role keeps its stream.trim \
-             rules. Remove them through the control plane's RBAC API to turn deletion off",
-            settings.namespace
+            "warning: nodes of {} can still delete history: the node role keeps a stream.trim \
+             rule. Remove {} through the control plane's RBAC API to turn deletion off",
+            settings.namespace,
+            if held.iter().filter(|p| trims.contains(p)).count() > 1 {
+                "them"
+            } else {
+                "it"
+            }
         );
     }
     for policy in missing {

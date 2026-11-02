@@ -1215,12 +1215,12 @@ workload:
   guide). `deploy/compose.yaml` and the test stacks finalize it
   after the brokers are up.
 - **The node's token carries `stream.trim`.** Run `felixd init --grant-trim`
-  to give it to the node role over the namespace's streams, and read the
-  residual under [Grants](#grants) first: it lets any node erase any stream in
-  the namespace. Then mint the nodes new tokens, and if the mint names the
-  actions to request, add `stream.trim`. `stream.manage` includes `stream.trim`, and
-  Felix's control plane mints it into broker tokens only after `head_trim` is
-  finalized. A node whose token lacks it, for either reason, gets a refusal
+  to give it to the node role over the namespace's streams and `sys.facts`,
+  and read the residual under [Grants](#grants) first: it lets any node erase
+  any stream in the namespace. Then mint the nodes new tokens, and if the mint
+  names the actions to request, add `stream.trim`. `stream.manage` includes
+  `stream.trim`, and Felix's control plane mints it into broker tokens only
+  after `head_trim` is finalized. A node whose token lacks it, for either reason, gets a refusal
   that looks the same, so the warning names both steps.
 
 Without either, the holder logs one warning, and the workload
@@ -1259,7 +1259,7 @@ its next scheduler snapshot; it goes on deleting `.snap` and the merge log of
 every workload it holds.
 
 What stays: the facts from the oldest kept snapshot on, so at most about
-`keep_snapshots` times `--snapshot-every` facts (1,000 by default; the
+`keep_snapshots` times `--snapshot-every` facts (`--snapshot-every` is 1,000 by default; the
 scheduler counts spec records and facts together), whatever the number of
 nodes. A fact is about 120 bytes for a node with a short id that holds
 nothing, 150 with a 36-character id, plus each held workload's id and three

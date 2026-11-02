@@ -213,8 +213,8 @@ enum Command {
         replication_factor: u32,
         /// Let nodes delete history under `--keep-snapshots`: grants the node
         /// role `stream.trim` on every stream of the namespace, which can
-        /// erase any of them for good. Without it nodes record what could be
-        /// deleted and delete nothing.
+        /// erase any of them for good, and on `sys.facts`. Without it nodes
+        /// record what could be deleted and delete nothing.
         #[arg(long)]
         grant_trim: bool,
         /// The admission workload, a WebAssembly component.
