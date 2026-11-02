@@ -4,13 +4,13 @@
 # integration tests' nightly is felix-nightly.yml; this one is separate because
 # it takes most of an hour.
 #
-# A failed scheduled run opens an issue labelled `felix-nightly-scale`, or
-# comments on the open one; a green one closes it.
+# A failed or timed-out scheduled run opens an issue labelled
+# `felix-nightly-scale`, or comments on the open one; a green one closes it.
 name: Scale nightly
 
 on:
   schedule:
-    # After Felix's nightly build (04:41 UTC) and clear of felix-nightly.yml.
+    # After Felix's nightly build (04:41 UTC) and after felix-nightly.yml (13:27).
     - cron: "7 14 * * *"
   workflow_dispatch:
 
@@ -29,7 +29,9 @@ jobs:
 
   report:
     needs: scale
-    if: ${{ always() && needs.scale.result != 'cancelled' && github.event_name == 'schedule' }}
+    # !cancelled() rather than the result: a job that hits its timeout reports
+    # as cancelled, and a hung pull or compose step is a failure worth an issue.
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -54,7 +56,7 @@ jobs:
             fi
             exit 0
           fi
-          body=$(printf 'Run: %s\n\n1000 workloads against the Felix `:nightly` images did not all start. The run summary has the row and the `scale-results` artifact has `scale-1000-ttl10.json` and the broker logs. CONTRIBUTING.md ("Running the scale test") says how to read them. This issue closes itself when a nightly run passes.\n' "$RUN_URL")
+          body=$(printf 'Run: %s\n\nThe scale run at 1000 workloads against the Felix `:nightly` images failed (result: %s). The usual cause is that the workloads did not all start; a missing image, a compose or build failure, or a timeout fails it too. The run summary has the row and the `scale-results` artifact has `scale-1000-ttl10.json` and the broker logs. CONTRIBUTING.md ("Running the scale test") says how to read them. This issue closes itself when a nightly run gets all 1000 running.\n' "$RUN_URL" "$RESULT")
           if [ -n "$open" ]; then
             gh issue comment "$open" --repo "$REPO" --body "$body"
           else

@@ -45,9 +45,10 @@ plus the other `FELIX_*` variables the README lists. With Podman, set `COMPOSE` 
 
 ## Running the scale test
 
-The `Scale` workflow measures how many workloads one Felix cluster carries. It starts three Felix brokers and
-three felixd agents on the runner, creates N counter workloads, and reports how long that took, how much memory
-the brokers use, and how long recovery takes when an agent and then a broker is killed. It never runs on its own.
+The `Scale` workflow measures how many workloads one Felix cluster carries. It starts three Felix brokers and three
+felixd agents on the runner, creates N counter workloads, and reports how long that took, how much memory the
+brokers use, and how long recovery takes when an agent and then a broker is killed. It runs by hand, and every
+night at 1000 workloads (below).
 
 ```
 gh workflow run scale.yml -R GetFelix/felixd -f counts=1000,10000
@@ -61,8 +62,8 @@ each failover, and the job gives up after `timeout_minutes`. A count can carry a
 workloads running, the run stops there (a broken cluster or harness).
 
 When the run ends, its summary page shows one row per count, and the `scale-results` artifact holds
-`scale-<N>.json` with every figure (including the lease census while the workloads started, and memory at each
-phase), plus the end of each container's log. The columns:
+`scale-<N>-ttl<T>.json` (for example `scale-1000-ttl10.json`) with every figure (including the lease census while
+the workloads started, and memory at each phase), plus the end of each container's log. The columns:
 
 - **Streams**: shards created for the namespace (two per workload, plus the shared ones).
 - **Create**: time for N `felixd run` calls, 16 at a time.
@@ -78,14 +79,15 @@ phase), plus the end of each container's log. The columns:
 
 A cell reads `no` when the figure was not measured or did not happen, such as a failover after the count never
 settled. A green job does not mean every count settled: a phase that fails or times out is recorded as a note in
-`scale-<N>.json` and shown as `no`, so the next count still runs. "All running" can be a few seconds off at 1000
-workloads, because it comes from polling a lease census that is slow to read at that size.
+`scale-<N>-ttl<T>.json` and shown as `no`, so the next count still runs. "All running" can be a few seconds off at
+1000 workloads, because it comes from polling a lease census that is slow to read at that size.
 
-`Scale nightly` (`scale-nightly.yml`) runs this workflow every night with `counts=1000`, `build_secs=1500` and
-`felix_image_tag=nightly`, so the brokers and control plane are the ones built from Felix main while felixd keeps
-the felix-client in `.felix-version`. A run whose 1000 workloads never all start fails, and a failed scheduled run
-opens or comments on an issue labelled `felix-nightly-scale`; the next green one closes it. `felix_image_tag` is
-also a dispatch input of `Scale`, to measure any Felix image tag by hand.
+`Scale nightly` (`scale-nightly.yml`) runs this workflow every night at 14:07 UTC with `counts=1000`,
+`build_secs=1500` and `felix_image_tag=nightly`, so the brokers and control plane are the ones built from Felix
+main while felixd keeps the felix-client in `.felix-version`. A run whose 1000 workloads never all start fails. A
+failed or timed-out scheduled run opens or comments on an issue labelled `felix-nightly-scale`, and the next green
+one closes it; dispatched runs report nothing. Green only means all 1000 started: check the failover columns in the
+summary too. `felix_image_tag` is also a dispatch input of `Scale`, to measure any Felix image tag by hand.
 
 The measurements and what they showed are in [docs/design.md](docs/design.md#scale). The harness is
 `crates/felixd/tests/scale.rs`; it skips unless `FELIXD_SCALE_COUNT` is set, so `cargo test` does not run it.
