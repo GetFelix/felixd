@@ -26,6 +26,16 @@
 (* is a function of it. A step's number is its entry's offset on the      *)
 (* merge log, and an output names it.                                     *)
 (*                                                                         *)
+(* Trimming (docs/design.md, Retention). A holder snapshots at the last     *)
+(* entry it stepped; the write travels like any request and may land late. *)
+(* An entry whose record is in `Quiet` has no output. Once a snapshot of   *)
+(* its own is on the stream the holder records a trim on `.out`: the       *)
+(* merge log below the oldest kept step, and each input below the `next`   *)
+(* that step's entry carries (its own record kept), are no longer read.    *)
+(* Delete drops them once the record has landed. RestoreIntact says the    *)
+(* snapshot a resume would restore still has the entries and records it    *)
+(* reads. A snapshot has no `.snap` offsets here; Felixd.tla checks them.  *)
+(*                                                                         *)
 (* Knobs. Each but SameEpochSkip is turned off in a twin that TLC finds  *)
 (* a violation in; with SameEpochSkip off every invariant still holds     *)
 (* (crates/agent/src/merge.rs, runner.rs, crates/core/src/merge.rs):      *)
@@ -36,6 +46,8 @@
 (*   SameEpochSkip  it does not claim again over a record of its epoch.   *)
 (*   SameBytes      reconcile takes a record past the tail as its own only *)
 (*                  if it is the entry it sent, not any of its epoch.     *)
+(*   TrimLowestStep the floors come from the lowest step among the kept   *)
+(*                  snapshots, not the oldest kept record's.              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -49,22 +61,32 @@ CONSTANTS
     MaxPartials,       \* batches that land in part
     MaxRecreates,      \* times the `epochs` cache is recreated
     PerWrite,          \* the most entries one append holds
+    Quiet,             \* records whose step has no output, as <<input, offset>>
+    MaxSnaps,
+    MaxTrims,
+    Keep,              \* snapshots a trim keeps
     MergeClaim,
     ClaimCheck,
     OutFirst,
     CatchUp,
     SameEpochSkip,
-    SameBytes
+    SameBytes,
+    TrimLowestStep
 
 ASSUME /\ NoNode \notin Nodes
        /\ PerWrite >= 1
        /\ \A b \in {MergeClaim, ClaimCheck, OutFirst, CatchUp, SameEpochSkip,
-                    SameBytes} : b \in BOOLEAN
+                    SameBytes, TrimLowestStep} : b \in BOOLEAN
+       /\ MaxSnaps \in Nat /\ MaxTrims \in Nat /\ Keep \in Nat \ {0}
 
 \* Input shapes for the configurations.
 OneEach == <<1, 1>>
 TwoOne == <<2, 1>>
 TwoEach == <<2, 2>>
+
+\* Which records have no output, for the configurations.
+NoQuiet == {}
+SecondQuiet == {<<2, 1>>}
 
 NI == Len(Ins)
 Zero == [i \in 1..NI |-> 0]
@@ -88,12 +110,18 @@ VARIABLES
     nd,        \* each node's state
     bud,       \* fault and bound counters
     mstarted,  \* ghost: [e, at] once epoch e began on the merge log
-    ostarted   \* ghost: [e, at] once epoch e began on `.out`
+    ostarted,  \* ghost: [e, at] once epoch e began on `.out`
+    snap,      \* the snapshots: <<"snap", epoch, holder, step>>
+    snet,      \* snapshot writes in flight
+    del        \* what Felix has deleted: merge log offsets up to `m`, input offsets up to `in[i]`
 
-vars == <<merge, out, net, ctr, nd, bud, mstarted, ostarted>>
+vars == <<merge, out, net, ctr, nd, bud, mstarted, ostarted, snap, snet, del>>
+extra == <<snap, snet, del>>
 
 \* pc: idle, oclaim, oclaimw, mread, mclaim, mclaimw, probe, resume, run,
 \* ow (an output in flight), mw (a merge append in flight).
+\* pos: the last entry stepped. st: the `.snap` tail it expects. swait: a snapshot write in flight, the run waits for
+\* it. trim: it landed, and the holder records the trim.
 \* ot and mt: the `.out` and merge log tails the holder expects. nx: each
 \* input's next offset after the merge log's last record. todo: the steps
 \* to take, each [p, i, o]: the merge offset and the record stepped there. bat: the entries of the merge append in flight not yet
@@ -101,7 +129,7 @@ vars == <<merge, out, net, ctr, nd, bud, mstarted, ostarted>>
 \* holder sent at the offset it believes it landed at.
 NodeInit == [pc |-> "idle", e |-> 0, h |-> 0, oc |-> FALSE, ot |-> 0, mt |-> 0,
              nx |-> Zero, todo |-> <<>>, bat |-> <<>>, land |-> <<>>,
-             aw |-> NoMsg, rep |-> "none"]
+             aw |-> NoMsg, rep |-> "none", pos |-> 0, st |-> 0]
 
 Init ==
     /\ merge = <<>>
@@ -109,9 +137,13 @@ Init ==
     /\ net = {}
     /\ ctr = 0
     /\ nd = [n \in Nodes |-> NodeInit]
-    /\ bud = [begins |-> 0, crashes |-> 0, lost |-> 0, partials |-> 0, recreates |-> 0]
+    /\ bud = [begins |-> 0, crashes |-> 0, lost |-> 0, partials |-> 0, recreates |-> 0,
+              snaps |-> 0, trims |-> 0]
     /\ mstarted = {}
     /\ ostarted = {}
+    /\ snap = <<>>
+    /\ snet = {}
+    /\ del = [m |-> 0, in |-> Zero]
 
 -----------------------------------------------------------------------------
 (* Helpers *)
@@ -147,6 +179,12 @@ OutRec(n, t) == Rec("out", nd[n].e, nd[n].h, t.p, t.i, t.o, Zero)
 FromLog(ps) == [j \in 1..Len(ps) |-> [p |-> ps[j], i |-> merge[ps[j]].i, o |-> merge[ps[j]].o]]
 OClaimRec(n) == Rec("claim", nd[n].e, nd[n].h, 0, 0, 0, Zero)
 
+IsQuiet(t) == <<t.i, t.o>> \in Quiet
+
+\* Only tracked when something reads it, so the other configurations keep
+\* their state space.
+Tracked(p) == IF MaxSnaps > 0 THEN p ELSE 0
+
 \* The node gives the run up: superseded, crashed or out of retries.
 Stop(n) == nd' = [nd EXCEPT ![n] = NodeInit]
 
@@ -174,13 +212,13 @@ Begin(n) ==
                        !.pc = IF OutFirst THEN "oclaim" ELSE "mread",
                        !.e = e, !.h = bud.begins + 1, !.ot = Len(out)]]
     /\ bud' = [bud EXCEPT !.begins = @ + 1]
-    /\ UNCHANGED <<merge, out, net, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, mstarted, ostarted, extra>>
 
 \* `OutputLog::claim`: the claim at the tail read with the floor.
 OClaim(n) ==
     /\ nd[n].pc = "oclaim"
     /\ Send(n, [n |-> n, s |-> "out", at |-> nd[n].ot, recs |-> <<OClaimRec(n)>>], "oclaimw")
-    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted, extra>>
 
 \* A refused claim, or one whose answer was lost, reads the records past
 \* the tail: any from a later epoch stops it, its own claim among them means
@@ -197,7 +235,7 @@ OClaimAns(n) ==
           THEN nd' = [nd EXCEPT ![n].pc = AfterOutClaim, ![n].oc = TRUE,
                                 ![n].ot = Len(out), ![n].rep = "none"]
           ELSE nd' = [nd EXCEPT ![n].pc = "oclaim", ![n].ot = Len(out), ![n].rep = "none"]
-    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
 
 \* `MergeLog::claim`: the merge log's tail and last record, read after the
 \* `.out` claim has landed.
@@ -217,13 +255,13 @@ MRead(n) ==
                               ELSE mstarted
           ELSE /\ nd' = [nd EXCEPT ![n].pc = "mclaim", ![n].mt = Len(merge), ![n].nx = cur]
                /\ UNCHANGED mstarted
-    /\ UNCHANGED <<merge, out, net, ctr, bud, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, ostarted, extra>>
 
 MClaim(n) ==
     /\ nd[n].pc = "mclaim"
     /\ Send(n, [n |-> n, s |-> "merge", at |-> nd[n].mt,
                 recs |-> <<Rec("claim", nd[n].e, nd[n].h, 0, 0, 0, nd[n].nx)>>], "mclaimw")
-    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted, extra>>
 
 \* A refused claim, or one whose answer was lost, reads the tail again.
 MClaimAns(n) ==
@@ -232,7 +270,7 @@ MClaimAns(n) ==
              THEN [nd EXCEPT ![n].pc = AfterMergeClaim(n), ![n].mt = nd[n].mt + 1,
                              ![n].rep = "none"]
              ELSE [nd EXCEPT ![n].pc = "mread", ![n].rep = "none"]
-    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
 
 \* A run that ended in a transient error starts again under the same lease:
 \* it does not claim `.out` again, and stops if the last record there is
@@ -243,7 +281,7 @@ Probe(n) ==
        THEN Stop(n)
        ELSE nd' = [nd EXCEPT ![n].pc = "mread", ![n].ot = Len(out), ![n].todo = <<>>,
                              ![n].bat = <<>>, ![n].land = <<>>, ![n].rep = "none"]
-    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
 
 \* The last output below the tail, the superseded check on it, and the fold:
 \* the next step is the one after the last output's. Then the entries from
@@ -254,12 +292,18 @@ Resume(n) ==
     /\ LET outs == PosOf(out, "out", 1, nd[n].ot)
            last == IF outs = <<>> THEN 0 ELSE outs[Len(outs)]
            next == IF last = 0 THEN 1 ELSE out[last].s + 1
-       IN IF last # 0 /\ out[last].e > nd[n].e
+           \* The newest snapshot is restored. Entries up to its step are in
+           \* the state, and the ones up to the last output are replayed.
+           ss == PosOf(snap, "snap", 1, Len(snap))
+           t == IF ss = <<>> THEN 0 ELSE snap[ss[Len(ss)]].s
+           from == Max2(next, t + 1)
+       IN IF (last # 0 /\ out[last].e > nd[n].e) \/ (ss # <<>> /\ snap[ss[Len(ss)]].e > nd[n].e)
           THEN Stop(n)
-          ELSE nd' = [nd EXCEPT ![n].pc = "run",
-                         ![n].todo = IF CatchUp THEN FromLog(PosOf(merge, "entry", next, nd[n].mt))
+          ELSE nd' = [nd EXCEPT ![n].pc = "run", ![n].pos = Tracked(Max2(from - 1, 0)),
+                         ![n].st = Tracked(Len(snap)),
+                         ![n].todo = IF CatchUp THEN FromLog(PosOf(merge, "entry", from, nd[n].mt))
                                      ELSE <<>>]
-    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
 
 -----------------------------------------------------------------------------
 (* Running *)
@@ -267,9 +311,10 @@ Resume(n) ==
 \* The step for the next entry, its output appended at the `.out` tail.
 OSend(n) ==
     /\ nd[n].pc = "run" /\ nd[n].todo # <<>>
+    /\ ~IsQuiet(Head(nd[n].todo))
     /\ Send(n, [n |-> n, s |-> "out", at |-> nd[n].ot,
                 recs |-> <<OutRec(n, Head(nd[n].todo))>>], "ow")
-    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted, extra>>
 
 \* `OutputLog::append`'s reconcile: its own output past the tail landed, a
 \* later epoch stops it, and nothing past the tail means send it again. A
@@ -282,6 +327,7 @@ OAns(n) ==
            landed == nd[n].rep = "ok" \/ (past # {} /\ out[ot + 1] = mine)
        IN \/ /\ landed
              /\ nd' = [nd EXCEPT ![n].pc = "run", ![n].ot = ot + 1,
+                                 ![n].pos = Tracked(Head(nd[n].todo).p),
                                  ![n].todo = Tail(nd[n].todo), ![n].rep = "none"]
           \/ /\ ~landed /\ \E p \in past : out[p].e > nd[n].e
              /\ Stop(n)
@@ -290,7 +336,7 @@ OAns(n) ==
                                  ![n].rep = "none"]
           \/ /\ nd[n].rep = "lost"
              /\ nd' = [nd EXCEPT ![n].pc = "probe", ![n].rep = "none"]
-    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
 
 \* Records from the inputs merged in any order: one append of up to
 \* PerWrite entries at the merge log tail, before any of them is stepped.
@@ -302,7 +348,7 @@ Merge(n) ==
         IN /\ net' = net \cup {m}
            /\ nd' = [nd EXCEPT ![n].pc = "mw", ![n].aw = m, ![n].rep = "none",
                                ![n].bat = recs, ![n].land = <<>>]
-    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted, extra>>
 
 \* `MergeLog::append` with `merge::reconcile` on a refusal or a lost answer:
 \* its own entries past the tail are taken as written, a later epoch stops
@@ -338,7 +384,101 @@ MAns(n) ==
                \/ /\ nd[n].rep = "lost"
                   /\ nd' = [nd EXCEPT ![n].pc = "probe", ![n].rep = "none"]
                   /\ UNCHANGED net
-    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, ctr, bud, mstarted, ostarted, extra>>
+
+-----------------------------------------------------------------------------
+(* Snapshots and trimming *)
+
+\* An entry with no output is stepped without a write.
+QuietStep(n) ==
+    /\ nd[n].pc = "run" /\ nd[n].todo # <<>> /\ IsQuiet(Head(nd[n].todo))
+    /\ nd' = [nd EXCEPT ![n].pos = Tracked(Head(nd[n].todo).p), ![n].todo = Tail(nd[n].todo)]
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
+
+\* The state after the last entry stepped, which may be an entry before the
+\* ones still to step. The holder waits for the write. It may land later, after
+\* its holder has given up on it, stopped, or a later holder has taken over.
+SnapTake(n) ==
+    /\ nd[n].pc = "run" /\ nd[n].pos > 0 /\ bud.snaps < MaxSnaps
+    /\ snet' = snet \cup {[n |-> n, at |-> nd[n].st,
+                           r |-> Rec("snap", nd[n].e, nd[n].h, nd[n].pos, 0, 0, Zero)]}
+    /\ nd' = [nd EXCEPT ![n].pc = "swait"]
+    /\ bud' = [bud EXCEPT !.snaps = @ + 1]
+    /\ UNCHANGED <<merge, out, net, ctr, mstarted, ostarted, snap, del>>
+
+\* No answer: the run ends and starts again under the same lease.
+SnapGiveUp(n) ==
+    /\ nd[n].pc = "swait"
+    /\ nd' = [nd EXCEPT ![n].pc = "probe"]
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, extra>>
+
+\* A snapshot is `publish_if` at the tail its holder read. One refused is sent
+\* again at the new tail while its holder still waits and no later epoch's
+\* snapshot is there, so it can land after a snapshot of a lower or higher
+\* step. A holder that gave up does not send it again.
+SnapLand(m) ==
+    /\ m \in snet
+    /\ LET waiting == nd[m.n].pc = "swait" /\ nd[m.n].h = m.r.h /\ nd[m.n].pos = m.r.s
+           later == \E p \in 1..Len(snap) : snap[p].e > m.r.e
+       IN IF Len(snap) = m.at
+          THEN /\ snap' = Append(snap, m.r)
+               /\ snet' = snet \ {m}
+               /\ nd' = IF waiting THEN [nd EXCEPT ![m.n].pc = "trim", ![m.n].st = Len(snap) + 1]
+                        ELSE nd
+          ELSE /\ snet' = IF waiting /\ ~later
+                           THEN (snet \ {m}) \cup {[m EXCEPT !.at = Len(snap)]}
+                           ELSE snet \ {m}
+               /\ UNCHANGED <<snap, nd>>
+    /\ UNCHANGED <<merge, out, net, ctr, bud, mstarted, ostarted, del>>
+
+Snaps == PosOf(snap, "snap", 1, Len(snap))
+
+\* The step of the last trim record on `.out`, 0 before any.
+LastTrim ==
+    LET ts == PosOf(out, "trim", 1, Len(out))
+    IN IF ts = <<>> THEN 0 ELSE out[ts[Len(ts)]].s
+
+\* What a resume from a snapshot at step t reads nothing below: the merge
+\* log up to the entry before it (the entry holds the `next` each input
+\* carries on from), and each input up to that `next`, the entry's own
+\* record kept for its append time.
+FloorsOf(t) ==
+    LET en == merge[t]
+    IN [m |-> t - 1,
+        in |-> [i \in 1..NI |-> IF i = en.i THEN en.nx[i] - 1 ELSE en.nx[i]]]
+
+\* trim::plan, once the holder's own snapshot has landed. The kept snapshots
+\* are the last Keep. The newest is the one a resume restores, but it can
+\* have a lower step than an older kept one: the oldest record's step would
+\* delete what the newest still reads. The record goes at the `.out` tail the
+\* holder expects, so a superseded holder's is refused. Floors never go back.
+TrimStep(n) ==
+    /\ nd[n].pc = "trim"
+    /\ LET oldest == Snaps[Len(Snaps) - Keep + 1]
+           kept == {Snaps[j] : j \in Len(Snaps) - Keep + 1..Len(Snaps)}
+           step == IF TrimLowestStep THEN MinOf({snap[q].s : q \in kept}) ELSE snap[oldest].s
+           ok == /\ bud.trims < MaxTrims /\ nd[n].ot = Len(out) /\ Len(Snaps) >= Keep
+                 /\ step > LastTrim
+       IN IF ok
+          THEN /\ out' = Append(out, Rec("trim", nd[n].e, nd[n].h, step, 0, 0, Zero))
+               /\ nd' = [nd EXCEPT ![n].pc = "run", ![n].ot = @ + 1]
+               /\ bud' = [bud EXCEPT !.trims = @ + 1]
+          ELSE /\ nd' = [nd EXCEPT ![n].pc = "run"]
+               /\ UNCHANGED <<out, bud>>
+    /\ UNCHANGED <<merge, net, ctr, mstarted, ostarted, extra>>
+
+\* Felix deletes only up to a trim that has landed, merge log and inputs in
+\* separate steps.
+DeleteMerge ==
+    /\ LastTrim > 0 /\ FloorsOf(LastTrim).m > del.m
+    /\ del' = [del EXCEPT !.m = FloorsOf(LastTrim).m]
+    /\ UNCHANGED <<merge, out, net, ctr, nd, bud, mstarted, ostarted, snap, snet>>
+
+DeleteInputs ==
+    /\ LastTrim > 0
+    /\ \E i \in 1..NI : FloorsOf(LastTrim).in[i] > del.in[i]
+    /\ del' = [del EXCEPT !.in = [i \in 1..NI |-> Max2(del.in[i], FloorsOf(LastTrim).in[i])]]
+    /\ UNCHANGED <<merge, out, net, ctr, nd, bud, mstarted, ostarted, snap, snet>>
 
 -----------------------------------------------------------------------------
 (* Felix and the environment *)
@@ -368,20 +508,20 @@ Land(m, lost) ==
 
 Deliver(m) ==
     /\ Land(m, FALSE)
-    /\ UNCHANGED <<ctr, bud>>
+    /\ UNCHANGED <<ctr, bud, extra>>
 
 LoseAnswer(m) ==
     /\ Answers(m) /\ bud.lost < MaxLost
     /\ Land(m, TRUE)
     /\ bud' = [bud EXCEPT !.lost = @ + 1]
-    /\ UNCHANGED ctr
+    /\ UNCHANGED <<ctr, extra>>
 
 \* The sender stops waiting. The request may still land, or never.
 Timeout(n) ==
     /\ nd[n].aw \in net /\ nd[n].rep = "none" /\ bud.lost < MaxLost
     /\ nd' = [nd EXCEPT ![n].rep = "lost"]
     /\ bud' = [bud EXCEPT !.lost = @ + 1]
-    /\ UNCHANGED <<merge, out, net, ctr, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, mstarted, ostarted, extra>>
 
 \* Part of a batch lands and the sender gets an error.
 DeliverPrefix(m) ==
@@ -391,14 +531,14 @@ DeliverPrefix(m) ==
     /\ nd' = IF Answers(m) THEN [nd EXCEPT ![m.n].rep = "lost"] ELSE nd
     /\ net' = net \ {m}
     /\ bud' = [bud EXCEPT !.partials = @ + 1]
-    /\ UNCHANGED <<out, ctr, mstarted, ostarted>>
+    /\ UNCHANGED <<out, ctr, mstarted, ostarted, extra>>
 
 \* A crash, or a holder that gives up the workload for good.
 Crash(n) ==
     /\ nd[n].pc # "idle" /\ bud.crashes < MaxCrashes
     /\ Stop(n)
     /\ bud' = [bud EXCEPT !.crashes = @ + 1]
-    /\ UNCHANGED <<merge, out, net, ctr, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, ctr, mstarted, ostarted, extra>>
 
 \* The `epochs` cache is recreated, only while every epoch a holder or a
 \* request in flight could still write is on `.out` (design.md, Leases).
@@ -408,18 +548,21 @@ Recreate ==
            e <= MaxEpochOn(out)
     /\ ctr' = 0
     /\ bud' = [bud EXCEPT !.recreates = @ + 1]
-    /\ UNCHANGED <<merge, out, net, nd, mstarted, ostarted>>
+    /\ UNCHANGED <<merge, out, net, nd, mstarted, ostarted, extra>>
 
 -----------------------------------------------------------------------------
 
 NodeStep(n) ==
     \/ Begin(n) \/ OClaim(n) \/ OClaimAns(n) \/ MRead(n) \/ MClaim(n) \/ MClaimAns(n)
     \/ Probe(n) \/ Resume(n) \/ OSend(n) \/ OAns(n) \/ Merge(n) \/ MAns(n)
+    \/ QuietStep(n) \/ SnapTake(n) \/ SnapGiveUp(n) \/ TrimStep(n)
 
 Next ==
     \/ \E n \in Nodes : NodeStep(n) \/ Crash(n) \/ Timeout(n)
     \/ \E m \in net : Deliver(m) \/ LoseAnswer(m) \/ DeliverPrefix(m)
     \/ Recreate
+    \/ \E m \in snet : SnapLand(m)
+    \/ DeleteMerge \/ DeleteInputs
 
 Spec == Init /\ [][Next]_vars
 
@@ -467,7 +610,9 @@ OneWriter ==
              \cup {[e |-> out[p].e, h |-> out[p].h] : p \in 1..Len(out)}
     IN \A a, b \in w : a.e = b.e => a.h = b.h
 
-Entries == PosOf(merge, "entry", 1, Len(merge))
+\* The entries that have an output.
+Entries == SelectSeq(PosOf(merge, "entry", 1, Len(merge)),
+                     LAMBDA q : <<merge[q].i, merge[q].o>> \notin Quiet)
 Outs == PosOf(out, "out", 1, Len(out))
 
 \* The outputs on `.out` are a prefix of the outputs of the merge log's
@@ -488,5 +633,13 @@ StepsFollowMerge ==
            /\ merge[r.s].k = "entry"
            /\ merge[r.s].i = r.i /\ merge[r.s].o = r.o
            /\ j > 1 => out[Outs[j - 1]].s < r.s
+
+\* The snapshot a resume restores, the last one, still has the merge log from
+\* its entry on and the input records after the cursor its entry carries.
+RestoreIntact ==
+    Snaps # <<>> =>
+        LET t == snap[Snaps[Len(Snaps)]].s
+        IN /\ FloorsOf(t).m >= del.m
+           /\ \A i \in 1..NI : FloorsOf(t).in[i] >= del.in[i]
 
 =============================================================================

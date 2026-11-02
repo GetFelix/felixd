@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Modules over 8 MiB (#21). A module over 8 MiB is stored in the `modules`
+  cache as 4 MiB chunks under `<sha256>/<n>` with a JSON manifest under the
+  module's own key, chunks first and manifest last. A module of 8 MiB or less,
+  which is all a build before this could hold, is stored as before. Readers
+  (nodes, `felixd check`, `felixd replay`, admission's projector) read four
+  chunks at a time, check each chunk and then the whole against the hash; a
+  missing chunk is the `module missing` needs-operator reason and a wrong one
+  fails the workload as poison. Admission's default `max_module_bytes` and
+  `felixd run`'s limit are now 64 MiB, up from 8 MiB. New
+  `felixd_agent::module_store` and `felixd_core::module` items;
+  `felixd-testkit` gains `padded`.
+- Upgrading for module chunks (#21): upgrade every node before submitting a
+  module over 8 MiB, since an older node reads the manifest as a module that
+  does not match its hash. An admission module already running keeps the
+  8 MiB limit it was built with; to raise it, build the new admission module,
+  check it with `felixd replay --id admission --diff --all --module <hash>` and
+  run `felixd init` with it.
+- Refused stream creates (#149). `felixd run`, `felixd init` and `felixd drain`
+  read a stream or cache back after Felix answers 409, and now exit with an
+  error carrying Felix's reason where they used to succeed and leave the next
+  read waiting for a stream that was never created. Felix refuses a stream
+  under the name of a deleted one until the cluster has finalized stream
+  incarnations; a control plane no broker registers with, like the
+  single-broker test stack, never finalizes them. Admission's projector hits the
+  same refusal when it creates an accepted workload's streams: it logs Felix's
+  reason and retries every second until the name can be reused, instead of
+  recording a spec whose streams do not exist.
+- Felix 0.7.0-preview.2. felixd builds on `felix-client` 0.7.0-preview.2 and the
+  compose files and test stacks default to the 0.7.0-preview.2 images. Nothing
+  changes for users. This release is the first with conditional head trims,
+  which later changes use to delete history. The client's cluster type is now
+  called `Client`.
 - Upgrade check from a snapshot (#29). `felixd replay --diff --module` and
   `replay --to ... --module` start the new module from the workload's nearest
   snapshot (before `--from` for a diff, before the end of the range for `--to`)
@@ -63,6 +95,12 @@
   admission's own only if it names a decision that accepted exactly that
   spec; any other needs an operator with the new reason `spec_unadmitted` and
   never claims. New fault `crash-after-projection-sent=N` for tests.
+- Resubmitting a workload a newer build left to an operator (#136). `felixd run`
+  from an older build submits a new spec over a needs-operator record whose
+  reason it cannot read, which is how the workload is released. Nodes on the
+  older build leave the workload alone until a node that can read the record
+  takes it. Such a record also raises the highest spec claimed, as one it can
+  read does.
 - System workloads (`admission`, `scheduler`) are refused through intake;
   `felixd run` writes their specs directly with the control plane token as
   before. A spec record runs only if no record of the workload anywhere on

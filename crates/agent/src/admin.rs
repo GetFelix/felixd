@@ -35,12 +35,19 @@ pub async fn ensure_namespace(settings: &Settings) -> Result<()> {
         names::system_namespace(&settings.namespace),
     ] {
         let body = json!({"namespace": namespace, "display_name": namespace});
-        post(settings, "namespaces", body).await?;
+        let (status, text) = call(settings, "POST", "namespaces", Some(body)).await?;
+        // A namespace is never refused for reusing a name, so a 409 is only
+        // ever "already exists".
+        if !(200..=299).contains(&status) && status != 409 {
+            bail!("creating namespace {namespace} failed with HTTP {status}: {text}");
+        }
     }
     Ok(())
 }
 
-/// Creates a single-shard durable stream, if it does not exist.
+/// Creates a single-shard durable stream, if it does not exist. Fails when the
+/// control plane refuses the create, as it does for the name of a deleted
+/// stream before the cluster has finalized stream incarnations.
 pub async fn ensure_stream(settings: &Settings, stream: &str, kind: StreamKind) -> Result<()> {
     let body = json!({
         "stream": stream,
@@ -53,11 +60,18 @@ pub async fn ensure_stream(settings: &Settings, stream: &str, kind: StreamKind) 
         "durable": true,
     });
     let namespace = names::namespace_of(&settings.namespace, stream);
-    post(settings, &format!("namespaces/{namespace}/streams"), body).await
+    create(
+        settings,
+        &format!("namespaces/{namespace}/streams"),
+        stream,
+        body,
+    )
+    .await
 }
 
 /// Creates a cache, if it does not exist. An existing cache keeps the
-/// replication it was created with.
+/// replication it was created with. Fails when the control plane refuses the
+/// create, as [`ensure_stream`] does.
 pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) -> Result<()> {
     let body = json!({
         "cache": cache,
@@ -66,7 +80,13 @@ pub async fn ensure_cache(settings: &Settings, cache: &str, kind: StreamKind) ->
         "consistency": kind.consistency(),
     });
     let namespace = &settings.namespace;
-    post(settings, &format!("namespaces/{namespace}/caches"), body).await
+    create(
+        settings,
+        &format!("namespaces/{namespace}/caches"),
+        cache,
+        body,
+    )
+    .await
 }
 
 /// Writes every rule of [`grants::policies`] the control plane does not hold,
@@ -187,12 +207,27 @@ fn view_is_tenant_wide(token: &str, tenant: &str) -> bool {
         .is_some_and(|perms| perms.iter().any(|p| p.as_str() == Some(wanted.as_str())))
 }
 
-/// POSTs to `/v1/tenants/{tenant}/{path}`. A 409 means it already exists.
-async fn post(settings: &Settings, path: &str, body: Value) -> Result<()> {
-    let (status, text) = call(settings, "POST", path, Some(body)).await?;
+/// POSTs `body` to the collection at `/v1/tenants/{tenant}/{collection}` and
+/// accepts a 409 only if `name` is there afterwards. Felix answers 409 both
+/// when the resource exists and when a create reuses a deleted name before the
+/// cluster has finalized incarnations, and only the first leaves something to
+/// use. Reading back does not depend on the wording of the refusal.
+async fn create(settings: &Settings, collection: &str, name: &str, body: Value) -> Result<()> {
+    let (status, text) = call(settings, "POST", collection, Some(body)).await?;
     match status {
-        200..=299 | 409 => Ok(()),
-        _ => bail!("creating {path} failed with HTTP {status}: {text}"),
+        200..=299 => Ok(()),
+        409 => {
+            let path = format!("{collection}/{name}");
+            match call(settings, "GET", &path, None).await?.0 {
+                200 => Ok(()),
+                404 => bail!("creating {path} was refused with HTTP 409: {text}"),
+                other => bail!(
+                    "creating {path} was refused with HTTP 409: {text}; reading it back \
+                     failed with HTTP {other}"
+                ),
+            }
+        }
+        _ => bail!("creating {collection}/{name} failed with HTTP {status}: {text}"),
     }
 }
 

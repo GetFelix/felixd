@@ -335,7 +335,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `leases` | cache, TTL | workload id | owner node id, lease epoch (0 until the claim has taken one) | agents, with `cache_put_if` |
 | `epochs` | cache | workload id | the last lease epoch handed out | agents, with `cache_put_if` |
 | `nodes` | cache, TTL | node id | felixd version, `max_workloads`, workloads held | each agent |
-| `modules` | cache | sha256 of the module | the module bytes | submitters (`felixd run`) |
+| `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 8 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
 
@@ -354,9 +354,18 @@ and a failure record when the workload fails. Each snapshot carries the input of
 at that point.
 
 Today `felixd run` creates the workload's streams through the control plane's
-REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). Agents never
-create streams. The end state moves that to admission ([Submitting
-work](#submitting-work)).
+REST API (`/v1/tenants/{tenant}/namespaces/{namespace}/streams`). A workload
+admitted through intake gets its streams from admission's projector instead, with
+admission's credential ([Submitting work](#submitting-work)). Other agents never
+create streams.
+
+A create that Felix answers with 409 counts as done only if the stream or cache can be read
+back. Felix also refuses a stream under the name of a deleted one until the cluster has finalized
+stream incarnations, and a control plane that no broker registers with, as in the single-broker
+test stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait
+for a stream that does not exist. Admission's projector, which creates an accepted workload's
+streams, logs the same reason and retries every second, so later decisions wait behind it until an
+operator finalizes incarnations.
 
 Running `felixd run` again for an existing id appends a new spec record and
 points `workloads` at it. The cache only moves forward: a write naming an
@@ -389,6 +398,90 @@ first claim's spec, and judge each input under the limits of the spec whose
 claim covers it: a claim's spec applies from the input after the last output
 before it. A claim its owner refused, under another module or an older
 record, is passed over.
+
+### Modules
+
+A module is a WebAssembly component, named by the sha256 of its bytes. It can
+be up to 64 MiB. Felix refuses a cache value that is too large (a 20 MiB one
+was refused, below), and felixd writes at most 8 MiB to Felix at once, so a
+large module cannot always be one cache value. The `modules` cache stores a
+module like this:
+
+| Module size | Under its sha256 key | Under `<sha256>/<n>` |
+|---|---|---|
+| up to 8 MiB | the module, raw | nothing |
+| over 8 MiB | a manifest: the length and the sha256 of each chunk | chunk `n`, 4 MiB each and a shorter last one |
+
+The 8 MiB line is the most a build from before chunking could store. Anything
+such a build could hold stays one raw value, so running `felixd run` again on
+a 6 MiB module with a new build cannot leave an older node a manifest it would
+read as a module that does not match its hash.
+
+A reader tells the two apart by the first bytes: WebAssembly starts with
+`\0asm` and a manifest is JSON. It checks every chunk's length and hash as it
+reads it, then the joined bytes against the key, so a missing chunk is an
+error that names it (`chunk 2 of module <sha256> is not in the modules cache`)
+and a wrong one fails the workload as poison. Nothing runs on a module that
+fails a check. Every reader goes through `felixd_agent::module_store::fetch`:
+nodes starting a workload, `felixd check`, `felixd replay` and admission's
+projector. It reads four chunks at a time.
+
+The writer, `module_store::put`, stores the chunks first and the manifest last,
+so a manifest never names a chunk that was not written. Putting the same
+module again rewrites the same bytes, which also repairs a chunk that was
+lost. Nothing deletes chunks, so a put that fails part way, or a module admission
+rejects, leaves chunks no manifest names. A submitter needs write on `modules`
+as before; the chunks are keys in the same cache, so no grant changes.
+
+Admission's projector, which records an accepted spec while it holds the lease,
+reads the whole module with `fetch`, so a large module costs it the full fetch
+once per accepted request. Cache keys cannot be probed without reading the
+value, and the hash check is what makes a skip record, which is permanent, a
+true statement: a spec whose module is missing or wrong is never recorded as
+runnable.
+
+Why 4 MiB chunks and 64 MiB: a chunk well under the largest value Felix took
+keeps one write small. 64 MiB is sixteen chunks. Reading one chunk after
+another cost about 70 ms per MiB (below), so a node that takes over a workload
+with a module of that size waits several seconds before it can compile it, on
+top of the lease timing; the limit stops that wait growing without bound.
+Real components are far smaller, so this is headroom and not a target.
+
+Admission's limit is `max_module_bytes` in its policy, 64 MiB by default and
+compiled into the admission module. An admission module built before this
+limit rose still rejects modules over 8 MiB with `module_too_large` until
+`felixd init` runs with a newer one.
+
+Measured on a GitHub Actions runner with one broker and one replica, by
+`FELIXD_MEASURE_MODULES=1 cargo test -p felixd --test module_size --
+--nocapture`. Times vary between runs. The chunked rows read and wrote one
+chunk at a time; the build described above does four at a time, so it should
+be faster, but that was not re-measured.
+
+One cache value, written with a single put:
+
+| Size | put | get |
+|---|---|---|
+| 1 MiB | 1.7 to 2.2 s | 30 to 40 ms |
+| 5 MiB | 0.20 to 0.33 s | 120 to 150 ms |
+| 20 MiB | refused after 0.7 to 1.1 s | |
+
+The first put into a new cache pays for setting it up, which is why 1 MiB is
+slower than 5 MiB. The 20 MiB put started sending before the broker stopped it,
+so the refusal takes as long as it takes to push part of the value; Felix
+drops the connection instead of answering with a clear error
+([#196](https://github.com/GetFelix/felixd/issues/196)).
+
+A chunked module, through `module_store`:
+
+| Size | put | fetch |
+|---|---|---|
+| 20 MiB | 2.2 s | 1.4 s |
+| 64 MiB | 7.2 s | 4.5 s |
+
+Takeaway: values up to 5 MiB store in a fraction of a second, a 20 MiB value
+does not store at all, and a module of any size up to 64 MiB takes a few
+seconds to upload and about 70 ms per MiB to read back.
 
 ## Pipelines
 
@@ -1024,17 +1117,19 @@ until the kept snapshots pass it.
 The oldest kept snapshot is the one with the lowest step among the last K on
 the stream, not the first of them: a stale holder's snapshot can land after a
 newer holder's and be behind it. A holder trims only once the newest snapshot
-on `.snap` is its own. Until then an earlier holder can still land one, of a
-lower step, that the next resume would restore. Once it is, every snapshot
-written later is from this epoch or a later one and at or past a kept step, so
-the floors never go back, and `trim::plan` refuses one that would.
+on `.snap` is its own. This is a second guard: a later holder's snapshot lands
+only after its claim is on `.out`, and that claim makes this holder's trim
+append fail. Once it is the holder's own, every snapshot written later is from
+this epoch or a later one and at or past a kept step, so the floors never go
+back, and `trim::plan` refuses one that would.
 
 The record goes on `.out` with `publish_if` at the tail like an output, so a
 stale holder's is refused by the next claim. A crash before it lands changes
 nothing, and one after leaves a record the next holder passes over, like a
 claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
 
-Nothing is deleted yet. Felix trims only by age or size, which knows nothing
+Nothing is deleted yet. The TLA models include the deletion that will follow and check these
+floors against it ([formal.md](formal.md#trimming)). Felix trims only by age or size, which knows nothing
 of what a resume needs, and has no call to trim a stream before an offset
 ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). When it does,
 the floors decide different things per stream:
@@ -1081,9 +1176,8 @@ workload carries on.
   workload needs its own single-shard output and snapshot streams, created
   through the control plane. That's fine for hundreds of workloads. At tens
   of thousands it depends on how Felix handles many small streams.
-- **Module size.** Wasm modules can be several megabytes. Whether a cache
-  value that large is reasonable, or modules should be chunked, needs
-  measuring.
+- **Module size.** Wasm modules can be tens of megabytes, more than one frame
+  to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
   stream when its leader changes, and the writer gets an error. felixd copes
   (see Exactly-once output), but anything that cannot re-read and compare
@@ -1128,7 +1222,8 @@ failovers. Three rules hold that:
 
 State is not capped by the size of one record. Snapshots are written in chunks,
 and a snapshot writes only the chunks that changed since the last one, with
-separate fuel from `step`. Snapshots are taken by input count and by time, old
+separate fuel from `step`. A module is stored the same way, in chunks
+([Modules](#modules)). Snapshots are taken by input count and by time, old
 snapshots and inputs are trimmed by a stated retention, and each workload has a
 recovery time budget that bounds how far a resume may replay.
 
@@ -1611,9 +1706,10 @@ now:
    ([Credentials](#credentials), #97). Agents never hold control-plane rights.
    Built: a separate credential a node is given, granted as in
    [Grants](#grants); binding it by name in the spec is #97.
-5. **Modules stay in the `modules` cache**, uploaded by hash. The store is
-   content-addressed, so a submitter cannot overwrite another's module, and
-   binaries stay off the log. Admission verifies presence and size.
+5. **Modules stay in the `modules` cache**, uploaded by hash, in chunks above
+   8 MiB ([Modules](#modules)). The store is content-addressed, so a submitter
+   cannot overwrite another's module, and binaries stay off the log. Admission
+   verifies presence, size and hash, reading the chunks of a large module.
 6. **`felixd run` is a thin client:** it uploads the module, publishes the
    request, waits for the accepted or rejected record and prints it.
 7. **Bootstrap.** `felixd init` writes admission's own spec directly with
@@ -1767,8 +1863,9 @@ chunk store (#77):
   per-tenant secret. Two tenants storing the same bytes get different
   addresses, so the store leaks no equality across tenants, and deleting a
   tenant's key and chunks removes its data.
-- Large modules are chunked the same way, which answers the module-size
-  question under [Risks](#risks-and-what-this-surfaces-in-felix) (#21).
+- Modules over 8 MiB are already cut into hashed chunks in the `modules` cache
+  ([Modules](#modules), #21). This store would share those chunks across
+  modules and free them by reference count.
 
 Venti never deleted a block, which made it simple and made deletion
 impossible. Plain content hashes also let anyone who can probe the store

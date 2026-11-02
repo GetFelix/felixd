@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::spec::{WorkloadSpec, WorkloadState, validate_inputs};
-use crate::{DecodeError, MAX_WRITE_BYTES, names};
+use crate::{DecodeError, module, names};
 
 /// The request format this build writes and reads.
 const REQUEST_FORMAT: u32 = 1;
@@ -190,7 +190,7 @@ impl Default for Policy {
             max_fuel_per_call: 10 * limits.fuel_per_call,
             max_memory_bytes: 1 << 30,
             max_snapshot_fuel: 10 * limits.snapshot_fuel,
-            max_module_bytes: MAX_WRITE_BYTES as u64,
+            max_module_bytes: module::MAX_MODULE_BYTES,
             max_replication_factor: 7,
         }
     }
@@ -298,14 +298,8 @@ fn check(policy: &Policy, request: &Request) -> Result<(), (Reason, String)> {
             policy.max_snapshot_fuel,
         );
     }
-    if request.module_bytes == 0 || request.module_bytes > policy.max_module_bytes {
-        return Err((
-            Reason::ModuleTooLarge,
-            format!(
-                "the module is {} bytes, not 1 to {}",
-                request.module_bytes, policy.max_module_bytes
-            ),
-        ));
+    if let Some(why) = module::size_problem(request.module_bytes, policy.max_module_bytes) {
+        return Err((Reason::ModuleTooLarge, why));
     }
     Ok(())
 }
