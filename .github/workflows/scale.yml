@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        order: ["0.6.2 0.7.0-preview.2", "0.7.0-preview.2 0.6.2", "0.6.2 0.7.0-preview.2", "0.7.0-preview.2 0.6.2"]
+        order: ["0.6.0 0.6.1 0.6.2", "0.6.2 0.6.0 0.6.1", "0.6.1 0.6.2 0.6.0"]
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '300') }}
     env:
       COUNTS: ${{ inputs.counts || '100,250,500,1000,1000:30,10000' }}
