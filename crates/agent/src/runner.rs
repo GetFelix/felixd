@@ -71,7 +71,8 @@ impl Modules {
                 })
                 .await?
                 .map_err(|error| match error {
-                    LoadError::Contract01 => NeedsOperator::new(
+                    // A newer felixd may run it: upgrading this node is the fix.
+                    LoadError::Contract01 | LoadError::UnknownContract(_) => NeedsOperator::new(
                         OperatorReason::ModuleRefused,
                         format!("module {hash}: {error}"),
                     )
@@ -581,6 +582,7 @@ async fn run(
                             input,
                             record.offset,
                             record.timestamp_micros,
+                            record.publisher.as_deref(),
                             record.payload,
                         )
                         .await?;
@@ -591,7 +593,15 @@ async fn run(
         // A read stamps every record; an event without a stamp is from a
         // broker that keeps none, whose reads say 0.
         let stamp = event.timestamp_micros.unwrap_or(0);
-        steps.read(input, offset, stamp, event.payload).await?;
+        steps
+            .read(
+                input,
+                offset,
+                stamp,
+                event.publisher.as_deref(),
+                event.payload,
+            )
+            .await?;
         next_input = offset + 1;
         steps.position(0, next_input);
         if faults::restart_input_after(offset) {
@@ -682,7 +692,12 @@ async fn merged(
             while from < offset {
                 let (page, after) = felix.read_page(stream, from, offset).await?;
                 for record in page {
-                    let found = (record.offset, record.timestamp_micros, record.payload);
+                    let found = Arrived {
+                        offset: record.offset,
+                        timestamp_micros: record.timestamp_micros,
+                        publisher: record.publisher,
+                        payload: record.payload,
+                    };
                     take(&mut pending, &mut cursor, input, found);
                     if pending.len() >= merge.per_write() {
                         merge_and_step(spec, steps, merge, &mut pending).await?;
@@ -691,12 +706,13 @@ async fn merged(
                 from = after;
             }
             let stamp = event.timestamp_micros.unwrap_or(0);
-            take(
-                &mut pending,
-                &mut cursor,
-                input,
-                (offset, stamp, event.payload),
-            );
+            let arrived = Arrived {
+                offset,
+                timestamp_micros: stamp,
+                publisher: event.publisher.as_deref().map(str::to_owned),
+                payload: event.payload,
+            };
+            take(&mut pending, &mut cursor, input, arrived);
             if pending.len() >= merge.per_write() {
                 merge_and_step(spec, steps, merge, &mut pending).await?;
             }
@@ -705,21 +721,26 @@ async fn merged(
     }
 }
 
-/// Adds the record `(offset, append time, payload)` of input `input` to
-/// `pending` and moves that input's cursor past it.
-fn take(
-    pending: &mut Vec<(Entry, Bytes)>,
-    cursor: &mut [u64],
-    input: usize,
-    (offset, timestamp_micros, payload): (u64, u64, Bytes),
-) {
+/// A record of one merged input on its way to the merge log and a step. The
+/// merge entry holds only where the record is, so the publisher travels here
+/// and is read again from the stream on replay.
+struct Arrived {
+    offset: u64,
+    timestamp_micros: u64,
+    publisher: Option<String>,
+    payload: Bytes,
+}
+
+/// Adds `arrived` from input `input` to `pending` and moves that input's
+/// cursor past it.
+fn take(pending: &mut Vec<(Entry, Arrived)>, cursor: &mut [u64], input: usize, arrived: Arrived) {
     let entry = Entry {
         input: u16::try_from(input).expect("at most MAX_INPUTS inputs"),
-        offset,
-        timestamp_micros,
+        offset: arrived.offset,
+        timestamp_micros: arrived.timestamp_micros,
     };
-    pending.push((entry, payload));
-    cursor[input] = offset + 1;
+    cursor[input] = arrived.offset + 1;
+    pending.push((entry, arrived));
 }
 
 /// Appends the `pending` entries to the merge log, then steps each at the
@@ -728,18 +749,22 @@ async fn merge_and_step(
     spec: &WorkloadSpec,
     steps: &mut Steps<'_>,
     merge: &mut MergeLog<'_>,
-    pending: &mut Vec<(Entry, Bytes)>,
+    pending: &mut Vec<(Entry, Arrived)>,
 ) -> Result<()> {
     if pending.is_empty() {
         return Ok(());
     }
     let entries: Vec<Entry> = pending.iter().map(|(entry, _)| *entry).collect();
     let landed = merge.append(&entries).await?;
-    for ((entry, payload), at) in pending.drain(..).zip(landed) {
+    for ((entry, arrived), at) in pending.drain(..).zip(landed) {
         let stream = &spec.inputs[usize::from(entry.input)];
-        if let Some(input) =
-            StepInput::read(stream, entry.offset, entry.timestamp_micros, &payload)?
-        {
+        if let Some(input) = StepInput::read(
+            stream,
+            entry.offset,
+            entry.timestamp_micros,
+            arrived.publisher.as_deref(),
+            &arrived.payload,
+        )? {
             steps.step(at, input).await?;
         }
         steps.position(usize::from(entry.input), entry.offset + 1);
@@ -881,8 +906,15 @@ impl Steps<'_> {
 
     /// Steps the record at `offset` on input `stream`, unless it is passed
     /// over.
-    async fn read(&mut self, stream: &str, offset: u64, stamp: u64, record: Bytes) -> Result<()> {
-        match StepInput::read(stream, offset, stamp, &record)? {
+    async fn read(
+        &mut self,
+        stream: &str,
+        offset: u64,
+        stamp: u64,
+        publisher: Option<&str>,
+        record: Bytes,
+    ) -> Result<()> {
+        match StepInput::read(stream, offset, stamp, publisher, &record)? {
             Some(input) => self.step(offset, input).await,
             None => Ok(()),
         }

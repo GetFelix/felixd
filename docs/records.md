@@ -260,16 +260,22 @@ counts as admission's, so a node fails closed on one from a newer build.
 
 Requests are on `sys.intake`, one shard. Each is JSON: `format` (1), `id`, the workload id, `spec`,
 a workload spec as below with no `record` or `failure`, `module_bytes`, the module's length, and
-`replication_factor`. Who asked is not in the payload, which a publisher can fill with anything.
+`replication_factor`. Who asked is not in the payload, which a publisher can fill with anything:
+admission reads it from the record's publisher, the principal the broker authenticated the write
+from, which a broker stores only when it is set to (`FELIX_RECORD_PUBLISHERS=true`, or the
+`publisher_principal` fleet feature in a cluster).
 
 Admission's outputs on `wl.admission.out` are ordinary output records under the name `out`, keyed
 by the workload id (no key for a request that did not decode). Each payload is JSON: `format` (1),
-`request`, the `sys.intake` offset it answers, `id`, and `outcome`:
+`request`, the `sys.intake` offset it answers, `id`, `requester`, the request's publisher, and
+`outcome`. `requester` is left out when the broker recorded none, and in decisions written before
+requesters were recorded, which read the same way:
 
 - `accepted`, with `spec`, `module_bytes` and `replication_factor` as asked.
 - `rejected`, with `reason` and `detail`, for people. Reasons and their codes: `unreadable` (1),
   `invalid_id` (2), `reserved` (3), `invalid_inputs` (4), `invalid_spec` (5), `over_limit` (6),
-  `module_too_large` (7).
+  `module_too_large` (7), `no_requester` (8, the broker recorded no publisher for the request) and
+  `not_permitted` (9, the policy lists who may ask and the requester is not on it).
 
 Every request gets exactly one decision. A reader refuses another format.
 

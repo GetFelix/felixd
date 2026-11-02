@@ -1,6 +1,6 @@
 /// A component of workload contract 0.1: the top-level `step`, `snapshot`,
 /// `restore` and `inspect` functions, with their 0.1 types. It outputs
-/// nothing and its state is empty. A 0.2 host must refuse it.
+/// nothing and its state is empty. A host of 0.2 or later must refuse it.
 pub fn contract_01_component() -> Vec<u8> {
     wat::parse_str(
         r#"(component
@@ -23,4 +23,18 @@ pub fn contract_01_component() -> Vec<u8> {
                 (canon lift (core func $i "inspect") (memory (core memory $i "memory")))))"#,
     )
     .expect("the 0.1 fixture parses")
+}
+
+/// A component that exports the workload interfaces of a contract version
+/// newer than any this build knows. A host must refuse it without failing the
+/// workload.
+pub fn newer_contract_component() -> Vec<u8> {
+    wat::parse_str(
+        r#"(component
+            (instance $step)
+            (instance $state)
+            (export "felixd:workload/step@9.0.0" (instance $step))
+            (export "felixd:workload/state@9.0.0" (instance $state)))"#,
+    )
+    .expect("the newer-contract fixture parses")
 }
