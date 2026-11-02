@@ -59,9 +59,9 @@ fn the_oldest_kept_is_the_lowest_step_not_the_oldest_record() {
     assert_eq!(trim.snap_floor, 30);
 }
 
-/// Until the newest snapshot is the holder's own, an earlier holder can still
-/// append one, so a holder that has not written one trims nothing. A stale
-/// holder that finds a later holder's snapshot newest trims nothing either.
+/// A holder that has not written the newest snapshot trims nothing, and nor
+/// does a stale holder that finds a later holder's newest. The `.out` fence
+/// refuses the latter's trim anyway; this is a second guard.
 #[test]
 fn a_holder_trims_only_after_its_own_snapshot() {
     let newest = [kept(20, 2, 200, &[]), kept(10, 1, 100, &[])];
