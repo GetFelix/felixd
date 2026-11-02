@@ -153,8 +153,8 @@ pub(crate) fn restorable<'a>(
     let first_held = records.first().map_or(0, |(offset, _)| *offset);
     let mut found = Vec::with_capacity(records.len());
     for (offset, payload) in records {
-        let snapshot = Snapshot::decode(payload)
-            .map_err(|e| anyhow!("snapshot at {stream}:{offset}: {e}"))?;
+        let snapshot =
+            Snapshot::decode(payload).map_err(|e| anyhow!("snapshot at {stream}:{offset}: {e}"))?;
         found.extend(snapshot.filter(|s| s.restorable(first_held)));
     }
     Ok(found)

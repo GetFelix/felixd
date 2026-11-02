@@ -72,6 +72,9 @@ fn a_manifest_above_the_floor_naming_a_chunk_below_it_is_not_restorable() {
     let (older, newer) = (record(4, &[5, 9]), record(8, &[9, 12]));
     let held = [(9, &chunk), (10, &older), (12, &chunk), (15, &newer)];
     let found = restorable("wl.a.snap", held).unwrap();
-    let steps: Vec<u64> = found.iter().map(|s| s.taken().header.input_offset).collect();
+    let steps: Vec<u64> = found
+        .iter()
+        .map(|s| s.taken().header.input_offset)
+        .collect();
     assert_eq!(steps, [8]);
 }

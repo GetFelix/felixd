@@ -679,9 +679,11 @@ async fn raising_keep_snapshots_on_a_merged_workload_keeps_the_last_trim() {
     // Each touch ran once, in order.
     assert_eq!(counted, (1..=35).collect::<Vec<u64>>());
     assert!(t.readable_from(MERGE).await >= floor);
-    eventually("a trim past the old one", Duration::from_secs(60), || async {
-        (trims(&t).await.last()?.merge_floor > floor).then_some(())
-    })
+    eventually(
+        "a trim past the old one",
+        Duration::from_secs(60),
+        || async { (trims(&t).await.last()?.merge_floor > floor).then_some(()) },
+    )
     .await;
 }
 
