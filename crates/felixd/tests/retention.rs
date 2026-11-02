@@ -358,7 +358,16 @@ async fn a_pipeline_stage_is_deleted_only_below_its_readers_floor() {
     .await;
 
     // The upstream stage snapshots again and finds the downstream's record.
+    // The deletion can already have reached the floor by the snapshot at 30,
+    // so wait for the new outputs too: killing the agent first leaves the
+    // stage's `.out` short of what `check --complete` expects.
     t.publish_all(INPUT, (30..35).map(count)).await;
+    eventually(
+        "the upstream stage to step every output",
+        Duration::from_secs(60),
+        || async { stepped(&t, "wl.up.out", 35).await.then_some(()) },
+    )
+    .await;
     eventually(
         "the output to be deleted to the reader's floor",
         Duration::from_secs(60),
