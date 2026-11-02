@@ -11,6 +11,8 @@
 //!   below the floors of its last trim record, read when a run starts and
 //!   updated as trims land, with the error Felix gives for trimmed history,
 //!   as if they were deleted. One that reaches the run aborts the process.
+//! - `skip-deletion=1`: write trim records but delete nothing, for a test
+//!   that reads a whole `.snap` or merge log.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-projection-sent=N`: abort once admission's projector has
@@ -210,6 +212,11 @@ pub(crate) async fn scoped<F: std::future::Future>(id: &str, run: F) -> F::Outpu
 /// Whether to act as if history below each trim floor were deleted.
 pub(crate) fn enforce_trim_floors() -> bool {
     fault("enforce-trim-floors") == Some(1)
+}
+
+/// Whether to leave the history a trim record names where it is.
+pub(crate) fn skip_deletion() -> bool {
+    fault("skip-deletion") == Some(1)
 }
 
 /// Refuses workload `id`'s reads of `stream` below `floor` from now on.

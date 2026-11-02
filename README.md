@@ -209,9 +209,16 @@ inputs' append times on the broker, whichever comes first, so a slow input
 still gets snapshots and every node takes them at the same inputs. With
 `--keep-snapshots 3` the holder records, after each snapshot, what history
 before the oldest of the last three its resume no longer reads (a trim record
-on the output stream), which `felixd check --from-snapshot` starts from.
-Nothing is deleted until Felix can trim a stream
-at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
+on the output stream), which `felixd check --from-snapshot` starts from, and
+then deletes the snapshot stream and the merge log
+up to there, so a long-running workload stops growing them. Deleting needs the
+Felix fleet to have finalized `head_trim`, a one-way step, and a node token
+with `stream.trim`. That grant is off by default because it lets any node
+erase any stream in the namespace for good: run `felixd init --grant-trim` to
+turn it on, then mint the nodes new tokens. Without them the workload runs on,
+keeps its history, and the node logs a warning once. Inputs and the output
+stream are not deleted. [Retention](docs/design.md#retention) has the details,
+including what `felixd check` and `felixd replay` do afterwards.
 A workload is a Wasm component of [workload contract 0.3](docs/contract.md)
 (`wit/0.3/workload.wit`); components of 0.2 (`wit/0.2/workload.wit`) run too.
 Each step gets the input's stream, offset, append time, key, payload and, from
@@ -643,7 +650,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics and the upgrade check done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check and deleting snapshots and the merge log done; deleting inputs open |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Planned |
 
 ## Crates

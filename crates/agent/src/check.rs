@@ -94,6 +94,7 @@ pub async fn check(
     for id in check::upstream_first(&inputs) {
         let report = check_one(&felix, &runtime, &id, complete, origin)
             .await
+            .map_err(|e| Trimmed::explained(e, "felixd check"))
             .with_context(|| format!("check workload {id}"))?;
         reports.push(report);
     }
@@ -152,8 +153,10 @@ async fn check_one(
     let mut workload = runtime
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let snapshots = felix
-        .read_range(
+    // From the trim's floor, or from the oldest snapshot Felix holds: the
+    // snapshot stream's head is deleted below the last trim.
+    let (snapshots, _) = felix
+        .read_back(
             &snap_stream,
             trim.as_ref().map_or(0, |t| t.snap_floor),
             snap_tail,

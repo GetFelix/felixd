@@ -42,10 +42,11 @@ async fn a_crash_with_a_trim_in_flight_resumes_and_checks() {
         .await;
     t.publish_all(INPUT, (0..60).map(count)).await;
     // The second trim follows the third snapshot, at input 29.
-    let mut agent = t.start_agent_with_faults("crash-after-trim-sent=2");
+    // The test reads the whole snapshot stream, so nothing is deleted.
+    let mut agent = t.start_agent_with_faults("crash-after-trim-sent=2,skip-deletion=1");
     assert!(!agent.exited(Duration::from_secs(60)).await.success());
 
-    let mut agent = t.start_agent();
+    let mut agent = t.start_agent_with_faults("skip-deletion=1");
     t.publish_all(INPUT, (60..90).map(count)).await;
     assert_uninterrupted(&t, &module, 90).await;
     agent.kill();
