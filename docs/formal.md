@@ -135,7 +135,7 @@ Paths are from the repository root, as of workload contract 0.2.
 | `Park` | the lease released and the task left waiting for a spec change: `own`, `Ended::NeedsOperator`. A needs-operator record found by `check_found` (`crates/agent/src/output.rs:345`) or before the claim (`recorded_needs_operator`: `crates/agent/src/agent.rs:573`) leads here |
 | `Derive` | `write_failed`: `crates/agent/src/agent.rs:1053-1089`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:803-813` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
-| `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |
+| `Renew` | `hold` and `renew` in `crates/agent/src/lease.rs` |
 | `LocalDeadline`, `StopLocal` | `Fence::holds`, `Fence::held` and the 2/3 TTL pause in `crates/agent/src/lease.rs`; `stop_after` in `crates/core/src/lease.rs`. `StopLocal` is the renewals ending, which ends the run |
 | `ClockFault` | a suspend (the monotonic clock stops) or the `leases` leader's clock jumping: design.md, Leases and failure detection |
 | `Expire` | the broker's TTL expiry (Felix `docs/cache-on-log.md`, TTL) |

@@ -482,15 +482,24 @@ async fn a_paused_fence_gives_up_once_the_renewals_stop() {
     let (tx, fence) = held.fence();
     store.set(|s| s.down = true);
     let (mut asks, strain) = (Confirmer::new().1, Strain::default());
+    let start = Instant::now();
     let holder = async {
         let lost = hold(&store, &mut held, &tx, &mut asks, &strain).await;
         drop(tx);
         lost
     };
-    let (lost, held_on) = tokio::join!(holder, fence.held());
+    // Paused before the renewals give up, and woken when they do.
+    let writer = async {
+        tokio::time::sleep(timing().stop_after() - Duration::from_millis(100)).await;
+        assert!(fence.holds());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (fence.held().await, Instant::now() - start)
+    };
+    let (lost, (held_on, woken)) = tokio::join!(holder, writer);
     assert_eq!(lost, Lost::Unreachable);
-    assert!(held_on, "the fence held before the deadline");
-    assert!(!fence.held().await);
+    assert!(!held_on);
+    // The first renewal error after the 6 s deadline, at the next 250 ms retry.
+    assert!(woken > timing().stop_after() && woken < timing().stop_after() + RETRY_RENEWAL * 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -555,4 +564,17 @@ async fn the_holder_reports_slow_renewals() {
     let start = Instant::now();
     strain.calm(TTL).await;
     assert_eq!(Instant::now() - start, Duration::from_secs(2));
+}
+
+#[test]
+fn losses_in_a_row_back_off_further_until_a_long_hold() {
+    let mut losses = Losses::default();
+    // Uniform draws of 1 give the top of each range: 1.5 s, 3 s, 6 s.
+    assert_eq!(losses.lost(timing(), 1.0), Duration::from_millis(1500));
+    losses.held(TTL, timing());
+    assert_eq!(losses.lost(timing(), 1.0), Duration::from_secs(3));
+    assert_eq!(losses.lost(timing(), 1.0), Duration::from_secs(6));
+    // Held for six TTLs, however that hold ended: the next loss is a first.
+    losses.held(TTL * 6, timing());
+    assert_eq!(losses.lost(timing(), 1.0), Duration::from_millis(1500));
 }

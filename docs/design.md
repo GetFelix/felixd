@@ -589,13 +589,17 @@ change to the wall clock doesn't move it.
 When Felix is slow, leases can lapse in bulk, and claiming them all back at
 once makes it slower still: each claim is three writes plus reads of the
 output stream, and the workload then replays. Three rules keep an agent from
-feeding that loop. It makes at most 8 claims at once. While any of its
+feeding that loop. It makes at most 8 claims at once, counting the lease
+writes and the drain mark and epoch floor reads they need; the earlier checks
+of the spec and output stream are not limited, so one stream that hangs does
+not block every claim. While any of its
 renewals is slow (it took more than TTL/6, half the time a renewal has), new
 claims wait for one renewal interval without a slow one, but at most TTL/3,
 so a node on a cluster that stays slow still claims, only more slowly. And
 after losing a workload, or failing to claim it, it waits before trying again:
 TTL/12 to TTL/6 at random the first time, doubling with each loss in a row up
-to one TTL. A workload held for six TTLs starts the count again. None of this
+to one TTL. A claim held for six TTLs, however it ended, starts the count
+again. None of this
 changes who may hold a lease; it only delays claims. If the agent is frozen, its clock is
 wrong, or the broker expires the lease early, fencing (below) still keeps the
 output correct. The lease only decides who should run; it is not what keeps

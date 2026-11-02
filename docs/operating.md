@@ -196,7 +196,8 @@ holds, wait on Felix ([#74](https://github.com/GetFelix/felixd/issues/74)).
 
 **Lease TTL.** A node renews every TTL/3 and pauses its workloads two thirds of a TTL after its
 last successful renewal, before anyone else can claim. A late renewal that is still applied
-resumes them; a refused one stops them. When a node dies, its workloads resume
+resumes them (logged as "a late renewal landed, resuming"; frequent lines mean the TTL is too
+short for this cluster); a refused one stops them. When a node dies, its workloads resume
 elsewhere in about one TTL, plus up to `--claim-delay-ms` and the replay since the last snapshot. So:
 
 - A shorter TTL means faster failover and more renewal traffic. A renewal is a write to Felix

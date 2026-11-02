@@ -34,7 +34,7 @@ use crate::assignments::{self, Assignments};
 use crate::drain;
 use crate::faults;
 use crate::felix::Felix;
-use crate::lease::{self, Confirmer, Fence, Held, Strain};
+use crate::lease::{self, Confirmer, Fence, Held, Losses, Strain};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
 use crate::runner::{
@@ -88,10 +88,6 @@ const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
 /// How many claims a node makes at once. When many leases lapse together,
 /// the rest queue instead of all hitting Felix at once while it is slow.
 const CLAIMS_AT_ONCE: usize = 8;
-
-/// How many TTLs a workload must be held for before losing it again counts
-/// as a first loss.
-const LOSSES_FORGOTTEN_AFTER_TTLS: u32 = 6;
 
 /// Who this node is and how it holds and claims leases.
 #[derive(Clone, Debug)]
@@ -714,8 +710,7 @@ async fn own(
     // being stuck. Kept here, so a new spec record, which restarts the task,
     // gives the workload a fresh start.
     let mut backoff: Option<tokio::time::Instant> = None;
-    // Times in a row this node lost the workload or failed to claim it.
-    let mut losses = 0;
+    let mut losses = Losses::default();
     loop {
         if let Some(until) = backoff.take() {
             tokio::select! {
@@ -729,27 +724,15 @@ async fn own(
         {
             return;
         }
-        // Held through the reads before the claim too, as they cost about as
-        // much as the claim.
-        let permit = tokio::select! {
-            permit = node.claim_permit() => permit,
-            _ = stop.wait_for(|stop| *stop) => return,
-        };
-        // Someone may have claimed it while this node waited.
-        if lease.has_changed().unwrap_or(false) {
-            continue;
-        }
         match recorded_needs_operator(&node.felix, &spec).await {
             Ok(Some(reason)) => {
                 tracing::error!(workload = %id, %reason, "the output stream records that the workload needs an operator, not running it");
-                drop(permit);
                 let _ = stop.wait_for(|stop| *stop).await;
                 return;
             }
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
-                drop(permit);
                 if !pause(&mut stop).await {
                     return;
                 }
@@ -765,20 +748,28 @@ async fn own(
             Err(error) => {
                 if let Some(problem) = error.downcast_ref::<NeedsOperator>() {
                     if !recordable(&spec, problem) {
-                        drop(permit);
                         needs_operator(&id, problem, &mut stop).await;
                         return;
                     }
                     pending.get_or_insert_with(|| problem.clone());
                 } else {
                     tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
-                    drop(permit);
                     if !pause(&mut stop).await {
                         return;
                     }
                     continue;
                 }
             }
+        }
+        // Only the writes and the reads they depend on hold a permit, so a
+        // read that hangs on one workload's stream does not block the rest.
+        let permit = tokio::select! {
+            permit = node.claim_permit() => permit,
+            _ = stop.wait_for(|stop| *stop) => return,
+        };
+        // Someone may have claimed it while this node waited.
+        if lease.has_changed().unwrap_or(false) {
+            continue;
         }
         let slot = Slot::take(&node);
         if slot.is_none() {
@@ -837,6 +828,7 @@ async fn own(
                         (stop_projecting, task)
                     });
                 let ended = run_held(&node, &id, run, &mut held, &mut stop).await;
+                losses.held(won_at.elapsed(), node.timing);
                 if let Some((stop_projecting, task)) = projecting {
                     let _ = stop_projecting.send(true);
                     let _ = task.await;
@@ -873,11 +865,7 @@ async fn own(
                     }
                     Ended::Lost => {
                         metrics::handoff(Handoff::Lost);
-                        if won_at.elapsed() >= node.timing.ttl * LOSSES_FORGOTTEN_AFTER_TTLS {
-                            losses = 0;
-                        }
-                        losses += 1;
-                        backoff = Some(node.after_loss(losses));
+                        backoff = Some(node.after_loss(&mut losses));
                     }
                 }
             }
@@ -885,8 +873,7 @@ async fn own(
             Err(error) => {
                 metrics::claim(Claim::Error);
                 tracing::warn!(workload = %id, error = %format!("{error:#}"), "claim failed");
-                losses += 1;
-                backoff = Some(node.after_loss(losses));
+                backoff = Some(node.after_loss(&mut losses));
             }
         }
         drop(slot);
@@ -1168,9 +1155,9 @@ impl Node {
         permit
     }
 
-    /// When to try again after the `losses`th loss in a row.
-    fn after_loss(&self, losses: u32) -> tokio::time::Instant {
-        tokio::time::Instant::now() + self.timing.after_loss(losses, self.random())
+    /// Counts one more loss, and says when to try again.
+    fn after_loss(&self, losses: &mut Losses) -> tokio::time::Instant {
+        tokio::time::Instant::now() + losses.lost(self.timing, self.random())
     }
 
     /// Uniform in `[0, 1)`, from an xorshift. It only spreads claims.

@@ -315,6 +315,34 @@ async fn take_epoch<S: LeaseStore>(
     })
 }
 
+/// How many TTLs a workload must be held for before losing it again counts
+/// as a first loss.
+const LOSSES_FORGOTTEN_AFTER_TTLS: u32 = 6;
+
+/// The times in a row a node lost a workload or failed to claim it, which
+/// sets how long it backs off before the next claim.
+#[derive(Debug, Default)]
+pub(crate) struct Losses {
+    count: u32,
+}
+
+impl Losses {
+    /// A won claim that was held for `held_for`, however it ended. A long
+    /// hold starts the count again.
+    pub(crate) fn held(&mut self, held_for: Duration, timing: LeaseTiming) {
+        if held_for >= timing.ttl * LOSSES_FORGOTTEN_AFTER_TTLS {
+            self.count = 0;
+        }
+    }
+
+    /// Counts one more loss and returns how long to wait before claiming
+    /// again; see [`LeaseTiming::after_loss`].
+    pub(crate) fn lost(&mut self, timing: LeaseTiming, random: f64) -> Duration {
+        self.count = self.count.saturating_add(1);
+        timing.after_loss(self.count, random)
+    }
+}
+
 /// Asks the renewal task for a renewal now. See [`Confirmer::confirm`].
 pub(crate) type Asks = mpsc::Receiver<oneshot::Sender<()>>;
 
@@ -354,16 +382,19 @@ pub(crate) async fn hold<S: LeaseStore>(
             Some(reply) = asks.recv() => Some(reply),
         };
         loop {
-            // A renewal unanswered for a TTL counts as failed, so a paused
-            // holder gives up instead of waiting on it forever. A read-back
-            // finds out whether it landed.
+            // A renewal unanswered for a TTL counts as failed. That is past
+            // the deadline, so the holder gives up instead of waiting on it.
             let started = Instant::now();
+            let paused_at = held.deadline();
             let renewed = tokio::time::timeout(held.timing.ttl, renew(store, held))
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("no answer to the renewal in time")));
             strain.note(started.elapsed(), held.timing);
             match renewed {
                 Ok(true) => {
+                    if Instant::now() >= paused_at {
+                        tracing::info!(workload = %held.workload, late = ?(Instant::now() - paused_at), "a late renewal landed, resuming");
+                    }
                     let _ = deadline.send(held.deadline());
                     if let Some(reply) = asked {
                         let _ = reply.send(());
