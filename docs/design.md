@@ -417,17 +417,33 @@ module again rewrites the same bytes, which also repairs a chunk that was
 lost. A submitter needs write on `modules` as before; the chunks are keys in
 the same cache, so no grant changes.
 
-Why 4 MiB and 64 MiB: a chunk well under the frame limit leaves room for
-framing and keeps one slow write small. 64 MiB is sixteen chunks, far above
-the largest module felixd's examples need and about 20 times the size of the
-largest module measured to compile (TBD).
+Why 4 MiB and 64 MiB: a chunk at a quarter of the frame limit leaves room for
+framing and keeps one write small. 64 MiB is sixteen chunks. Reading costs
+about 70 ms per MiB (below), so a node that takes over a workload with a
+module of that size waits about 4.5 s before it can compile it, on top of
+the lease timing; the limit stops that wait growing without bound. Real
+components are far smaller, so this is headroom and not a target.
 
 Admission's limit is `max_module_bytes` in its policy, 64 MiB by default and
 compiled into the admission module. An admission module built before this
 limit rose still rejects modules over 8 MiB with `module_too_large` until
 `felixd init` runs with a newer one.
 
-MEASURED
+Measured on a GitHub Actions runner with one broker and one replica, by
+`FELIXD_MEASURE_MODULES=1 cargo test -p felixd --test module_size --
+--nocapture`. Times vary between runs; the first put into a new cache is slower
+than later ones (1 MiB was the first put).
+
+| Size | One cache value: put | get | Through `module_store`: put | fetch |
+|---|---|---|---|---|
+| 1 MiB | 1.7 to 2.2 s | 30 to 40 ms | 1.9 s | 55 ms |
+| 5 MiB | 0.20 to 0.33 s | 120 to 150 ms | 0.57 s | 0.35 s |
+| 20 MiB | refused after 0.7 to 1.1 s | | 2.2 s | 1.4 s |
+| 64 MiB | | | 7.2 s | 4.5 s |
+
+A 20 MiB value does not store at all: Felix drops the connection instead of
+answering with a clear error ([#196](https://github.com/GetFelix/felixd/issues/196)).
+Chunking is therefore the only way to hold a module that large.
 
 ## Pipelines
 
