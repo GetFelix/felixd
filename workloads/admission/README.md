@@ -35,7 +35,10 @@ felixd replay --id admission --diff --all --module <hash of the new module in mo
 ```
 
 It prints each request the new policy decides otherwise. `admission-strict` is such a module,
-allowing no more than the default fuel per call; the tests use it.
+allowing no more than the default fuel per call; the tests use it. Admission keeps no state, so its
+snapshots are empty, and it declares no snapshot layout (see
+[contract.md](../../docs/contract.md#snapshot-layouts)). A replay with another module therefore
+always starts from the initial state, which costs nothing here.
 
 ## Build
 

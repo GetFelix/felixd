@@ -2,12 +2,26 @@
 
 ## Unreleased
 
-- Resubmitting a workload a newer build left to an operator (#136). `felixd run`
-  from an older build submits a new spec over a needs-operator record whose
-  reason it cannot read, which is how the workload is released. Nodes on the
-  older build leave the workload alone until a node that can read the record
-  takes it. Such a record also raises the highest spec claimed, as one it can
-  read does.
+- Upgrade check from a snapshot (#29). `felixd replay --diff --module` and
+  `replay --to ... --module` start the new module from the workload's nearest
+  snapshot (before `--from` for a diff, before the end of the range for `--to`)
+  when the new module's `felixd.snapshot` custom section says it reads the
+  layout the workload's module wrote, and from the initial state when it does
+  not, saying which and why on stderr. The section is optional JSON,
+  `{"format": "<id>", "reads": ["<id>", ...]}`, additive to contract 0.2
+  (docs/contract.md, "Snapshot layouts"); a module without one is readable only
+  by itself. A new module that declares the layout and traps or runs out of
+  fuel restoring it is reported as "snapshot not readable by the new module",
+  not as a divergence. A section that does not parse is an error when it is
+  read, and the message points at `--from-start`. New `--from-start` always
+  replays from the initial state. `--module` takes a component file as well as
+  the hash of one in the `modules` cache. The `--to` form now prints two lines
+  on stderr, `started from ...` and `ran N more of the inputs below E`, where
+  it printed one. In `felixd_agent::replay`, `replay` and `diff` take
+  `from_start`, `Replayed` carries a `Start` in place of `restored` and `Diffed`
+  gains `start` (breaking for library users). The `counter` example declares
+  its layout and has cargo features that build the variants the tests replay
+  against it; `felixd_testkit::workload_with` builds one.
 - Broker host names and token rotation (#160, #159). `--brokers` takes
   `host:port` as well as `ip:port`; names are resolved on connect and again
   when no known broker answers. `--token-file` and
@@ -49,6 +63,12 @@
   admission's own only if it names a decision that accepted exactly that
   spec; any other needs an operator with the new reason `spec_unadmitted` and
   never claims. New fault `crash-after-projection-sent=N` for tests.
+- Resubmitting a workload a newer build left to an operator (#136). `felixd run`
+  from an older build submits a new spec over a needs-operator record whose
+  reason it cannot read, which is how the workload is released. Nodes on the
+  older build leave the workload alone until a node that can read the record
+  takes it. Such a record also raises the highest spec claimed, as one it can
+  read does.
 - System workloads (`admission`, `scheduler`) are refused through intake;
   `felixd run` writes their specs directly with the control plane token as
   before. A spec record runs only if no record of the workload anywhere on
