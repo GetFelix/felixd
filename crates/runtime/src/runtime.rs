@@ -48,6 +48,13 @@ pub enum LoadError {
 /// The interfaces a 0.2 workload exports.
 pub(crate) const STEP: &str = "felixd:workload/step@0.2.0";
 pub(crate) const STATE: &str = "felixd:workload/state@0.2.0";
+
+/// The workload contract version this build runs.
+pub const CONTRACT_VERSION: &str = "0.2.0";
+/// The wasmtime version this build links, pinned in the workspace manifest.
+/// A float or trap that differs across versions would differ on a replay,
+/// so a divergence record names it.
+pub const WASMTIME_VERSION: &str = "50.0.0";
 /// The top-level functions a 0.1 workload exports.
 const CONTRACT_01: [&str; 4] = ["step", "snapshot", "restore", "inspect"];
 

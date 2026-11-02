@@ -165,9 +165,9 @@ pub(crate) async fn written_under(felix: &Felix, id: &str) -> Result<Option<Work
     }
 }
 
-/// The first record on `stream` that is not a needs-operator or degraded
-/// record, with its offset. Either can be written before any claim and ran
-/// nothing, so it never says what the stream was written under.
+/// The first record on `stream` that is not a needs-operator, degraded or
+/// divergence record, with its offset. Each can be written before any claim
+/// and ran nothing, so it never says what the stream was written under.
 /// It is judged from its header, so a reason this build cannot read counts too:
 /// a newer build may have written it, and the way out is to submit a new spec.
 pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Option<(u64, Bytes)>> {
@@ -185,20 +185,26 @@ pub(crate) async fn first_run_record(felix: &Felix, stream: &str) -> Result<Opti
     Ok(None)
 }
 
-/// Whether `record` is anything but a needs-operator or degraded record.
-/// Judged from its header alone, so a reason or class this build does not know
-/// still counts as one.
+/// Whether `record` is anything but a needs-operator, degraded or divergence
+/// record. Judged from its header alone, so a reason, class or field this
+/// build does not know still counts as one.
 fn ran_something(record: &[u8]) -> bool {
-    output::needs_operator_spec_of(record).is_none() && output::degraded_spec_of(record).is_none()
+    !is_system_note(record)
 }
 
-/// Whether `record` is a needs-operator or degraded record that this build
-/// cannot read, as a newer build writes one with a reason or class this build
-/// has no name for.
+/// Whether `record` is a needs-operator, degraded or divergence record, by
+/// its header.
+fn is_system_note(record: &[u8]) -> bool {
+    output::needs_operator_spec_of(record).is_some()
+        || output::degraded_spec_of(record).is_some()
+        || output::divergence_spec_of(record).is_some()
+}
+
+/// Whether `record` is a needs-operator, degraded or divergence record that
+/// this build cannot read, as a newer build writes one with a reason, class
+/// or field this build has no name for.
 fn unreadable_park(record: &[u8]) -> bool {
-    output::decode(record).is_err()
-        && (output::needs_operator_spec_of(record).is_some()
-            || output::degraded_spec_of(record).is_some())
+    output::decode(record).is_err() && is_system_note(record)
 }
 
 /// Refuses to run `spec` over workload `id`'s output stream when the stream
@@ -235,7 +241,7 @@ pub(crate) async fn refuse_stale_or_foreign(
         && unreadable_park(&last.payload)
     {
         bail!(
-            "{stream}:{}: a needs-operator or degraded record this build cannot read",
+            "{stream}:{}: a needs-operator, degraded or divergence record this build cannot read",
             last.offset
         );
     }

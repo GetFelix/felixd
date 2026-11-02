@@ -99,6 +99,17 @@ impl Metrics {
         }
         family(
             &mut out,
+            "felixd_divergences_total",
+            "counter",
+            "Divergence records this node wrote: replays that differed from the output stream.",
+        );
+        let _ = writeln!(
+            out,
+            "felixd_divergences_total {}",
+            self.divergences.load(Ordering::Relaxed)
+        );
+        family(
+            &mut out,
             "felixd_workload_failures_total",
             "counter",
             "Workloads this node marked failed.",

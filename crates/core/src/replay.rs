@@ -96,12 +96,25 @@ impl fmt::Display for Start {
 pub struct Recorded {
     outputs: BTreeMap<OutputHeader, Kept>,
     nodes: BTreeMap<u64, String>,
+    noted: BTreeMap<OutputHeader, Noted>,
 }
 
 #[derive(Debug)]
 struct Kept {
     epoch: u64,
     summary: Summary,
+}
+
+/// A divergence record on the stream: a holder already found the output at
+/// its header differing from its own replay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Noted {
+    /// The record's offset on the output stream.
+    pub offset: u64,
+    pub epoch: u64,
+    pub node: String,
+    /// The build that wrote it: `contract/wasmtime/felixd` versions.
+    pub build: String,
 }
 
 /// What a diff compares of an output or a rejection: its address and the
@@ -143,6 +156,9 @@ pub struct Divergence {
     pub header: OutputHeader,
     /// The recorded output's writer, when there is one.
     pub writer: Option<Writer>,
+    /// The divergence record the stream holds for this output, when a holder
+    /// wrote one.
+    pub noted: Option<Noted>,
     /// The recorded output or rejection, when there is one.
     pub recorded: Option<Summary>,
     /// What the replay produced there, when it produced something.
@@ -157,16 +173,38 @@ pub struct Writer {
 }
 
 impl Recorded {
-    /// Reads the output stream's records, in stream order, keeping outputs of
-    /// inputs in `inputs`. A second record for one output is `felixd check`'s
-    /// business; the first one counts here.
+    /// Reads the output stream's records, in stream order with their
+    /// offsets, keeping outputs of inputs in `inputs`. A second record for one
+    /// output is `felixd check`'s business; the first one counts here. A
+    /// divergence record is kept for the output it names, the last one
+    /// winning, whatever the inputs; one this build cannot read is passed over.
     pub fn read<'a>(
-        records: impl IntoIterator<Item = &'a [u8]>,
+        records: impl IntoIterator<Item = (u64, &'a [u8])>,
         inputs: Range<u64>,
     ) -> Result<Recorded, DecodeError> {
         let mut recorded = Recorded::default();
-        for record in records {
+        for (offset, record) in records {
+            if output::divergence_spec_of(record).is_some() && output::decode(record).is_err() {
+                continue;
+            }
             let decoded = output::decode(record)?;
+            if let Record::Divergence { epoch, found } = &decoded {
+                let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+                recorded.noted.insert(
+                    found.header,
+                    Noted {
+                        offset,
+                        epoch: *epoch,
+                        node: text(found.node),
+                        build: format!(
+                            "contract {}, wasmtime {}, felixd {}",
+                            text(found.abi.contract),
+                            text(found.abi.wasmtime),
+                            text(found.abi.felixd)
+                        ),
+                    },
+                );
+            }
             if let Record::Claim { epoch, node, .. } = decoded
                 && !node.is_empty()
             {
@@ -230,6 +268,7 @@ impl Recorded {
                 epoch: k.epoch,
                 node: self.nodes.get(&k.epoch).cloned(),
             }),
+            noted: self.noted.get(&header).cloned(),
             recorded: kept.map(|k| k.summary.clone()),
             replayed,
         }
@@ -286,9 +325,17 @@ impl fmt::Display for Divergence {
             _ => f.write_str("not on the stream")?,
         }
         match &self.replayed {
-            Some(replayed) => write!(f, ", replayed with {replayed}"),
-            None => f.write_str(", and the replay produced none"),
+            Some(replayed) => write!(f, ", replayed with {replayed}")?,
+            None => f.write_str(", and the replay produced none")?,
         }
+        if let Some(noted) = &self.noted {
+            write!(
+                f,
+                "; a divergence record at offset {} says node {} found this at epoch {} ({})",
+                noted.offset, noted.node, noted.epoch, noted.build
+            )?;
+        }
+        Ok(())
     }
 }
 

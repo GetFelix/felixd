@@ -1,3 +1,5 @@
+use sha2::Digest;
+
 use super::*;
 use crate::class::{ErrorClass, OperatorReason};
 
@@ -214,6 +216,8 @@ fn every_cut_of_a_record_fails_without_panicking() {
         ),
         encode_failure(1, 2, ErrorClass::Poison, ""),
         encode_degraded(1, 2, ErrorClass::Transient, "node-a", ""),
+        encode_divergence(1, &no_detail(diverged(Some(&[1; 32]), Some(&[2; 32])))),
+        encode_divergence(1, &no_detail(diverged(None, None))),
     ];
     for record in records {
         for cut in 0..record.len() {
@@ -364,7 +368,7 @@ fn a_reader_of_another_stream_passes_over_a_marker_with_an_unknown_code() {
 #[test]
 fn a_reader_of_another_stream_refuses_an_unknown_version_or_kind() {
     let mut kind = encode_claim(1, "node");
-    kind[1] = 9;
+    kind[1] = 10;
     for record in [vec![9, 0], kind] {
         assert!(addressed_to(&record, "out").is_err(), "{record:?}");
         assert!(!passed_over(&record, "out"), "{record:?}");
@@ -378,10 +382,10 @@ fn an_unknown_version_or_kind_is_refused() {
     record[0] = 5;
     assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(5)));
     record[0] = 4;
-    record[1] = 9;
-    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(9)));
-    // A trim or degraded record is version 4 only.
-    for kind in [7, 8] {
+    record[1] = 10;
+    assert_eq!(decode(&record), Err(DecodeError::UnknownKind(10)));
+    // A trim, degraded or divergence record is version 4 only.
+    for kind in [7, 8, 9] {
         record[0] = 3;
         record[1] = kind;
         assert_eq!(decode(&record), Err(DecodeError::UnknownKind(kind)));
@@ -465,8 +469,34 @@ fn an_earlier_owner_past_our_batch_means_resume() {
 fn different_records_are_a_divergence() {
     let ours = batch(7, &[10]);
     let theirs = batch(3, &[11]);
-    assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Diverged);
-    assert_eq!(reconcile(7, &ours, &[b"junk"]), Reconciled::Diverged);
+    let at = |found, ours| Reconciled::Diverged { found, ours };
+    assert_eq!(reconcile(7, &ours, &refs(&theirs)), at(0, Some(0)));
+    // A record that does not decode takes no place in the batch.
+    assert_eq!(reconcile(7, &ours, &[b"junk"]), at(0, None));
+}
+
+#[test]
+fn a_divergence_names_the_records_that_disagree() {
+    let ours = batch(7, &[10, 11, 12]);
+    // A claim, then 10 as expected, then something else where 11 goes.
+    let mut theirs = vec![encode_claim(3, ""), batch(3, &[10]).remove(0)];
+    theirs.push(encode_degraded(3, 1, ErrorClass::Transient, "n", "x"));
+    theirs.push(batch(3, &[99]).remove(0));
+    assert_eq!(
+        reconcile(7, &ours, &refs(&theirs)),
+        Reconciled::Diverged {
+            found: 3,
+            ours: Some(1)
+        }
+    );
+    let theirs = [batch(3, &[10]).remove(0), b"junk".to_vec()];
+    assert_eq!(
+        reconcile(7, &ours, &refs(&theirs)),
+        Reconciled::Diverged {
+            found: 1,
+            ours: None
+        }
+    );
 }
 
 #[test]
@@ -591,11 +621,20 @@ fn a_rejection_is_reconciled_like_an_output() {
     assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(1));
     // An output where we reject, or a rejection where we output, diverges.
     let theirs = batch(3, &[10]);
-    assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Diverged);
+    assert_eq!(
+        reconcile(7, &ours, &refs(&theirs)),
+        Reconciled::Diverged {
+            found: 0,
+            ours: Some(0)
+        }
+    );
     let theirs = vec![encode_rejection(10, 3, rejected)];
     assert_eq!(
         reconcile(7, &batch(7, &[10]), &refs(&theirs)),
-        Reconciled::Diverged
+        Reconciled::Diverged {
+            found: 0,
+            ours: Some(0)
+        }
     );
     // A rejection past our batch is a later input's, so resume.
     let theirs = [batch(3, &[10]).remove(0), encode_rejection(11, 3, rejected)];
@@ -724,4 +763,187 @@ fn a_long_node_id_in_a_degraded_record_is_cut_at_a_character_boundary() {
         decode(&record[..30]),
         Err(DecodeError::Truncated { .. })
     ));
+}
+
+const NO_ABI: Abi<'static> = Abi {
+    contract: b"0.2.0",
+    wasmtime: b"50.0.0",
+    felixd: b"1.2.3",
+};
+
+fn diverged<'a>(expected: Option<&'a [u8; 32]>, actual: Option<&'a [u8; 32]>) -> Diverged<'a> {
+    Diverged {
+        spec: 40,
+        header: h(7, 2),
+        snapshot: Some(5),
+        node: b"node-a",
+        abi: NO_ABI,
+        expected,
+        actual,
+        detail: b"replayed output differs",
+    }
+}
+
+fn no_detail(found: Diverged<'_>) -> Diverged<'_> {
+    Diverged {
+        detail: b"",
+        ..found
+    }
+}
+
+#[test]
+fn a_divergence_record_round_trips_and_holds_no_output() {
+    let found = diverged(Some(&[1; 32]), Some(&[2; 32]));
+    let record = encode_divergence(3, &found);
+    let mut want = vec![4, 9];
+    want.extend(3u64.to_be_bytes());
+    want.extend(40u64.to_be_bytes());
+    want.extend(7u64.to_be_bytes());
+    want.extend(2u32.to_be_bytes());
+    want.push(1);
+    want.extend(5u64.to_be_bytes());
+    want.push(32);
+    want.extend([1; 32]);
+    want.push(32);
+    want.extend([2; 32]);
+    for text in ["node-a", "0.2.0", "50.0.0", "1.2.3"] {
+        want.push(text.len() as u8);
+        want.extend(text.as_bytes());
+    }
+    want.extend(b"replayed output differs");
+    assert_eq!(record, want);
+    let decoded = decode(&record).unwrap();
+    assert_eq!(decoded, Record::Divergence { epoch: 3, found });
+    assert_eq!(decoded.epoch(), 3);
+    assert_eq!(decoded.written(), None);
+    assert_eq!(decoded.output(), None);
+    assert_eq!(decoded.divergence_under(40), Some(&found));
+    assert_eq!(decoded.divergence_under(41), None);
+    assert_eq!(decoded.degraded_under(40), None);
+    assert!(decoded.precedes_claims());
+    assert!(is_marker(&record));
+    assert!(passed_over(&record, DEFAULT_NAME));
+    assert!(!same_output(&record, &record));
+    assert_eq!(divergence_spec_of(&record), Some(40));
+    assert_eq!(degraded_spec_of(&record), None);
+    assert_eq!(needs_operator_spec_of(&record), None);
+}
+
+#[test]
+fn a_divergence_record_may_hold_no_snapshot_and_no_digest() {
+    let found = Diverged {
+        snapshot: None,
+        ..diverged(None, None)
+    };
+    let record = encode_divergence(3, &found);
+    assert_eq!(decode(&record), Ok(Record::Divergence { epoch: 3, found }));
+}
+
+#[test]
+fn a_divergence_record_with_a_field_this_build_cannot_read_is_still_passed_over() {
+    let good = encode_divergence(3, &diverged(Some(&[1; 32]), None));
+    // The snapshot flag, then a digest length, as a newer build might write.
+    let mut flag = good.clone();
+    flag[30] = 2;
+    assert_eq!(decode(&flag), Err(DecodeError::InvalidSnapshotFlag(2)));
+    let mut digest = good.clone();
+    digest[39] = 16;
+    assert_eq!(decode(&digest), Err(DecodeError::InvalidDigest(16)));
+    // Cut after its spec record, nothing else of it can be read.
+    let cut = good[..18].to_vec();
+    assert!(decode(&cut).is_err());
+    for record in [flag, digest, cut] {
+        assert!(is_marker(&record), "{record:?}");
+        assert!(passed_over(&record, DEFAULT_NAME), "{record:?}");
+        assert_eq!(addressed_to(&record, DEFAULT_NAME), Ok(None));
+        assert_eq!(divergence_spec_of(&record), Some(40), "{record:?}");
+    }
+    // Only the first 18 bytes name a spec record.
+    assert_eq!(divergence_spec_of(&good[..17]), None);
+}
+
+#[test]
+fn a_divergence_record_is_passed_over_by_reconcile_unless_a_later_owner_wrote_it() {
+    let ours = batch(7, &[10]);
+    let divergence = |epoch| encode_divergence(epoch, &diverged(None, None));
+    let mut theirs = vec![encode_claim(3, ""), divergence(3)];
+    theirs.extend(batch(3, &[10]));
+    assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(1));
+    let theirs = [divergence(3)];
+    assert_eq!(reconcile(7, &ours, &refs(&theirs)), Reconciled::Skip(0));
+    let theirs = [divergence(8)];
+    assert_eq!(
+        reconcile(7, &ours, &refs(&theirs)),
+        Reconciled::Superseded { epoch: 8 }
+    );
+}
+
+#[test]
+fn long_fields_in_a_divergence_record_are_cut_at_a_character_boundary() {
+    let node = "é".repeat(200);
+    let found = Diverged {
+        node: node.as_bytes(),
+        ..diverged(None, None)
+    };
+    let record = encode_divergence(1, &found);
+    let Ok(Record::Divergence { found, .. }) = decode(&record) else {
+        panic!("a divergence record");
+    };
+    assert_eq!(found.node.len(), 254);
+    assert!(std::str::from_utf8(found.node).is_ok());
+    assert_eq!(found.abi, NO_ABI);
+    assert_eq!(found.detail, b"replayed output differs");
+}
+
+#[test]
+fn the_digest_covers_what_is_compared_and_not_the_epoch() {
+    let header = h(4, 1);
+    let one = encode(header, 1, b"x");
+    let other_owner = encode(header, 9, b"x");
+    assert_eq!(compared_digest(&one), compared_digest(&other_owner));
+    // The sha256 of the record with its epoch set to 0.
+    let digest: [u8; 32] = sha2::Sha256::digest(encode(header, 0, b"x")).into();
+    assert_eq!(compared_digest(&one), Some(digest));
+    // What same_output compares, a digest tells apart.
+    for different in [
+        encode(header, 1, b"y"),
+        encode(h(5, 1), 1, b"x"),
+        encode(h(4, 2), 1, b"x"),
+        encode_addressed(
+            header,
+            1,
+            Addressed {
+                name: "alerts",
+                key: None,
+                payload: b"x",
+            },
+        )
+        .unwrap(),
+        encode_addressed(
+            header,
+            1,
+            Addressed {
+                name: DEFAULT_NAME,
+                key: Some(b"k"),
+                payload: b"x",
+            },
+        )
+        .unwrap(),
+    ] {
+        assert!(!same_output(&one, &different));
+        assert_ne!(compared_digest(&one), compared_digest(&different));
+    }
+    let rejected = Rejected {
+        code: 7,
+        detail: b"no",
+    };
+    let rejection = encode_rejection(4, 1, rejected);
+    assert_eq!(
+        compared_digest(&rejection),
+        compared_digest(&encode_rejection(4, 8, rejected))
+    );
+    assert_ne!(compared_digest(&rejection), compared_digest(&one));
+    // Records that hold no output have none.
+    assert_eq!(compared_digest(&encode_claim(1, "n")), None);
+    assert_eq!(compared_digest(b"junk"), None);
 }

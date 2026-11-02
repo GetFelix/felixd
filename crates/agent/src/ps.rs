@@ -17,6 +17,10 @@ use crate::runner;
 use crate::settings::Settings;
 use crate::snapshots;
 
+/// How many records back from the tail `ps` looks for the divergence record
+/// a failure follows.
+const DIVERGENCE_LOOK: u64 = 8;
+
 /// What `felixd ps` shows.
 #[derive(Debug)]
 pub struct Report {
@@ -41,6 +45,10 @@ pub struct Workload {
     pub outputs: u64,
     /// The epoch of the last record on the output stream.
     pub last_epoch: Option<u64>,
+    /// The divergence record the output stream ends on, behind any failure
+    /// or other note after it, when it names the spec record the workload
+    /// runs.
+    pub divergence: Option<status::Diverged>,
     /// Where the workload is on each input. For a workload with several
     /// inputs, how far each has been merged.
     pub inputs: Vec<Position>,
@@ -125,6 +133,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             holder_draining,
             outputs: 0,
             last_epoch: None,
+            divergence: None,
             inputs: Vec::new(),
             steps: None,
             unread: None,
@@ -191,6 +200,18 @@ async fn read_streams(felix: &Felix, spec: &WorkloadSpec, workload: &mut Workloa
         lease: workload.holder.as_ref(),
         last_record: last.as_deref(),
     }));
+    if let (Some(record), Some(last)) = (spec.record, last.as_deref())
+        && status::may_follow_divergence(last)
+    {
+        let (recent, _) = felix
+            .read_back(
+                &spec.output,
+                outputs.saturating_sub(DIVERGENCE_LOOK),
+                outputs,
+            )
+            .await?;
+        workload.divergence = status::divergence(recent.iter().map(|r| r.payload.as_ref()), record);
+    }
 
     let written = runner::last_output(felix, &spec.output, outputs)
         .await?

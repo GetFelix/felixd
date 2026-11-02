@@ -84,7 +84,8 @@ impl Produced {
             | Record::Failure { .. }
             | Record::NeedsOperator { .. }
             | Record::Trim { .. }
-            | Record::Degraded { .. } => None,
+            | Record::Degraded { .. }
+            | Record::Divergence { .. } => None,
         }
     }
 

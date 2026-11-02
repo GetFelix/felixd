@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Divergence records (#73). A workload fails as poison when a node replays its
+  inputs and gets an output other than the one the stream holds. The node now
+  first appends a `divergence` record (output record kind 9: spec record,
+  input offset and index, the input of the snapshot the replay started from,
+  node id, contract, wasmtime and felixd versions, the sha256 of the output
+  the stream holds and of the one the replay produced, detail), fenced by epoch
+  like the failure record that follows it, which keeps its class. It is best
+  effort, and a deposed node writes neither record. `felixd ps` prints it under
+  a failed workload, `felixd replay --diff` names it when it finds the same
+  output differing, and `felixd_divergences_total` counts them. Every reader
+  passes over it like a claim, and a node that cannot read one does not take
+  the workload. A build from before kind 9 reads it as an unknown kind, which
+  matters only once a workload has failed: finish a rolling upgrade before
+  submitting a failed workload again. There is no switch. This closes #73;
+  defining the records in WIT waits for the effect records, and felixd does
+  not push OTLP.
 - Degraded workloads (#73). A workload that keeps failing on a transient
   error, such as a stream its node cannot read, used to be retried for ever
   on that node, out of sight. Now `felixd ps` shows it as `degraded` with the

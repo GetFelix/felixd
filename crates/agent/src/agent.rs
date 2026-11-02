@@ -19,6 +19,7 @@ use felix_client::{CacheChange, CacheCondition, CacheWatchItem, ClusterCacheWatc
 use felixd_core::class::{ErrorClass, Failure, OperatorReason};
 use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
+use felixd_core::output::Abi;
 use felixd_core::placement::{Assigned, AssignedTo, FirstClaimWins, Placement, Scheduled, Turn};
 use felixd_core::schedule::NodeFact;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
@@ -36,7 +37,9 @@ use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
-use crate::runner::{LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload};
+use crate::runner::{
+    Divergence, LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload,
+};
 use crate::settings::{Settings, TokenSource};
 use crate::specs;
 use crate::stuck::{self, Progress};
@@ -73,6 +76,10 @@ const RELEASE_WITHIN: Duration = Duration::from_secs(2);
 /// How many times a holder tries to write a degraded record before it
 /// releases the lease without one.
 const RECORD_DEGRADED_TRIES: u32 = 3;
+
+/// How many times a holder tries to write a divergence record before it
+/// fails the workload without one.
+const RECORD_DIVERGENCE_TRIES: u32 = 3;
 
 /// How often a node leaving a workload to its assignee checks that the
 /// assignee is still up.
@@ -1264,6 +1271,14 @@ async fn run_held(
         let mut class = ErrorClass::Poison;
         let reason = match outcome {
             Outcome::Failed(message) => message,
+            Outcome::Diverged { reason, divergence } => {
+                let recorded =
+                    record_divergence(node, id, spec, (&divergence, &reason), &fence, &confirmer);
+                if let Some(ended) = recorded.await {
+                    return ended;
+                }
+                reason
+            }
             Outcome::Lost => return Ended::Lost,
             Outcome::NeedsOperator {
                 problem,
@@ -1433,8 +1448,8 @@ async fn record_needs_operator(
         .await;
         match recorded {
             Ok(Recorded::NeedsOperator) => return Ended::NeedsOperator(problem.clone()),
-            // Only a degraded record's own writer gets this.
-            Ok(Recorded::Degraded) => return Ended::Lost,
+            // Only the writer of a degraded or divergence record gets these.
+            Ok(Recorded::Degraded | Recorded::Diverged) => return Ended::Lost,
             Ok(Recorded::Superseded(epoch)) => {
                 tracing::warn!(workload = %id, epoch, "a later owner has written, not recording");
                 return Ended::Lost;
@@ -1535,7 +1550,7 @@ async fn record_degraded(
             }
             // Parked by an operator record already, which the next claimer
             // finds. Nothing to add.
-            Ok(Recorded::NeedsOperator) => return Ended::Lost,
+            Ok(Recorded::NeedsOperator | Recorded::Diverged) => return Ended::Lost,
             Err(error) if error.is::<LostLease>() => return Ended::Lost,
             Err(error) => {
                 tracing::warn!(workload = %id, %error, "could not record that it is stuck, retrying");
@@ -1545,6 +1560,92 @@ async fn record_degraded(
     }
     tracing::warn!(workload = %id, "could not record that it is stuck, releasing the lease anyway");
     released
+}
+
+/// Records where the holder's replay and the output stream disagreed, before
+/// the failure that follows: a divergence record behind everything of earlier
+/// epochs, fenced like a failure. Best effort, since the workload fails
+/// poison whether or not it lands: `None` means go on to the failure, and
+/// `Some` that the lease is lost, a later owner has written, or the stream
+/// already says what comes next.
+async fn record_divergence(
+    node: &Node,
+    id: &str,
+    spec: &WorkloadSpec,
+    (divergence, reason): (&Divergence, &str),
+    fence: &Fence,
+    confirmer: &Confirmer,
+) -> Option<Ended> {
+    let record = spec.record?;
+    let detail = reason.lines().next().unwrap_or_default();
+    let abi = Abi {
+        contract: felixd_runtime::CONTRACT_VERSION.as_bytes(),
+        wasmtime: felixd_runtime::WASMTIME_VERSION.as_bytes(),
+        felixd: env!("CARGO_PKG_VERSION").as_bytes(),
+    };
+    for _ in 0..RECORD_DIVERGENCE_TRIES {
+        if !fence.holds() {
+            return Some(Ended::Lost);
+        }
+        let version = match node.felix.cache_get_versioned(names::WORKLOADS, id).await {
+            Ok(Some(found)) if WorkloadSpec::decode(&found.value).as_ref() == Ok(spec) => {
+                found.version
+            }
+            // Stopped, edited, or a stale read: the watch restarts or stops
+            // the task, which decides again.
+            Ok(_) => return Some(Ended::Lost),
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not read the spec, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+        };
+        if !confirmer.confirm().await || !fence.holds() {
+            tracing::warn!(workload = %id, "the lease is lost, not recording the divergence");
+            return Some(Ended::Lost);
+        }
+        let recorded = output_log::record_divergence(
+            &node.felix,
+            &spec.output,
+            fence,
+            (version, record),
+            (divergence, detail),
+            abi,
+        )
+        .await;
+        match recorded {
+            Ok(Recorded::Diverged) => {
+                metrics::diverged();
+                return None;
+            }
+            Ok(Recorded::Superseded(epoch)) => {
+                tracing::warn!(workload = %id, epoch, "a later owner has written, not recording the divergence");
+                return Some(Ended::Lost);
+            }
+            Ok(Recorded::Failed {
+                spec_version,
+                failure,
+            }) => {
+                tracing::error!(workload = %id, reason = %failure.detail, "the output stream records a failure");
+                return Some(
+                    if write_failed(&node.felix, id, spec_version, &failure).await {
+                        Ended::Failed
+                    } else {
+                        Ended::Lost
+                    },
+                );
+            }
+            // Parked already, which the next claimer finds.
+            Ok(Recorded::NeedsOperator | Recorded::Degraded) => return Some(Ended::Lost),
+            Err(error) if error.is::<LostLease>() => return Some(Ended::Lost),
+            Err(error) => {
+                tracing::warn!(workload = %id, %error, "could not record the divergence, retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+    }
+    tracing::warn!(workload = %id, "could not record the divergence, failing the workload without it");
+    None
 }
 
 /// Records that the workload failed: a failure record on its output stream,
@@ -1595,7 +1696,9 @@ async fn mark_failed(
                 spec_version,
                 failure,
             })) => return write_failed(felix, id, spec_version, &failure).await,
-            Ok(Ok(Recorded::NeedsOperator | Recorded::Degraded)) => return false,
+            Ok(Ok(Recorded::NeedsOperator | Recorded::Degraded | Recorded::Diverged)) => {
+                return false;
+            }
             Ok(Ok(Recorded::Superseded(epoch))) => {
                 tracing::warn!(workload = %id, epoch, "a later owner has written, not failing");
                 return false;

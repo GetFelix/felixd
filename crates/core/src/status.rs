@@ -174,6 +174,144 @@ pub fn degraded(last: &[u8], record: u64) -> Option<Degraded> {
     }
 }
 
+/// What a divergence record says: where a replay and the output stream
+/// disagreed and which build found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diverged {
+    pub node: String,
+    pub epoch: u64,
+    pub input_offset: u64,
+    pub index: u32,
+    /// The input offset of the snapshot the replay restored, or `None` for
+    /// the initial state.
+    pub snapshot: Option<u64>,
+    pub contract: String,
+    pub wasmtime: String,
+    pub felixd: String,
+    /// The sha256 of what the stream holds there, in hex, when it holds an
+    /// output or a rejection.
+    pub expected: Option<String>,
+    /// The sha256 of what the replay produced there.
+    pub actual: Option<String>,
+    pub detail: String,
+}
+
+impl fmt::Display for Diverged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "diverged at input {} output {}",
+            self.input_offset, self.index
+        )?;
+        if !self.node.is_empty() {
+            write!(f, " on {}", self.node)?;
+        }
+        write!(f, " at epoch {}: the stream holds ", self.epoch)?;
+        digest(f, self.expected.as_deref())?;
+        f.write_str(", the replay produced ")?;
+        digest(f, self.actual.as_deref())?;
+        match self.snapshot {
+            Some(input) => write!(f, ", started from the snapshot of input {input}")?,
+            None => f.write_str(", started from the initial state")?,
+        }
+        write!(
+            f,
+            ", contract {}, wasmtime {}, felixd {}",
+            self.contract, self.wasmtime, self.felixd
+        )?;
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+fn digest(f: &mut fmt::Formatter<'_>, digest: Option<&str>) -> fmt::Result {
+    match digest {
+        Some(digest) => write!(f, "sha256 {digest}"),
+        None => f.write_str("nothing that compares"),
+    }
+}
+
+/// The divergence record under spec record `record` that the workload's
+/// failure followed, from `recent`, the last records of its output stream
+/// oldest first. Failure, degraded and needs-operator records after it are
+/// passed over. Any other record, a claim included, ends the search: a later
+/// holder has run since, so the divergence is no longer what the stream
+/// ends on. A record this build cannot read still shows, as far as its
+/// header goes.
+pub fn divergence<'a>(
+    recent: impl DoubleEndedIterator<Item = &'a [u8]>,
+    record: u64,
+) -> Option<Diverged> {
+    for last in recent.rev() {
+        match output::decode(last) {
+            Ok(output::Record::Divergence { epoch, found }) if found.spec == record => {
+                return Some(Diverged {
+                    node: lossy(found.node),
+                    epoch,
+                    input_offset: found.header.input_offset,
+                    index: found.header.index,
+                    snapshot: found.snapshot,
+                    contract: lossy(found.abi.contract),
+                    wasmtime: lossy(found.abi.wasmtime),
+                    felixd: lossy(found.abi.felixd),
+                    expected: found.expected.map(hex),
+                    actual: found.actual.map(hex),
+                    detail: lossy(found.detail),
+                });
+            }
+            Ok(
+                output::Record::Failure { .. }
+                | output::Record::Degraded { .. }
+                | output::Record::NeedsOperator { .. },
+            ) => {}
+            Ok(_) => return None,
+            Err(error) if output::divergence_spec_of(last) == Some(record) => {
+                return Some(Diverged {
+                    node: String::new(),
+                    epoch: 0,
+                    input_offset: 0,
+                    index: 0,
+                    snapshot: None,
+                    contract: "?".into(),
+                    wasmtime: "?".into(),
+                    felixd: "?".into(),
+                    expected: None,
+                    actual: None,
+                    detail: format!("a divergence record this build cannot read: {error}"),
+                });
+            }
+            Err(_)
+                if output::needs_operator_spec_of(last).is_some()
+                    || output::degraded_spec_of(last).is_some() => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Whether `last`, the last record of an output stream, is one a divergence
+/// record can sit behind, so [`divergence`] is worth the read.
+pub fn may_follow_divergence(last: &[u8]) -> bool {
+    match output::decode(last) {
+        Ok(output::Record::Failure { .. })
+        | Ok(output::Record::Degraded { .. })
+        | Ok(output::Record::NeedsOperator { .. })
+        | Ok(output::Record::Divergence { .. }) => true,
+        Ok(_) => false,
+        Err(_) => output::divergence_spec_of(last).is_some(),
+    }
+}
+
+fn lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The next step a workload takes, as far as its records show: past the
 /// input of the last output or rejection, or of the latest snapshot,
 /// whichever is later. For a workload with several inputs it is a merge log

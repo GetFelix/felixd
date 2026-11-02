@@ -77,7 +77,14 @@ fn p(payload: &[u8]) -> Produced {
 }
 
 fn recorded(records: &[Vec<u8>], inputs: Range<u64>) -> Recorded {
-    Recorded::read(records.iter().map(Vec::as_slice), inputs).unwrap()
+    Recorded::read(
+        records
+            .iter()
+            .enumerate()
+            .map(|(at, r)| (at as u64, r.as_slice())),
+        inputs,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -116,6 +123,7 @@ fn a_different_payload_names_the_writer_and_both_digests() {
                 epoch: 2,
                 node: Some("b".into())
             }),
+            noted: None,
             recorded: Some(Summary::from(&p(b"y"))),
             replayed: Some(Summary::from(&p(b"other"))),
         }
@@ -226,4 +234,72 @@ fn a_degraded_record_is_passed_over_when_reading_the_recorded_outputs() {
     assert_eq!(r.compare(0, &[p(b"x")]), None);
     assert_eq!(r.compare(1, &[p(b"y")]), None);
     assert_eq!(r.end(), 2);
+}
+
+fn divergence_record(input_offset: u64, epoch: u64, node: &str) -> Vec<u8> {
+    use crate::output::{Abi, Diverged, encode_divergence};
+    let found = Diverged {
+        spec: 3,
+        header: OutputHeader {
+            input_offset,
+            index: 0,
+        },
+        snapshot: None,
+        node: node.as_bytes(),
+        abi: Abi {
+            contract: b"0.2.0",
+            wasmtime: b"50.0.0",
+            felixd: b"1.2.3",
+        },
+        expected: None,
+        actual: None,
+        detail: b"",
+    };
+    encode_divergence(epoch, &found)
+}
+
+/// The divergence record a holder wrote for an output is named when a diff
+/// finds the same output differing, and only then.
+#[test]
+fn a_divergence_record_is_named_by_the_diff_that_finds_the_same_output() {
+    let stream = [
+        encode_claim(1, "a"),
+        out(0, 0, 1, b"x"),
+        out(1, 0, 1, b"y"),
+        divergence_record(1, 1, "a"),
+    ];
+    let r = recorded(&stream, 0..10);
+    assert_eq!(r.compare(0, &[p(b"x")]), None);
+    let found = r.compare(1, &[p(b"other")]).unwrap();
+    assert_eq!(
+        found.noted,
+        Some(Noted {
+            offset: 3,
+            epoch: 1,
+            node: "a".into(),
+            build: "contract 0.2.0, wasmtime 50.0.0, felixd 1.2.3".into(),
+        })
+    );
+    assert!(
+        found.to_string().ends_with(
+            "; a divergence record at offset 3 says node a found this at epoch 1 \
+             (contract 0.2.0, wasmtime 50.0.0, felixd 1.2.3)"
+        ),
+        "{found}"
+    );
+    // A divergence record for another input is not this one's.
+    let stream = [out(0, 0, 1, b"x"), divergence_record(5, 1, "a")];
+    let r = recorded(&stream, 0..10);
+    assert_eq!(r.compare(0, &[p(b"other")]).unwrap().noted, None);
+}
+
+#[test]
+fn a_divergence_record_this_build_cannot_read_is_passed_over_by_a_diff() {
+    let mut unreadable = divergence_record(0, 1, "a");
+    unreadable[30] = 2;
+    assert!(crate::output::decode(&unreadable).is_err());
+    let stream = [out(0, 0, 1, b"x"), unreadable];
+    let r = recorded(&stream, 0..10);
+    assert_eq!(r.compare(0, &[p(b"x")]), None);
+    assert_eq!(r.compare(0, &[p(b"other")]).unwrap().noted, None);
 }

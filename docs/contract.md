@@ -362,8 +362,8 @@ live manifest references.
 
 A spec's input may be another workload's output stream, as now. It gets the
 outputs addressed to one name, `out`, with their keys; a spec cannot name
-another yet. Claims, failures, needs-operator, trim and degraded records, rejections
-and other names are passed over ([design.md, Pipelines](design.md#pipelines)).
+another yet. Claims, failures, needs-operator, trim, degraded and divergence records,
+rejections and other names are passed over ([design.md, Pipelines](design.md#pipelines)).
 
 ## Several inputs
 
@@ -413,8 +413,10 @@ build has no effect executors.
 
 - Module upgrades at a recorded input offset (#64's last item). Spec history
   is now records on `sys.specs` (#72); the upgrade itself is not built.
-- Typed spec and failure records (#73). The error classes here are the ones
-  #73 will record.
+- The system records defined in WIT (#73). They wait for the effect records,
+  which are not built. Until then they are defined once in `felixd-core`
+  ([records.md](records.md)), and the error classes here are the ones they
+  carry.
 
 ## Decisions
 
