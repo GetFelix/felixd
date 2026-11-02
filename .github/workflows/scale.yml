@@ -45,6 +45,8 @@ jobs:
           repository: GetFelix/felix
           ref: ${{ steps.sha.outputs.sha }}
           path: felix-src
+      - name: Patch
+        run: if [ -f .felix-patch ]; then git -C felix-src apply --verbose ../.felix-patch; fi
       - name: Build images
         run: |
           cd felix-src
