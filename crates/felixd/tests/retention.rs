@@ -441,6 +441,36 @@ async fn a_failover_after_the_trim_landed_finishes_deleting_out_and_the_input() 
     assert!(!parked(&t).await);
 }
 
+/// With the head of `.out` deleted, `felixd replay --diff` compares from the
+/// input after the oldest kept snapshot instead of failing on the missing
+/// records, and has nothing to compare when asked to start from scratch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diff_of_an_output_with_a_cut_head_starts_after_the_oldest_snapshot() {
+    let Some(t) = test_felix().await else { return };
+    t.submit(
+        "counter",
+        &["--snapshot-every", "5", "--keep-snapshots", "1"],
+    )
+    .await;
+    let _agent = t.start_agent_with_faults(DELETE_SHARED);
+    t.publish_all(INPUT, (0..30).map(count)).await;
+    eventually(
+        "`.out` to lose its head",
+        Duration::from_secs(90),
+        || async { (t.readable_from(OUTPUT).await > 0).then_some(()) },
+    )
+    .await;
+    eventually("every output", Duration::from_secs(60), || async {
+        stepped(&t, OUTPUT, 30).await.then_some(())
+    })
+    .await;
+    let (ok, report) = t.replay(&["--id", ID, "--diff"]);
+    assert!(ok, "{report}");
+    assert!(report.contains("outputs match"), "{report}");
+    let (ok, _) = t.replay(&["--id", ID, "--diff", "--from-start"]);
+    assert!(!ok, "a diff from the start needs the deleted head");
+}
+
 /// A workload added after the input was deleted asks for records that are
 /// gone. It is left to an operator rather than started in the middle.
 #[tokio::test(flavor = "multi_thread")]

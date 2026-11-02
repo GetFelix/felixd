@@ -1553,9 +1553,10 @@ starts after a snapshot instead
 ([Checking from a snapshot](#checking-from-a-snapshot)), and `check` does that by
 default once the head of `.out` is gone. When only an input has been deleted, a
 check from the start fails as above, and the message names the flag.
-`felixd replay --diff` compares against `.out` from its first record, so it stops
-the same way once `.out` has been cut. A plain `felixd replay` does not read
-`.out`, and works from a snapshot's input on.
+Once `.out` has been cut, `felixd replay --diff` compares from the input after
+the oldest kept snapshot, the way `check` does, and says where it started;
+`--from-start` stops as above. A plain `felixd replay` does not read `.out`, and
+works from a snapshot's input on.
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)

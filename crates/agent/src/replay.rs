@@ -8,12 +8,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use felixd_core::check::Produced;
 use felixd_core::module::{self, ModuleInfo, SectionError, Unreadable};
 use felixd_core::names;
+use felixd_core::output;
 use felixd_core::replay::{self, Divergence, Initial, Recorded, Start};
 use felixd_core::snapshot::SnapshotHeader;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
-use crate::check::{judged, module_bytes};
+use crate::check::{judged, module_bytes, read_held};
 use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed};
 use crate::settings::Settings;
@@ -126,7 +127,22 @@ pub async fn diff(
     // The output stream first, so every input a recorded output came from is
     // on the input stream when its tail is read.
     let output_tail = felix.tail(&spec.output).await?;
-    let records = felix.read_range(&spec.output, 0, output_tail).await?;
+    let held = read_held(&felix, &spec.output, output_tail).await?;
+    let (records, cut) = (held.records, held.cut);
+    // A cut head leaves outputs only from the oldest kept snapshot on, so the
+    // diff starts right after it, as `felixd check` does.
+    let from = match held.trimmed {
+        Some(error) if from_start => return Err(Trimmed::explained(error, "felixd replay")),
+        Some(error) => {
+            let kept = records
+                .iter()
+                .rev()
+                .find_map(|r| output::decode(&r.payload).ok()?.trim());
+            let kept = kept.ok_or_else(|| Trimmed::explained(error, "felixd replay"))?;
+            from.max(kept.step + 1)
+        }
+        None => from,
+    };
     let mut feed = Feed::new(&felix, id, &spec);
     let input_tail = felix.tail(feed.stream()).await?;
     let end = end_of(&felix, feed.stream(), to, input_tail).await?;
@@ -137,7 +153,7 @@ pub async fn diff(
     .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, start) = start(&felix, id, &spec, module, from, from_start).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records, false).await?;
+    let (_, limits) = judged(&felix, id, &spec, &records, cut).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
     let first = run_inputs(

@@ -224,9 +224,10 @@
   No record format changes. Breaking, and the risk of `--grant-trim`: a program
   outside felixd that reads an input or a workload's `.out` is not known to
   this rule and can find its history gone; a conditional publisher to an input
-  is refused once per trim; a workload submitted after the history was deleted
-  starts at a record that is gone and is left to an operator (reason 9); and
-  `felixd replay --diff` stops on a cut `.out`. Test agents add the new
+  is refused once per trim; and a workload submitted after the history was
+  deleted starts at a record that is gone and is left to an operator
+  (reason 9). `felixd replay --diff` of a cut `.out` compares from the input
+  after the oldest kept snapshot; `--from-start` stops. Test agents add the new
   `skip-shared-deletion` fault by default. New `felixd_core::readers`.
 - Upgrading for deleted outputs and inputs (#150): upgrade every node before
   setting `--keep-snapshots` with the grant on. A node from before trim records
