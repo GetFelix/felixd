@@ -2,10 +2,10 @@
 //!
 //! A trim record on `.out` says below which offsets of the snapshot stream,
 //! the merge log and each input this workload's resume reads nothing.
-//! `felixd check` and `felixd replay` read from the start while records are
-//! there.
-//! Nothing is deleted yet: Felix has no call to trim a stream at an offset
-//! (Felix#1662). The record is what that deletion will follow.
+//! The holder then deletes what the record names on the streams that are the
+//! workload's own, `.snap` and the merge log ([`Trim::deletions`]), and only
+//! after the record has landed, so a crash at any point leaves less deleted
+//! than recorded. Inputs are not deleted: other readers may need them.
 
 use crate::codec::{DecodeError, Reader};
 
@@ -39,6 +39,39 @@ pub struct Trim {
     /// workload's resume reads nothing. Other readers of a shared input may
     /// need more.
     pub input_floors: Vec<u64>,
+}
+
+/// A stream whose history the holder deletes on a trim record's word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owned {
+    /// The snapshot stream, `.snap`.
+    Snapshots,
+    /// The merge log.
+    MergeLog,
+}
+
+/// The floors a holder has already deleted below, on the streams it owns.
+/// Zero where it has deleted nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Deleted {
+    pub snap_floor: u64,
+    pub merge_floor: u64,
+}
+
+impl Trim {
+    /// What is left to delete: each owned stream whose floor is past what is
+    /// already `done`, with the offset to delete below. The merge log only
+    /// counts for a `merged` workload.
+    pub fn deletions(&self, merged: bool, done: Deleted) -> Vec<(Owned, u64)> {
+        let mut left = Vec::new();
+        if self.snap_floor > done.snap_floor {
+            left.push((Owned::Snapshots, self.snap_floor));
+        }
+        if merged && self.merge_floor > done.merge_floor {
+            left.push((Owned::MergeLog, self.merge_floor));
+        }
+        left
+    }
 }
 
 /// Why [`plan`] wrote nothing.

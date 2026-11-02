@@ -43,6 +43,7 @@ mod input;
 mod lease;
 mod merge;
 mod output;
+mod retention;
 mod runner;
 mod snapshots;
 mod specs;

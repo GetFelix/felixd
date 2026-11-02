@@ -39,3 +39,24 @@ async fn a_page_that_never_advances_is_an_error() {
     let result = advancing("s", 4, || async { Ok((Vec::<u64>::new(), 4)) }).await;
     assert!(result.is_err());
 }
+
+#[test]
+fn a_command_that_reads_trimmed_history_names_the_stream_and_where_it_starts() {
+    let trimmed = Trimmed {
+        stream: "wl.a.merge".into(),
+        requested: 0,
+        oldest: 37,
+    };
+    let message = Trimmed::explained(trimmed.into(), "felixd check").to_string();
+    assert_eq!(
+        message,
+        "felixd check needs wl.a.merge from offset 0, but Felix holds it only from offset 37: \
+         the history before was trimmed"
+    );
+}
+
+#[test]
+fn any_other_error_is_left_as_it_was() {
+    let message = Trimmed::explained(anyhow::anyhow!("connection reset"), "felixd check");
+    assert_eq!(message.to_string(), "connection reset");
+}

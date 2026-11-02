@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
     AckMode, BrokerError, CacheCondition, CacheConditionResult, Client, ClientConfig,
-    ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy, StartPosition, StreamRecord,
-    SubscribeCursorError, VersionedValue, root_store_from_pem_file,
+    ConditionalTrim, ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy,
+    StartPosition, StreamRecord, SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
 
 use felixd_core::names;
@@ -216,6 +216,30 @@ impl Felix {
                 None,
                 payloads,
                 expected,
+            )
+            .await
+    }
+
+    /// Hides the records of `stream` below `before`, if its next offset is
+    /// exactly `expected`. The trim is a record of its own at `expected`.
+    ///
+    /// Not retried: a refused tail is an answer, and a trim that timed out
+    /// may have landed.
+    pub(crate) async fn trim_before(
+        &self,
+        stream: &str,
+        before: u64,
+        expected: u64,
+    ) -> Result<ConditionalTrim> {
+        self.client
+            .trim_before(
+                &self.tenant,
+                &self.namespace_of(stream),
+                stream,
+                0,
+                before,
+                expected,
+                None,
             )
             .await
     }
@@ -580,6 +604,22 @@ impl Trimmed {
     /// The trim `error` reports, if it is one.
     pub fn of(error: &anyhow::Error) -> Option<&Trimmed> {
         error.downcast_ref::<Trimmed>()
+    }
+
+    /// `error`, for a command that reads `stream` from an offset Felix has
+    /// trimmed past, said so the operator can act on it. Any other error is
+    /// returned as it came.
+    pub(crate) fn explained(error: anyhow::Error, command: &str) -> anyhow::Error {
+        match Trimmed::of(&error) {
+            Some(t) => anyhow::anyhow!(
+                "{command} needs {} from offset {}, but Felix holds it only from offset {}: \
+                 the history before was trimmed",
+                t.stream,
+                t.requested,
+                t.oldest
+            ),
+            None => error,
+        }
     }
 }
 

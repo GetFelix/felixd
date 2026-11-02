@@ -15,7 +15,7 @@ use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
-use felixd_core::trim::{self, Trim};
+use felixd_core::trim::{self, Deleted, Owned, Trim};
 use felixd_core::{MAX_WRITE_BYTES, module, names};
 use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
 use tokio::sync::{OnceCell, Semaphore, mpsc};
@@ -28,6 +28,7 @@ use crate::lease::Fence;
 use crate::merge::MergeLog;
 use crate::metrics::{self, InputMetrics, WorkloadMetrics};
 use crate::output::OutputLog;
+use crate::retention::{self, Deletion};
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
 
@@ -537,6 +538,7 @@ async fn run(
         previous_stamp,
         hold,
         last_trim,
+        deleted: Deleted::default(),
         metrics: workload_metrics,
         positions,
     };
@@ -548,6 +550,9 @@ async fn run(
             }
         }
     }
+    // An earlier holder may have stopped between its trim record and the
+    // deletion.
+    steps.delete_trimmed().await;
     if let Some(merge) = &mut merge {
         return merged(felix, id, spec, &mut steps, merge, resume.next_input).await;
     }
@@ -852,6 +857,8 @@ struct Steps<'a> {
     hold: &'a mut u64,
     /// The last trim this owner wrote, or the last on `.out` when it resumed.
     last_trim: Option<Trim>,
+    /// The floors this owner has deleted `.snap` and the merge log below.
+    deleted: Deleted,
     metrics: Option<Arc<WorkloadMetrics>>,
     positions: Vec<Arc<InputMetrics>>,
 }
@@ -966,13 +973,15 @@ impl Steps<'_> {
         }
         self.previous = Some(manifest);
         faults::after_snapshot();
-        self.trim().await
+        self.trim().await?;
+        self.delete_trimmed().await;
+        Ok(())
     }
 
     /// With `keep_snapshots` set, records on `.out` the floors below the
     /// oldest kept snapshot that this workload's resume no longer reads. It goes
     /// on `.out` with `publish_if` at the tail, so a stale holder's is
-    /// refused like its outputs. It deletes nothing (Felix#1662).
+    /// refused like its outputs. [`Self::delete_trimmed`] acts on it.
     async fn trim(&mut self) -> Result<()> {
         let Some(keep) = self.spec.keep_snapshots else {
             return Ok(());
@@ -1023,6 +1032,64 @@ impl Steps<'_> {
         enforce_floors(self.spec, &planned);
         self.last_trim = Some(planned);
         Ok(())
+    }
+
+    /// Deletes `.snap` and the merge log below the last trim record's floors,
+    /// as far as this owner has not already. Only a record that has landed on
+    /// `.out` is acted on, so a crash leaves less deleted than recorded and
+    /// the next holder finishes. Never fails the workload: whatever Felix
+    /// refuses is asked again at the next snapshot.
+    ///
+    /// A trim is a record of its own at the stream's tail. For `.snap` that
+    /// moves `snap_tail` on, so the next snapshot write is not refused for it.
+    /// The merge log's own append finds its tail moved and carries on from
+    /// where Felix says, since a trim record holds no entry.
+    async fn delete_trimmed(&mut self) {
+        let Some(trim) = &self.last_trim else { return };
+        let todo = trim.deletions(self.spec.merged(), self.deleted);
+        if todo.is_empty()
+            || faults::skip_deletion()
+            || !retention::may_delete()
+            || !self.fence.holds()
+        {
+            return;
+        }
+        let Some(id) = names::output_of(&self.spec.output) else {
+            return;
+        };
+        for (owned, before) in todo {
+            let deletion = match owned {
+                Owned::Snapshots => {
+                    let deletion = retention::trim_stream(
+                        self.felix,
+                        self.snap_stream,
+                        before,
+                        self.snap_tail,
+                    )
+                    .await;
+                    if let Deletion::Done { landed: Some(at) } = deletion {
+                        self.snap_tail = at + 1;
+                    }
+                    deletion
+                }
+                Owned::MergeLog => {
+                    let stream = names::merge_stream(id);
+                    match self.felix.read_tail(&stream).await {
+                        Ok(tail) => retention::trim_stream(self.felix, &stream, before, tail).await,
+                        Err(error) => {
+                            tracing::warn!(stream, %error, "reading the tail to trim at failed");
+                            Deletion::Later
+                        }
+                    }
+                }
+            };
+            match (deletion, owned) {
+                (Deletion::Done { .. }, Owned::Snapshots) => self.deleted.snap_floor = before,
+                (Deletion::Done { .. }, Owned::MergeLog) => self.deleted.merge_floor = before,
+                (Deletion::Unavailable, _) => return,
+                (Deletion::Later, _) => {}
+            }
+        }
     }
 
     /// Writes the chunks the previous manifest does not hold, then the

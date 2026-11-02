@@ -13,7 +13,7 @@ use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::settings::Settings;
 use crate::specs;
 
@@ -70,6 +70,7 @@ pub async fn check(
     for id in check::upstream_first(&inputs) {
         let report = check_one(&felix, &runtime, &id, complete)
             .await
+            .map_err(|e| Trimmed::explained(e, "felixd check"))
             .with_context(|| format!("check workload {id}"))?;
         reports.push(report);
     }
@@ -90,7 +91,8 @@ async fn check_one(felix: &Felix, runtime: &Runtime, id: &str, complete: bool) -
     // it names is on its input when that is read.
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
-    let snapshots = felix.read_range(&snap_stream, 0, snap_tail).await?;
+    // From the oldest snapshot Felix holds: `keep_snapshots` deletes the rest.
+    let (snapshots, _) = felix.read_back(&snap_stream, 0, snap_tail).await?;
     let output_tail = felix.tail(&cached.output).await?;
     let records = felix.read_range(&cached.output, 0, output_tail).await?;
     // The module, input and limits the stream was written under, not those

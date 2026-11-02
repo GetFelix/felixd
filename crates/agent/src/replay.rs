@@ -13,7 +13,7 @@ use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
 use crate::check::{judged, module_bytes};
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed};
 use crate::settings::Settings;
 use crate::snapshots::{self, Snapshot};
@@ -92,7 +92,8 @@ pub async fn replay(
             None::<()>
         },
     )
-    .await?;
+    .await
+    .map_err(|e| Trimmed::explained(e, "felixd replay"))?;
     let state = workload.inspect().context("inspect")?;
     Ok(Replayed {
         end,
@@ -156,7 +157,8 @@ pub async fn diff(
             found
         },
     )
-    .await?;
+    .await
+    .map_err(|e| Trimmed::explained(e, "felixd replay"))?;
     let mut found_all = first.into_iter().chain(found_all);
     Ok(Diffed {
         from,
@@ -225,7 +227,8 @@ async fn start(
     }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
-    let records = felix.read_range(&snap_stream, 0, snap_tail).await?;
+    // From the oldest snapshot Felix holds: `keep_snapshots` deletes the rest.
+    let (records, _) = felix.read_back(&snap_stream, 0, snap_tail).await?;
     let mut found = Vec::with_capacity(records.len());
     for record in &records {
         let snapshot = Snapshot::decode(&record.payload)
