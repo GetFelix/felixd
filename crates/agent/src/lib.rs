@@ -4,6 +4,7 @@
 //! - [`settings`] and [`felix`]: how to reach Felix, and the calls felixd makes.
 //! - [`admin`]: the control plane's REST API, used to create streams and caches.
 //! - [`submit`]: what `felixd run` does.
+//! - [`module_store`]: modules in the `modules` cache, whole or in chunks.
 //! - [`check`]: what `felixd check` does.
 //! - [`replay`]: what `felixd replay` does.
 //! - [`ps`]: what `felixd ps` does.
@@ -33,6 +34,7 @@ pub mod check;
 pub mod drain;
 pub mod felix;
 pub mod metrics;
+pub mod module_store;
 pub mod ps;
 pub mod replay;
 pub mod settings;

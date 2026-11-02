@@ -16,7 +16,7 @@ use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
 use felixd_core::spec::WorkloadSpec;
 use felixd_core::trim::{self, Trim};
-use felixd_core::{MAX_WRITE_BYTES, module, names};
+use felixd_core::{MAX_WRITE_BYTES, names};
 use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
 use tokio::sync::{OnceCell, Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -27,6 +27,7 @@ use crate::input::{self, Feed, StepInput, merge_unreadable};
 use crate::lease::Fence;
 use crate::merge::MergeLog;
 use crate::metrics::{self, InputMetrics, WorkloadMetrics};
+use crate::module_store::{self, Fetched};
 use crate::output::OutputLog;
 use crate::snapshots::{self, ReadError, Snapshot};
 use crate::specs;
@@ -57,13 +58,11 @@ impl Modules {
     pub(crate) async fn compiled(&self, felix: &Felix, hash: &str) -> Result<Compiled> {
         self.compiled
             .get(hash, || async {
-                let bytes = felix
-                    .cache_get(names::MODULES, hash)
-                    .await?
-                    .ok_or_else(|| ModuleMissing(hash.to_owned()))?;
-                if module::hash(&bytes) != hash {
-                    return Err(poison(format!("module {hash} does not match its hash")));
-                }
+                let bytes = match module_store::fetch(felix, hash).await? {
+                    Fetched::Found(bytes) => bytes,
+                    Fetched::Missing(what) => return Err(ModuleMissing(what).into()),
+                    Fetched::Corrupt(corrupt) => return Err(poison(corrupt)),
+                };
                 let _permit = self.compiles.acquire().await?;
                 let runtime = self.runtime.clone();
                 tokio::task::spawn_blocking(move || {
@@ -208,14 +207,15 @@ impl fmt::Display for NeedsOperatorOnStream {
 
 impl std::error::Error for NeedsOperatorOnStream {}
 
-/// The module is not in the `modules` cache. Transient at first, since a
-/// read can be stale; the agent leaves it to an operator once it has lasted.
+/// The module, or one of its chunks, is not in the `modules` cache.
+/// Transient at first, since a read can be stale; the agent leaves it to an
+/// operator once it has lasted.
 #[derive(Debug)]
 pub(crate) struct ModuleMissing(pub(crate) String);
 
 impl fmt::Display for ModuleMissing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "module {} is not in the modules cache", self.0)
+        write!(f, "{} is not in the modules cache", self.0)
     }
 }
 

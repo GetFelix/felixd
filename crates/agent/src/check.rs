@@ -9,11 +9,12 @@ use felixd_core::output::{self, OutputHeader};
 
 use crate::input::{self, Feed};
 use felix_client::StreamRecord;
+use felixd_core::names;
 use felixd_core::spec::{Limits, WorkloadSpec};
-use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
 use crate::felix::Felix;
+use crate::module_store::{self, Fetched};
 use crate::settings::Settings;
 use crate::specs;
 
@@ -212,14 +213,11 @@ async fn inputs_of(felix: &Felix, id: &str) -> Result<Vec<String>> {
 
 /// The module `hash` from the `modules` cache.
 pub(crate) async fn module_bytes(felix: &Felix, hash: &str) -> Result<Vec<u8>> {
-    let bytes = felix
-        .cache_get(names::MODULES, hash)
-        .await?
-        .with_context(|| format!("module {hash} is not in the modules cache"))?;
-    if module::hash(&bytes) != hash {
-        bail!("module {hash} does not match its hash");
+    match module_store::fetch(felix, hash).await? {
+        Fetched::Found(bytes) => Ok(bytes.to_vec()),
+        Fetched::Missing(what) => bail!("{what} is not in the modules cache"),
+        Fetched::Corrupt(corrupt) => bail!("{corrupt}"),
     }
-    Ok(bytes.to_vec())
 }
 
 /// Every key in the `workloads` cache. Felix has no call that lists a

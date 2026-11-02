@@ -314,3 +314,21 @@ fn a_decision_written_before_requesters_were_recorded_still_reads() {
     assert_eq!(decision.requester, None);
     assert_eq!(decision.request, 4);
 }
+
+#[test]
+fn a_module_larger_than_one_write_is_accepted_up_to_the_limit() {
+    let policy = Policy::default();
+    assert_eq!(policy.max_module_bytes, 64 << 20);
+    let mut at_limit = request("wl");
+    at_limit.module_bytes = policy.max_module_bytes;
+    assert!(decided(&at_limit).accepted().is_some());
+    let mut empty = request("wl");
+    empty.module_bytes = 0;
+    assert_eq!(rejected(&decided(&empty)), Reason::ModuleTooLarge);
+    let mut over = request("wl");
+    over.module_bytes = policy.max_module_bytes + 1;
+    let Outcome::Rejected { detail, .. } = decided(&over).outcome else {
+        panic!("accepted");
+    };
+    assert_eq!(detail, "the module is 67108865 bytes, not 1 to 67108864");
+}

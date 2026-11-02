@@ -18,16 +18,16 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use bytes::Bytes;
 use felix_client::ConditionalWrite;
 use felixd_core::admission::{self, Decision, Outcome, Reason, Request};
 use felixd_core::class::OperatorReason;
 use felixd_core::spec::{SpecRecord, WorkloadSpec, WorkloadState};
-use felixd_core::{module, names, output};
+use felixd_core::{names, output};
 use tokio::sync::watch;
 
 use crate::admin::{self, StreamKind};
 use crate::felix::{Felix, Trimmed};
+use crate::module_store::{self, Fetched};
 use crate::runner::NeedsOperator;
 use crate::settings::Settings;
 use crate::specs;
@@ -610,17 +610,16 @@ impl Projector {
 /// Whether the `modules` cache holds a module hashing to `hash` of exactly
 /// `bytes` bytes. The outer error is a failed read.
 async fn module_matches(felix: &Felix, hash: &str, bytes: u64) -> Result<Result<(), String>> {
-    let Some(found) = felix.cache_get(names::MODULES, hash).await? else {
-        return Ok(Err(format!("module {hash} is not in {}", names::MODULES)));
+    let found = match module_store::fetch(felix, hash).await? {
+        Fetched::Found(found) => found,
+        Fetched::Missing(what) => return Ok(Err(format!("{what} is not in {}", names::MODULES))),
+        Fetched::Corrupt(corrupt) => return Ok(Err(corrupt.to_string())),
     };
     if found.len() as u64 != bytes {
         return Ok(Err(format!(
             "module {hash} is {} bytes, and the request says {bytes}",
             found.len()
         )));
-    }
-    if module::hash(&found) != hash {
-        return Ok(Err(format!("the module under {hash} hashes otherwise")));
     }
     Ok(Ok(()))
 }
@@ -672,9 +671,7 @@ pub async fn request(
     let decisions_from = felix.read_tail(&decisions).await?;
     let specs_from = felix.read_tail(names::SPECS).await?;
     let request = Request::new(id, spec, module.len() as u64, replication_factor);
-    felix
-        .cache_put(names::MODULES, &module::hash(&module), Bytes::from(module))
-        .await?;
+    module_store::put(felix, &module).await?;
     let payload = request.encode();
     let mut tail = felix.tail(names::INTAKE).await?;
     let started = Instant::now();
