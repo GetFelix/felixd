@@ -148,7 +148,7 @@ and the digests of both sides. It continues with:
 | 1 + 0 or 32 | the sha256 of what the stream holds there, as a length byte (0 or 32) and the digest |
 | 1 + 0 or 32 | the sha256 of what the holder's replay produced there, the same way |
 | 1 + n | the node that found it, UTF-8; an id past 255 bytes is cut there |
-| 1 + n | the workload contract version of the build, such as `0.2.0` |
+| 1 + n | the contract version the workload's module implements, `0.2.0` or `0.3.0` |
 | 1 + n | the wasmtime version of the build, such as `50.0.0` |
 | 1 + n | the felixd version of the build |
 | rest | what was found, UTF-8, for people |
