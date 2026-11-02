@@ -700,6 +700,12 @@ release. See the latest run with
 `gh run list -R GetFelix/felixd --workflow "Felix nightly" --limit 1`, or start
 one from the Actions tab.
 
+A second nightly workflow ([`scale-nightly.yml`](.github/workflows/scale-nightly.yml))
+runs the scale test at 1000 workloads against the same `:nightly` Felix images.
+At that size a Felix change that slows lease renewals makes the workloads fail
+to settle, which the integration tests are too small to show. It opens and closes
+an issue labelled `felix-nightly-scale` the same way.
+
 ## Contributing
 
 The plan is open for discussion. Start with

@@ -81,6 +81,12 @@ settled. A green job does not mean every count settled: a phase that fails or ti
 `scale-<N>.json` and shown as `no`, so the next count still runs. "All running" can be a few seconds off at 1000
 workloads, because it comes from polling a lease census that is slow to read at that size.
 
+`Scale nightly` (`scale-nightly.yml`) runs this workflow every night with `counts=1000`, `build_secs=1500` and
+`felix_image_tag=nightly`, so the brokers and control plane are the ones built from Felix main while felixd keeps
+the felix-client in `.felix-version`. A run whose 1000 workloads never all start fails, and a failed scheduled run
+opens or comments on an issue labelled `felix-nightly-scale`; the next green one closes it. `felix_image_tag` is
+also a dispatch input of `Scale`, to measure any Felix image tag by hand.
+
 The measurements and what they showed are in [docs/design.md](docs/design.md#scale). The harness is
 `crates/felixd/tests/scale.rs`; it skips unless `FELIXD_SCALE_COUNT` is set, so `cargo test` does not run it.
 
