@@ -141,7 +141,7 @@ and the digests of both sides. It continues with:
 | Bytes | Field |
 |---|---|
 | 8 | the `sys.specs` offset of the spec record the holder ran |
-| 8 | the input offset of the output that differs |
+| 8 | the input offset of the output that differs, or of the last output the replay produced when the stream holds an unreadable record after it |
 | 4 | the index of that output among the input's outputs |
 | 1 | 1 if the replay started from a snapshot, 0 if from the initial state |
 | 8 | the input offset the snapshot covers through, 0 if none |
@@ -187,7 +187,7 @@ How readers treat it:
   over it as they pass over a claim. It does not raise the spec floor, and the search for the first
   claim passes over it.
 - `felixd ps` shows it on the line after the failure while the stream still ends on it, behind the
-  failure record and any other note after it. `felixd replay --diff` names it when its own diff
+  failure record and any other note after it, within the stream's last 8 records. `felixd replay --diff` names it when its own diff
   finds the same output differing.
 - A reader that reads the record in full refuses a snapshot flag other than 0 or 1 and a digest
   length other than 0 or 32. A node that finds one it cannot read last on the stream does not

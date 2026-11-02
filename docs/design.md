@@ -760,8 +760,8 @@ it. For each workload:
 - **Divergence.** A line below the table with the input and output that
   differ, the node and epoch that found it, the digests of both sides and the
   build, when the output stream ends on a divergence record for this spec
-  record, behind the failure record and any other note after it. A claim or an
-  output after it means a holder has run since, and it is not shown.
+  record, behind the failure record and any other note after it, within the
+  stream's last 8 records. A claim or an output after it means a holder has run since, and it is not shown.
 - **Holder and epoch.** The lease's owner and epoch, and whether that node is
   draining. With no holder, the epoch of the last record on the output stream.
 - **Outputs.** The output stream's tail.

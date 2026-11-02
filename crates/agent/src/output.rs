@@ -702,16 +702,18 @@ impl<'a> OutputLog<'a> {
 }
 
 /// Where `batch`, what this owner meant to write, and `existing`, what the
-/// stream holds there, disagree: at `existing[held]`, against `batch[ours]`
-/// or, for a record that takes no place, the batch's first record.
+/// stream holds there, disagree: at `existing[held]`, against `batch[ours]`.
+/// A record past the batch has no place in it, so it is named after the
+/// batch's last record, the last output compared, and digests nothing of ours.
 fn divergence_in(
     batch: &[Vec<u8>],
     existing: &[&[u8]],
     (held, ours): (usize, Option<usize>),
     snapshot: Option<u64>,
 ) -> Divergence {
-    let mine = batch.get(ours.unwrap_or(0)).map(Vec::as_slice);
-    let header = mine
+    let placed = ours.and_then(|at| batch.get(at)).map(Vec::as_slice);
+    let named = placed.or_else(|| batch.last().map(Vec::as_slice));
+    let header = named
         .and_then(|record| output::decode(record).ok())
         .and_then(|record| record.written())
         .map_or(
@@ -721,7 +723,7 @@ fn divergence_in(
             },
             |written| written.header,
         );
-    Divergence::of(header, snapshot, (existing.get(held).copied(), mine))
+    Divergence::of(header, snapshot, (existing.get(held).copied(), placed))
 }
 
 #[cfg(test)]

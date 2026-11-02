@@ -206,3 +206,14 @@ fn a_foreign_record_that_does_not_decode_is_a_divergence_with_no_expected_digest
     assert_eq!(found.expected, None);
     assert_eq!(found.actual, output::compared_digest(&out(3, 0, b"mine")));
 }
+
+/// A record that does not decode after the batch's last output has no place
+/// in the batch. It is named after that last output, not the first.
+#[test]
+fn an_undecodable_record_past_the_batch_is_named_after_its_last_output() {
+    let batch = vec![out(3, 9, b"a"), out(4, 9, b"b")];
+    let found = divergence_in(&batch, &[b"junk"], (0, None), None);
+    assert_eq!(found.header, header(4));
+    assert_eq!(found.expected, None);
+    assert_eq!(found.actual, None);
+}
