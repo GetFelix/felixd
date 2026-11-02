@@ -1519,7 +1519,9 @@ What the numbers say:
   17,000 claims in the 20 minute window, against about 1,100 over the 7 to 8
   minutes 0.6.2 needed to get all running, and almost nothing was running
   when the window ended. 500 workloads settled on both. See
-  [felix#1760](https://github.com/GetFelix/felix/issues/1760).
+  [felix#1760](https://github.com/GetFelix/felix/issues/1760); felixd
+  [#207](https://github.com/GetFelix/felixd/pull/207) changes what the agent
+  reads back there, so these numbers are for the build measured, not a limit.
 - **A node failure takes longer with more workloads.** An agent's workloads
   moved within 30 s up to 500 workloads and took 85 to 143 s at 1000,
   probably because the survivors claim and restore hundreds at once. A 30 s
