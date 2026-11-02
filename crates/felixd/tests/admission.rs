@@ -426,8 +426,14 @@ async fn a_replay_of_admission_matches_and_lists_what_a_policy_change_decides_ot
     let all = decisions(&t).await;
     assert_eq!(report.lines().count(), all.len(), "{report}");
     for (_, decision) in &all {
-        let want = format!("first divergence at input {} output 0", decision.request);
-        assert!(report.lines().any(|l| l.starts_with(&want)), "{report}");
+        // Only the first line says "first".
+        let want = format!("divergence at input {} output 0", decision.request);
+        assert!(
+            report
+                .lines()
+                .any(|l| l.trim_start_matches("first ").starts_with(&want)),
+            "{report}"
+        );
     }
 }
 
