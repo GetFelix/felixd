@@ -2,13 +2,11 @@
 
 ## Unreleased
 
-<<<<<<< HEAD
 - Fewer control plane requests per `felixd run` (GetFelix/felix#1760). Since the read back
   after a 409 (#149), each submit sent about nine extra requests to the control plane, and with
   1000 workloads starting at once brokers lost their leases and workloads kept being
   re-claimed. A 409 that says the stream or cache already exists is no longer read back;
   any other 409 still is. The control plane calls also share one connection.
-=======
 - Scale test (#20). The manually run `Scale` workflow starts three Felix brokers and three agents, creates N
   workloads and reports create time, memory, and how long recovery takes when an agent and then a broker is
   killed (`crates/felixd/tests/scale.rs`, `.github/workflows/scale.yml`; see CONTRIBUTING.md). The numbers
@@ -19,7 +17,6 @@
   ([felix#1760](https://github.com/GetFelix/felix/issues/1760),
   [felix#1761](https://github.com/GetFelix/felix/issues/1761),
   [felix#1009](https://github.com/GetFelix/felix/issues/1009)).
->>>>>>> origin/main
 - Divergence records (#73). A workload fails as poison when a node replays its
   inputs and gets an output other than the one the stream holds. The node now
   first appends a `divergence` record (output record kind 9: spec record,
