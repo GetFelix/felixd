@@ -186,6 +186,8 @@ async fn a_409_for_a_cache_that_exists_is_success() {
 
 const EXISTS: &str =
     r#"{"code":"conflict","message":"stream already exists with a different configuration"}"#;
+const CACHE_EXISTS: &str =
+    r#"{"code":"conflict","message":"cache already exists with a different configuration"}"#;
 
 #[tokio::test]
 async fn a_409_that_says_the_stream_exists_is_not_read_back() {
@@ -196,7 +198,7 @@ async fn a_409_that_says_the_stream_exists_is_not_read_back() {
 
 #[tokio::test]
 async fn a_409_that_says_the_cache_exists_is_not_read_back() {
-    let (url, served) = control_plane_replying(vec![(409, EXISTS)]);
+    let (url, served) = control_plane_replying(vec![(409, CACHE_EXISTS)]);
     ensure_cache(&settings_at(url), "c", kind()).await.unwrap();
     assert_eq!(served.join().unwrap(), [format!("POST {CACHES}")]);
 }
@@ -220,14 +222,16 @@ async fn a_deleted_name_is_read_back_whatever_else_the_409_says() {
 #[test]
 fn only_an_already_exists_message_is_trusted() {
     assert!(says_already_exists(EXISTS));
+    assert!(says_already_exists(CACHE_EXISTS));
     for body in ["", "{}", "not json", r#"{"message":"conflict"}"#, REUSED] {
         assert!(!says_already_exists(body), "{body}");
     }
 }
 
-/// Serves `requests` requests on the first connection that arrives, keeping
-/// it open, and counts how many connections were made.
-fn keep_alive_control_plane(requests: usize) -> (String, std::thread::JoinHandle<usize>) {
+/// Serves `requests` requests on the first connection that arrives and keeps
+/// it open. A client that opens a second connection leaves this one, and the
+/// server then panics on the closed socket.
+fn keep_alive_control_plane(requests: usize) -> (String, std::thread::JoinHandle<()>) {
     use std::io::Write;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -237,9 +241,6 @@ fn keep_alive_control_plane(requests: usize) -> (String, std::thread::JoinHandle
             read_request(&mut socket);
             write!(socket, "HTTP/1.1 201 X\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
         }
-        // A second connection would be waiting by now.
-        listener.set_nonblocking(true).unwrap();
-        1 + usize::from(listener.accept().is_ok())
     });
     (url, served)
 }
@@ -251,7 +252,7 @@ async fn calls_in_a_row_share_a_connection() {
     for stream in ["a", "b", "c"] {
         ensure_stream(&settings, stream, kind()).await.unwrap();
     }
-    assert_eq!(served.join().unwrap(), 1);
+    served.join().unwrap();
 }
 
 #[tokio::test]

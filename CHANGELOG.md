@@ -2,11 +2,11 @@
 
 ## Unreleased
 
-- Fewer control plane requests per `felixd run`. Reading a stream or cache back after a 409 (#149)
-  put about nine extra GETs on the control plane for every submit, each on a new connection, and at
-  1000 workloads brokers lost their leases (GetFelix/felix#1760). A 409 that says the resource
-  already exists is no longer read back, any other 409 still is, and the control plane calls share
-  one connection pool.
+- Fewer control plane requests per `felixd run` (GetFelix/felix#1760). Since the read back
+  after a 409 (#149), each submit sent about nine extra requests to the control plane, and with
+  1000 workloads starting at once brokers lost their leases and workloads kept being
+  re-claimed. A 409 that says the stream or cache already exists is no longer read back;
+  any other 409 still is. The control plane calls also share one connection.
 - `felixd agent` shuts down cleanly on SIGTERM as well as Ctrl-C (#203). It stops its workloads and deletes
   their leases, so `docker stop` and `systemctl stop` hand work to another node at once instead of after
   the lease TTL. As PID 1 in a container it no longer ignores SIGTERM.
@@ -47,7 +47,8 @@
   check it with `felixd replay --id admission --diff --all --module <hash>` and
   run `felixd init` with it.
 - Refused stream creates (#149). `felixd run`, `felixd init` and `felixd drain`
-  read a stream or cache back after Felix answers 409, and now exit with an
+  read a stream or cache back after Felix answers 409 (unless it says the
+  resource already exists), and now exit with an
   error carrying Felix's reason where they used to succeed and leave the next
   read waiting for a stream that was never created. Felix refuses a stream
   under the name of a deleted one until the cluster has finalized stream

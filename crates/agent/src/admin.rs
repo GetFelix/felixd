@@ -228,11 +228,12 @@ fn view_is_tenant_wide(token: &str, tenant: &str) -> bool {
 /// deleted name before the cluster has finalized incarnations, and only the
 /// first leaves something to use.
 ///
-/// A 409 that says the resource already exists is trusted, because every
-/// `felixd run` hits it for the shared system streams and caches, and a read
-/// back each time put thousands of requests on the control plane at scale.
-/// Any other 409 is read back, so an unfamiliar wording is never taken for
-/// success.
+/// A 409 that says the resource already exists is trusted: every `felixd run`
+/// gets one for the shared system streams and caches, and reading each back
+/// put thousands of requests on the control plane at scale. The one gap is a
+/// control plane that answers it for a resource it then cannot find, such as
+/// a delete racing the create. Any other 409 is read back, so an unfamiliar
+/// wording is never taken for success.
 async fn create(settings: &Settings, collection: &str, name: &str, body: Value) -> Result<()> {
     let (status, text) = call(settings, "POST", collection, Some(body)).await?;
     match status {

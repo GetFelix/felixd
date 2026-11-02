@@ -362,9 +362,9 @@ admission's credential ([Submitting work](#submitting-work)). Other agents never
 create streams.
 
 A create that Felix answers with 409 counts as done if its message says the stream or cache
-already exists, as when it exists with other settings; the shared system streams and caches
-answer that way on every `felixd run`, so reading each back would send the control plane a
-request for every one. Any other 409 counts only if the stream or cache can be read back. Felix
+already exists, even if it exists with other settings than felixd asked for. The shared system
+streams and caches answer that way on every `felixd run`, so reading each back would send the
+control plane a request for every one. Any other 409 counts only if the stream or cache can be read back. Felix
 also refuses a stream under the name of a deleted one until the cluster has finalized stream
 incarnations, and a control plane that no broker registers with, as in the single-broker test
 stack, never does. `felixd run` then fails with Felix's reason, rather than going on to wait for
