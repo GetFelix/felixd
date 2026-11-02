@@ -75,9 +75,9 @@ fn group(user: &str, role: Role) -> Grouping {
 
 #[test]
 fn an_audit_returns_only_the_missing_rules() {
-    assert_eq!(audit("t", "prod", &[], &[]).unwrap(), all());
-    assert!(audit("t", "prod", &all(), &[]).unwrap().is_empty());
-    let missing = audit("t", "prod", &held(Role::Node), &[]).unwrap();
+    assert_eq!(audit("t", "prod", &[], &[], false).unwrap(), all());
+    assert!(audit("t", "prod", &all(), &[], false).unwrap().is_empty());
+    let missing = audit("t", "prod", &held(Role::Node), &[], false).unwrap();
     assert_eq!(missing.len(), all().len() - held(Role::Node).len());
 }
 
@@ -89,7 +89,7 @@ fn a_wider_rule_under_a_felixd_role_is_refused() {
         object: "stream:t/prod.sys/*".to_owned(),
         action: "stream.publish".to_owned(),
     });
-    assert!(audit("t", "prod", &rules, &[]).is_err());
+    assert!(audit("t", "prod", &rules, &[], false).is_err());
     // Rules of other subjects and of another namespace's roles are not ours.
     let mut other = all();
     other.push(Policy {
@@ -102,30 +102,94 @@ fn a_wider_rule_under_a_felixd_role_is_refused() {
         object: "stream:t/prod.x/*".to_owned(),
         action: "stream.publish".to_owned(),
     });
-    assert!(audit("t", "prod", &other, &[]).unwrap().is_empty());
+    assert!(audit("t", "prod", &other, &[], false).unwrap().is_empty());
     let mut unknown = all();
     unknown.push(Policy {
         subject: "role:felixd.prod.extra".to_owned(),
         object: "stream:t/prod/*".to_owned(),
         action: "stream.manage".to_owned(),
     });
-    assert!(audit("t", "prod", &unknown, &[]).is_err());
+    assert!(audit("t", "prod", &unknown, &[], false).is_err());
 }
 
 #[test]
 fn a_principal_holding_two_roles_or_a_nested_role_is_refused() {
     let one = [group("alice", Role::Node), group("bob", Role::Admission)];
-    assert!(audit("t", "prod", &all(), &one).is_ok());
+    assert!(audit("t", "prod", &all(), &one, false).is_ok());
     let both = [group("alice", Role::Node), group("alice", Role::Admission)];
-    assert!(audit("t", "prod", &all(), &both).is_err());
+    assert!(audit("t", "prod", &all(), &both, false).is_err());
     let nested = [Grouping {
         user: Role::Node.subject("prod"),
         role: "role:admin".to_owned(),
     }];
-    assert!(audit("t", "prod", &all(), &nested).is_err());
+    assert!(audit("t", "prod", &all(), &nested, false).is_err());
     let unknown = [Grouping {
         user: "alice".to_owned(),
         role: "role:felixd.prod.extra".to_owned(),
     }];
-    assert!(audit("t", "prod", &all(), &unknown).is_err());
+    assert!(audit("t", "prod", &all(), &unknown, false).is_err());
+}
+
+/// Deleting history is off until the operator asks for it: no role holds
+/// `stream.trim` in what `init` always writes, and the one opt-in rule is the
+/// node's, over the workload namespace only. (Admission's `stream.manage`
+/// includes it at the broker.)
+#[test]
+fn no_role_is_granted_trim_unless_asked() {
+    for role in Role::ALL {
+        assert!(
+            role_policies(role, "t", "prod")
+                .iter()
+                .all(|p| p.action != "stream.trim"),
+            "{role:?}"
+        );
+    }
+    assert_eq!(
+        trim_policy("t", "prod"),
+        Policy {
+            subject: Role::Node.subject("prod"),
+            object: "stream:t/prod/*".to_owned(),
+            action: "stream.trim".to_owned(),
+        }
+    );
+}
+
+/// `felixd init` writes what `audit` returns as missing: the trim rule only
+/// with `--grant-trim`, and only once.
+#[test]
+fn init_writes_the_trim_grant_only_when_asked() {
+    assert_eq!(audit("t", "prod", &[], &[], false).unwrap(), all());
+    let mut with_trim = all();
+    with_trim.push(trim_policy("t", "prod"));
+    assert_eq!(audit("t", "prod", &[], &[], true).unwrap(), with_trim);
+    assert_eq!(
+        audit("t", "prod", &all(), &[], true).unwrap(),
+        [trim_policy("t", "prod")]
+    );
+    let mut held = all();
+    held.push(trim_policy("t", "prod"));
+    assert!(audit("t", "prod", &held, &[], true).unwrap().is_empty());
+}
+
+/// Running `init` without the flag after it was run with it neither fails nor
+/// takes the grant back.
+#[test]
+fn a_held_trim_grant_is_not_an_error_without_the_flag() {
+    let mut held = all();
+    held.push(trim_policy("t", "prod"));
+    assert!(audit("t", "prod", &held, &[], false).unwrap().is_empty());
+    // Only that rule: the same action on the system namespace is too wide.
+    let mut wider = all();
+    wider.push(Policy {
+        object: "stream:t/prod.sys/*".to_owned(),
+        ..trim_policy("t", "prod")
+    });
+    assert!(audit("t", "prod", &wider, &[], true).is_err());
+    // And another role does not get it.
+    let mut other = all();
+    other.push(Policy {
+        subject: Role::Submitter.subject("prod"),
+        ..trim_policy("t", "prod")
+    });
+    assert!(audit("t", "prod", &other, &[], true).is_err());
 }

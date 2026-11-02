@@ -278,9 +278,11 @@ can lose its disk and rejoin.
 ## The workload contract
 
 A workload is a Wasm component that implements the WIT world in
-`wit/workload.wit`, workload contract 0.2. [contract.md](contract.md) gives the
-interface and what each side guarantees. In short, `step` gets one input
-record with its stream, offset, append time and key, and returns outputs
+`wit/0.3/workload.wit`, workload contract 0.3, or the 0.2 world in
+`wit/0.2/workload.wit`, which the host still runs. [contract.md](contract.md)
+gives the interface and what each side guarantees. In short, `step` gets one
+input record with its stream, offset, append time, key and, from 0.3, the
+authenticated publisher, and returns outputs
 addressed by name and key, or rejects the input, or poisons the workload. The
 state is snapshotted and restored in chunks, and `inspect` returns it as JSON.
 A component of the 0.1 contract is refused.
@@ -590,8 +592,9 @@ not on the lease. A wrong clock costs duplicate work and refused writes.
 
 An agent never adopts a lease it finds under its own name. A restarted agent
 waits for its old leases to expire, so two processes configured with the same
-node id can't both believe they hold a workload. On a clean shutdown an agent
-deletes its leases with `cache_delete_if`, so another node can claim at once.
+node id can't both believe they hold a workload. On a clean shutdown (Ctrl-C
+or SIGTERM) an agent deletes its leases with `cache_delete_if`, so another
+node can claim at once.
 Only a holder fails a workload, and the failure is fenced by epoch like an
 output. The holder renews its lease the same way first, and gives up if that
 renewal is refused. Then it appends a failure record to the output stream
@@ -617,6 +620,56 @@ needs-operator record instead of a failure, and the spec is left `running`
 only before any later owner has begun, and a claimer that finds it last
 before its claim, or past the tail when its claim is refused, stops instead
 of claiming after it.
+
+A workload whose replay differs from its output stream fails as poison, and
+the holder writes a divergence record just before the failure record, the same
+way, so the failure says where and on which build it happened
+([System records and errors](#system-records-and-errors)). A build from before
+the record reads it as an unknown kind, which matters only for a workload that
+has failed already ([records.md](records.md)); there is no switch.
+
+A holder retries a run that fails on an error from Felix, such as a broker
+that is down or a stream it cannot read, because the next attempt resumes from
+what the streams hold. It does not retry for ever. A run is stuck when its
+attempts have failed for `--stuck-after-ms` (60 s by default, never below the
+lease TTL) with no progress in between. An attempt makes progress if it steps
+an input beyond the furthest any earlier attempt of this holder stepped, or
+appends a record to the output stream; progress starts the count again. An
+attempt that only reconnects, or replays inputs the stream already covers,
+makes none. The holder remembers the furthest input in memory, so a long
+replay that fails at its first new append counts as stuck one bound after
+that first failure. A quiet workload makes no progress either, so an attempt
+that ran for the whole bound before it failed also starts the count again:
+time spent running well is not time spent stuck, and a quiet stream whose
+connection drops now and then is left alone. `--stuck-after-ms 0` turns the
+bound off.
+
+When a run is stuck the holder:
+
+1. Appends a degraded record, the way it appends a needs-operator record: it
+   renews its lease, then writes with `publish_if` at the tail, behind
+   everything of earlier epochs. It tries up to three times.
+2. Deletes its lease with `cache_delete_if` at the version it holds, whether
+   or not the record landed, so another node can claim. If Felix will not take
+   the record, it is logged and the lease is released anyway.
+3. Leaves the workload alone for `--degraded-backoff-ms` (120 s by default),
+   which it keeps in memory, so another node gets a turn. A new spec record
+   starts it afresh.
+
+The spec stays `running` and no other node is held back. Another node claims
+it after its random claim delay. While a scheduler runs and the workload is
+assigned to the node that gave up, the others wait for that node, which still
+says in `nodes` that it takes work, for up to `--assignment-bound-ms` first
+([Placement](#placement)). The record is described under
+[System records and errors](#system-records-and-errors).
+
+A build from before the record cannot read it, and the holder cannot tell
+which nodes are old. An old node that claims a workload whose last record is a
+degraded one fails it as poison, because it reads the record as an unknown
+kind. One that meets it as the first record of the stream never claims: it
+logs that it could not read the output stream and tries again. A workload that
+reads the stream needs an operator. So during a rolling upgrade, run the new
+build with `--stuck-after-ms 0` until no old node is left.
 
 Agents watch `workloads` with retained values. When a watch ends they open
 a new one, which redelivers every current spec first and says how many. Once
@@ -698,10 +751,18 @@ machine with read grants sees the same thing and no node's own view goes into
 it. For each workload:
 
 - **State.** `stopped` and `failed`, with the class and reason, come from the
-  spec. `needs-operator`, with the reason and detail, when the last record on
-  the output stream is a needs-operator record naming the spec record the spec
-  comes from. Otherwise `running` when a lease with an epoch exists, `claiming`
-  when the lease has no epoch yet, and `waiting` when there is none.
+  spec. The next two come from the last record on the output stream, and only
+  when it names the spec record the spec comes from. `needs-operator`, with the
+  reason and detail, when it is a needs-operator record. `degraded`, with the
+  class, node and detail, when it is a degraded record: the holder gave up on
+  the workload and no holder has written its claim record since. Otherwise `running` when a lease
+  with an epoch exists, `claiming` when the lease has no epoch yet, and
+  `waiting` when there is none.
+- **Divergence.** A line below the table with the input and output that
+  differ, the node and epoch that found it, the digests of both sides and the
+  build, when the output stream ends on a divergence record for this spec
+  record, behind the failure record and any other note after it, within the
+  stream's last 8 records. A claim or an output after it means a holder has run since, and it is not shown.
 - **Holder and epoch.** The lease's owner and epoch, and whether that node is
   draining. With no holder, the epoch of the last record on the output stream.
 - **Outputs.** The output stream's tail.
@@ -726,8 +787,35 @@ it, its `--max-workloads`, its version and whether it is draining: `yes`, or
 cannot read shows as up with its version unknown. Drains are
 in [Leases and failure detection](#leases-and-failure-detection).
 
-Divergence records, which `felixd ps` would also show, are not built yet
-([#73](https://github.com/GetFelix/felixd/issues/73)).
+A `degraded` workload needs no action to carry on: its spec is still
+`running`, and any node may claim it. The state lasts until the next holder's
+claim record is written. If it keeps coming back:
+
+1. Read the line `ps` prints below the table. It has the class, the node that
+   gave up and the error.
+2. Search that node's log for `stuck, recording it and releasing the lease`.
+   The line has the workload, the epoch and the node, and the `retrying`
+   warnings before it show each error.
+3. A node that cannot reach Felix at all loses its leases first, at two thirds
+   of the TTL, so `degraded` usually points at the workload's own streams or
+   module. If it comes back on every node, look there. Draining the node only
+   moves the problem.
+
+`felixd_degraded_total` on a node's metrics counts how often it gave up
+([Metrics](metrics.md)). Cluster-wide counting, and keeping every node from
+claiming a workload that fails everywhere, is
+[#99](https://github.com/GetFelix/felixd/issues/99).
+
+A `failed` workload whose failure is `replayed output differs` or
+`records ... that differ from this workload's output` has a divergence line
+under its failure line. The digests are of the output the stream holds and
+of the one this node's replay produced, so a different build, or a module that
+is not deterministic, shows as two different digests for one input. They
+cover the whole output as compared, not only its payload, so they differ from
+the payload digests `replay --diff` prints. To dig
+further, `felixd replay --id <id> --diff` replays the inputs on your own
+machine, names the divergence record when it finds the same output differing,
+and `--module` tries another module against the recorded outputs.
 
 ## Exactly-once output
 
@@ -897,7 +985,9 @@ on three brokers.
 
 `felixd check` runs each workload's module over its whole input stream, from
 its initial state, and lines the outputs it produces up with the records on
-the output stream by their headers. Each record should match the next
+the output stream by their headers. Once Felix has deleted the head of the
+output stream, it starts from the oldest snapshot the workload keeps instead
+([Retention](#checking-from-a-snapshot)). Each record should match the next
 replayed output. It reports:
 
 - a gap: a replayed output missing from the stream while a later one is there;
@@ -1044,16 +1134,38 @@ reaches none of them.
 |---|---|
 | Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
 | Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
-| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Until admission knows the requester, any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it |
-| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. The one direct write left. Not written by `init` |
+| Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Admission records the requester but the shipped policy has no ownership rule, so any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it; a policy that lists requesters limits who may ask at all |
+| Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. With `--grant-trim`, also the node's `stream.trim` (below). The one direct write left. Not written by `init` |
 | Operator (`felixd run` without admission, a system workload) | Read and write `workloads`, `sys.specs` and `modules`, and create streams and caches. Not written by `init` |
 | Viewer (`replay`, `check`, `ps`) | Read everything, including `sys.specs`, write nothing. Not written by `init`: `check` and `replay` still probe a stream's tail with a conditional publish |
 | Operator (`felixd drain`, `felixd undrain`) | Write `drains`; create it through the control plane. Not written by `init` |
 
+The node role's `stream.trim` is not in the table because `felixd init`
+leaves it out unless asked. (Admission's `stream.manage` includes trim, see
+below.) `felixd init --grant-trim` adds one rule: the node role may trim every
+stream of the namespace. Without it, history deletion stays off: a workload
+with `--keep-snapshots` still records its floors, and its nodes delete nothing
+(see [What a node needs](#what-a-node-needs)). Running `init` again without
+the flag does not take the rule back; remove it with the control plane's RBAC
+API. The nodes need new tokens to carry it, and Felix puts it in a token only
+after the fleet has finalized `head_trim`.
+
+Residual of `--grant-trim`: Felix grants a stream by its exact name or a whole
+namespace's streams, so a node's credential can then trim any stream in the
+namespace, not only the `.snap` and merge log it deletes from: inputs, other
+workloads' outputs and `wl.admission.out` included. The node's publish grant
+has the same reach, but publishing only appends, and a trim erases history for
+every reader and cannot be undone. That is why it is opt-in. A grant per
+workload would need admission to write RBAC policies when it accepts a
+workload, and putting `.snap` and the merge log in a namespace of their own
+would rename every existing stream, so neither is done. Per-lease tokens
+(#74) are what would narrow it.
+
 Residuals of `stream.manage`: Felix has no create-only stream action, and
 `stream.manage` over `<namespace>/*` also covers deleting or patching a
 stream and operating its consumer groups (`group.manage`). Admission's
-credential can delete or patch any workload stream. Nothing in
+credential can delete, patch or trim any workload stream, with or without
+`--grant-trim`. Nothing in
 `<namespace>.sys` is in its reach.
 
 `felixd init` audits before it writes. It lists every rule and role
@@ -1090,7 +1202,11 @@ but a compromised node could write garbage. Per-lease tokens close that
 ## Retention
 
 `keep_snapshots` (`felixd run --keep-snapshots K`) keeps a workload's last K
-snapshots. After each snapshot the holder writes, it appends a trim record to
+snapshots and deletes the history of `.snap` and the merge log that its resume
+no longer reads. Without it nothing is deleted and a workload's streams grow
+for as long as it runs.
+
+After each snapshot the holder writes, it appends a trim record to
 `wl.<id>.out` ([records.md](records.md#output-stream-records)) naming the
 floors below which this workload's resume reads nothing:
 
@@ -1100,6 +1216,49 @@ floors below which this workload's resume reads nothing:
   `next` and its append time;
 - each input below the record that step read, with one input, or below the
   entry's `next`, with several, the entry's own record kept.
+
+The holder then deletes `.snap` and the merge log up to those floors, with
+Felix's conditional head trim (`trim_before`; see "Conditional head trim" in
+Felix's `docs/durable-storage.md`). Both streams are the workload's own, so
+only its holder deletes from them. Inputs and `.out` are never deleted by
+this: see below.
+
+```mermaid
+sequenceDiagram
+    participant H as Holder
+    participant O as wl.id.out
+    participant S as wl.id.snap and merge log
+    H->>S: write a snapshot
+    H->>O: trim record with the floors (publish_if at the tail)
+    O-->>H: landed
+    H->>S: trim_before the floors, at each stream's tail
+    S-->>H: reads below the floors are refused
+```
+
+The order is the point. The record lands on `.out` first, and only then does
+the holder delete, so a crash at any moment leaves less deleted than the last
+record says, never more. A holder that crashed between the two leaves a record
+with floors not yet deleted. The next holder reads the last trim record when
+it resumes and deletes up to its floors before it steps anything, so the
+repair needs no new input. Deleting again below a floor already deleted to
+writes nothing. The deletion is not fenced like the record is: a holder
+superseded just after its record landed may still delete, which is safe
+because its floors are below the snapshot the next holder resumes from, and
+floors never go back.
+
+A trim is itself a record on the stream it trims, at the stream's tail, and
+Felix applies it only if the holder names that tail exactly. The holder
+therefore asks at the tail it expects. Felix may answer that the tail is
+different: another writer appended, or the holder's tail is stale, as a read
+can be after a leader change. The holder does not retry at the tail Felix
+names. Retrying would be safe, because a trim only hides offsets below a floor
+the record on `.out` already names, so giving up is a cheap, conservative
+choice. It costs at most one snapshot interval of extra history: the next
+snapshot write refreshes the `.snap` tail, and a resume probes the true tail.
+The snapshot writer and the merge log append, which also write at the tail,
+carry on from the tail Felix reports. Felix leaves trim records out of what it
+returns to readers (felixd skips claims itself, not trim records on `.snap` or
+the merge log), so a stream with a gap in its offsets is read as before.
 
 A resume reads back the last stepped record for its append time
 (`snapshot_every_ms`), so that record stays above the floor. Every read that
@@ -1112,7 +1271,8 @@ uninterrupted run's. Outputs are unaffected.
 
 A new owner reads the last trim record on `.out` when it resumes and never
 writes floors below it. After `keep_snapshots` is raised the last trim stands
-until the kept snapshots pass it.
+until the kept snapshots pass it. Snapshots already deleted do not come back,
+so a raised value takes effect as new snapshots are written.
 
 The oldest kept snapshot is the one with the lowest step among the last K on
 the stream, not the first of them: a stale holder's snapshot can land after a
@@ -1126,38 +1286,137 @@ back, and `trim::plan` refuses one that would.
 The record goes on `.out` with `publish_if` at the tail like an output, so a
 stale holder's is refused by the next claim. A crash before it lands changes
 nothing, and one after leaves a record the next holder passes over, like a
-claim. Resume, reconcile, `felixd check` and downstream readers pass over it.
+claim, and finishes the deletion for. Resume, reconcile, `felixd check` and
+downstream readers pass over it. The TLA models include the deletion and check
+these floors against it ([formal.md](formal.md#trimming)).
 
-Nothing is deleted yet. The TLA models include the deletion that will follow and check these
-floors against it ([formal.md](formal.md#trimming)). Felix trims only by age or size, which knows nothing
-of what a resume needs, and has no call to trim a stream before an offset
-([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). When it does,
-the floors decide different things per stream:
+### What a node needs
 
-- `.snap` and the merge log are the workload's own. A holder may delete them
-  up to its last trim record's floors, after the record has landed, so a crash
-  at any point leaves less deleted than recorded.
+Deleting needs two things from Felix, and a node without them still runs the
+workload:
+
+- **The fleet has finalized `head_trim`.** Until then a cluster refuses every
+  trim, and a single broker allows them from the start. Finalizing it is a
+  one-way step: a trim record is storage format v7, which an older broker
+  cannot open, so take a backup first (see `head_trim` in Felix's upgrade
+  guide). `deploy/compose.yaml` and the test stacks finalize it
+  after the brokers are up.
+- **The node's token carries `stream.trim`.** Run `felixd init --grant-trim`
+  to give it to the node role over the namespace's streams, and read the
+  residual under [Grants](#grants) first: it lets any node erase any stream in
+  the namespace. Then mint the nodes new tokens, and if the mint names the
+  actions to request, add `stream.trim`. `stream.manage` includes `stream.trim`, and
+  Felix's control plane mints it into broker tokens only after `head_trim` is
+  finalized. A node whose token lacks it, for either reason, gets a refusal
+  that looks the same, so the warning names both steps.
+
+Without either, the holder logs one warning, and the workload
+carries on with `.snap` and the merge log growing as before. After ten
+seconds, the first snapshot or resume tries again, so the deletion starts soon
+after the fleet finalizes the feature or the grant arrives, with no restart. A trim whose answer times
+out is not a failure either: the next snapshot asks again, and a trim that
+had landed is then a no-op. The trim record is already on
+`.out` in all these cases, so the next successful deletion catches up in one
+call.
+
+### What is not deleted
+
 - An input may be another workload's `.out` or a stream other workloads and
   programs read. One workload's floor says only what that workload's resume
   needs. An input is deleted only below the lowest floor of all its readers
   ([#150](https://github.com/GetFelix/felixd/issues/150)), never on one
-  workload's floor.
-- `.out` is not trimmed. It is every downstream's input, it holds the first
-  claim that spec lineage reads, and `felixd check` lines records up with
-  claims from the start of the stream (#150).
+  workload's floor. Until then the input floors in the record are advice
+  nothing acts on.
+- `.out` is not trimmed. It is every downstream's input, so it can be cut only
+  below every downstream's floor (#150). It also holds the first claim that
+  spec lineage reads.
 
-`felixd check` and `felixd replay` read from the start of each stream while
-the records are there, trim records or not. Once something they need is
-deleted they stop and report the stream and the oldest offset Felix holds;
-checking from the oldest kept snapshot instead comes with #150.
+### Spec lineage
+
+An owner refuses a spec whose module or input differs from the one the
+stream's first claim names, so everything on `.out` was written under that
+module and input. `felixd run`, the agent's spec checks and `felixd check`
+read that claim to learn it. A cut head would take it away, so a trim record
+carries the first claim's spec record forward unchanged from the trim before
+it, and the first trim takes it from the claim itself. When Felix has deleted
+the head of `.out`, a reader asks the oldest record it keeps. If that is a
+claim or a trim, it names the spec. If it is an output, the reader goes on to
+the first claim or trim after it: any claim's spec has the first claim's
+module and input.
+
+A trim record also carries the highest spec record claimed so far. The check
+that refuses a stale node walks back from the tail to the last claim for its
+floor, and stops at a trim record instead when that is nearer, so it never
+needs a claim that has been deleted. Trim records written before these fields
+existed carry neither, and read as if they named no spec.
+
+### Checking from a snapshot
+
+`felixd check` replays from the first input. That is the whole check, and it
+stays the default while Felix holds the head of `.out`.
+
+When the last trim record on `.out` names an oldest kept snapshot, the check
+can start there instead: it restores the snapshot, steps the inputs after it,
+and lines them up with the records on `.out` from the snapshot's output tail
+on. With several inputs it starts the merge log check at the entry for the
+snapshot's step, with each input's next offset from there. It does so by
+default only when Felix has deleted the head of `.out`, since the first input
+can no longer be replayed. `--from-snapshot` asks for it while the head is
+still there, and `--from-start` refuses it.
+
+A check from a snapshot verifies less. The snapshot's state is taken as given,
+so a snapshot that does not hold what replaying the inputs before it would
+give is not noticed. Records below its output tail are not compared, so a gap,
+a duplicate or a misplaced record down there is not reported; an epoch below
+the highest one below the tail is, at the first record compared. What follows
+the snapshot gets the same verdict as a check from the start, and a record for
+an input the snapshot covers that was written after it is found, as an output
+the replay did not produce. If Felix keeps nothing of `.out` below an offset
+above the snapshot's output tail, the check fails saying so, rather than
+reporting the missing outputs as findings. `--from-start` fails the same way
+once Felix has deleted history that replay needs, and says which stream and
+which offset it still holds.
+
+### `check` and `replay` after a deletion
+
+`felixd check` and `felixd replay` read `.snap` from the oldest offset Felix
+holds, so they work on a workload that has deleted its old snapshots, and
+`felixd replay` otherwise reads each stream from the start while the records
+are there. A replay to an offset restores the nearest snapshot that is still there and whole.
+A snapshot that survives but shares a chunk with an older one that was deleted
+is passed over. A merged workload's surviving snapshot whose step is below the
+merge log's floor is not: replay picks it and then fails reading the merge log,
+with the message below. A replay to an offset older than every snapshot left
+starts from the initial state and replays the input, which works while the
+input is still whole.
+
+A merge log that has been trimmed is a different matter: `check` from the
+start needs every entry, and a replay before the oldest kept snapshot needs
+the entries it deleted. They stop and say which stream they needed, the offset
+they asked for and the oldest offset Felix holds. `check` adds the way out,
+`--from-snapshot`, for example:
+
+```
+felixd check needs wl.orders.merge from offset 0, but Felix holds it only from
+offset 412: the history before was trimmed; `felixd check --from-snapshot`
+starts after a snapshot instead
+```
+
+A check that starts from the oldest kept snapshot, as it does by default once
+Felix has deleted the head of `.out`, needs only the merge log entries from that
+snapshot's step on, which the trim keeps.
 
 A workload whose input Felix has trimmed past what it still needs, through
 retention or a later trim, is recorded as needing an operator (reason 9)
 rather than skipping records, as `subscribe_from` refuses with `CursorTooOld`.
 
-`tests/trim.rs` and `tests/merge.rs` resume with every read below the floors
-refused (the `enforce-trim-floors` fault), as if they were deleted, and the
-workload carries on.
+`tests/retention.rs` and `tests/merge.rs` run a failover after the deletion,
+and a crash between the record and the deletion. `tests/trim.rs` and
+`tests/merge.rs` also resume with every read below the floors refused (the
+`enforce-trim-floors` fault), and the `skip-deletion` fault writes the records
+and deletes nothing, for tests that read a whole stream. The
+`enforce-trim-floors` fault also refuses reads of `.out` below the oldest kept
+snapshot's output tail, where a cut of the head would leave it.
 
 ## Build order
 
@@ -1167,15 +1426,16 @@ workload carries on.
 | 1 | Leases and failover | On 3 nodes, killing one moves its workloads within one TTL, verified by a checker that reads every `.out` |
 | 2 | Exactly-once output | A node frozen past its lease and resumed writes nothing once the new owner has claimed, even with no new input; a fault-injection test runs this in CI |
 | 3 | Replay | `felixd replay --to` an offset or a time prints the state the live workload had there; `--diff` finds no differences |
-| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); snapshot trimming is recorded but deletes nothing until Felix can trim at an offset, [Retention](#retention)) |
+| 4 | Pipelines and operations | A three-stage pipeline survives failover at each stage; `ps`, `drain`, metrics and snapshot trimming work (pipelines, workloads with several inputs, `ps` and `drain` are built, [Pipelines](#pipelines), [Several inputs](#several-inputs) and [Operating a cluster](#operating-a-cluster); metrics are built, [Metrics](metrics.md); `felixd replay --diff --module` checks an upgrade from a snapshot, [Replay](#replay); `--keep-snapshots` deletes `.snap` and the merge log below the floors it records, [Retention](#retention); deleting inputs waits for #150) |
 | 5 | Self-hosting | A compose file and docs bring up Felix and three felixd nodes; release binaries are published |
 
 ## Risks, and what this surfaces in Felix
 
 - **A stream per workload.** Conditional publish is per shard, so every
   workload needs its own single-shard output and snapshot streams, created
-  through the control plane. That's fine for hundreds of workloads. At tens
-  of thousands it depends on how Felix handles many small streams.
+  through the control plane. That's fine for hundreds of workloads. 1000
+  settled on Felix 0.6.2 but not on 0.7.0-preview.2, and 10000 was not
+  reached in 20 minutes on either: see [Scale](#scale).
 - **Module size.** Wasm modules can be tens of megabytes, more than one frame
   to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
@@ -1188,6 +1448,100 @@ workload carries on.
 
 Anything Felix doesn't do yet that felixd needs gets an issue labelled
 `felix-gap`, with the Felix code it refers to.
+
+## Scale
+
+Every workload is two single-shard streams, so N workloads are 2N streams with
+three replicas each, plus one lease renewal per workload every TTL/3. The
+`Scale` workflow measures what that costs: it starts three Felix brokers, a
+control plane and three agents on a 4 vCPU, 16 GB GitHub runner, creates N
+counter workloads, and then kills an agent and a broker in turn
+([how to run it](../CONTRIBUTING.md#running-the-scale-test)). Each count runs
+on a fresh cluster with a 10 s lease TTL. Times are from the first
+`felixd run`. The brokers, control plane, agents and the test all share those
+4 vCPUs, and the load average was 16 to 29 at 1000 workloads, so the runner
+was saturated. Runner speed also varies, so read these as orders of magnitude.
+
+On Felix 0.6.2:
+
+| Workloads | Streams | Create | All running | First output | Peak broker memory | Peak agent memory | Agent failover |
+|---|---|---|---|---|---|---|---|
+| 100 | 210 | 29 to 33 s | 33 to 37 s | 2.3 s | 111 to 155 MiB | 73 to 96 MiB | 10 to 13 s |
+| 250 | 510 | 73 s | 73 s | 3.1 s | 235 MiB | 148 MiB | 12 s |
+| 500 | 1010 | 161 s | 237 s | 6.9 s | 290 MiB | 98 MiB | 17 s |
+| 1000 | 2010 | 373 to 424 s | 435 to 489 s | 6.8 to 19.6 s | 428 to 533 MiB | 123 to 200 MiB | 85 to 143 s |
+| 10000 | 2462 reached | 1211 submitted in 1200 s | 167 running | not measured | 447 MiB | 120 MiB | not measured |
+
+On Felix 0.7.0-preview.2:
+
+| Workloads | Streams | Create | All running | First output | Peak broker memory | Peak agent memory | Agent failover |
+|---|---|---|---|---|---|---|---|
+| 100 | 210 | 44 to 58 s | 44 to 60 s | 2.4 to 2.6 s | 87 to 88 MiB | 70 to 74 MiB | 12.5 to 12.7 s |
+| 500 | 1010 | 350 s | 361 s | 282 s | 233 MiB | 98 MiB | 28 s |
+| 1000 | 2010 | 578 to 1046 s | never; 1 to 15 running at 1200 s | not measured | 370 to 377 MiB | 104 to 107 MiB | not measured |
+| 10000 | 1840 reached | 901 submitted in 1200 s | 890 running | not measured | 358 MiB | 107 MiB | not measured |
+
+A range is the lowest and highest of the runs for that count. One of the two
+1000-workload runs on 0.7.0-preview.2 had a submit fail with a lost
+connection (w895), which is part of its 1046 s.
+
+"First output" is the time for every workload to answer one input, once all
+are running. "Agent failover" is the time from killing the agent holding the
+most workloads until every workload has answered an input published right
+after.
+
+"Peak" is the largest reading in any phase, for the largest of the three
+brokers (an idle broker uses about 8 MiB) and of the three agents. On 0.6.2
+the broker peak came during the broker failover, when the surviving brokers
+take over the dead one's shards; at 10000 it came while the workloads
+started. The 0.7.0-preview.2 runs at 1000 and 10000 never got past starting,
+so their peaks are from that phase.
+
+What the numbers say:
+
+- **Memory did not limit these runs.** With all workloads running, a broker
+  holds about 0.3 to 0.4 MiB per workload at 500 to 1000 workloads (0.39 at
+  500, 0.29 to 0.37 at 1000; the broker's reading minus its idle baseline,
+  divided by the count), and about 0.7 at 100 where the fixed cost weighs
+  more. Peaks are higher, as the table shows. An agent used 67 to 107 MiB
+  while running and up to 200 MiB in a failover. This was only measured up to
+  1000 workloads.
+- **Creating streams is slow.** The control plane placed 6.4 to 7.2 streams a
+  second at 100 workloads on 0.6.2, 4.7 to 5.4 at 1000 and 2.0 at 10000. On
+  0.7.0-preview.2 it was 2.9 at 500, 1.9 to 3.5 at 1000 and 1.5 at 10000. So
+  about 1.5 to 7 streams a second, falling as the cluster fills (the saturated
+  runner may play a part). At that rate the 20,000 streams of 10,000
+  workloads take several hours. See
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761).
+- **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
+  first output, against 6.9 s on 0.6.2.
+- **At 1000 workloads, 0.7.0-preview.2 never settles.** There were about
+  17,000 claims in the 20 minute window, against about 1,100 over the 7 to 8
+  minutes 0.6.2 needed to get all running, and almost nothing was running
+  when the window ended. 500 workloads settled on both. See
+  [felix#1760](https://github.com/GetFelix/felix/issues/1760); felixd
+  [#207](https://github.com/GetFelix/felixd/pull/207) changes what the agent
+  reads back there, so these numbers are for the build measured, not a limit.
+- **A node failure takes longer with more workloads.** An agent's workloads
+  moved within 30 s up to 500 workloads and took 85 to 143 s at 1000,
+  probably because the survivors claim and restore hundreds at once. A 30 s
+  TTL at 1000 workloads left 119 without output after the first input.
+- **A broker failure is slow.** The harness kills a broker (they lead equal
+  numbers of shards, 70 at 100 workloads and 670 at 1000; ties go to the
+  highest name). Its leaders moved in 99 to 207 s at 100 workloads. From 250
+  workloads up they had not moved when the 300 s limit ended the wait, so the
+  longer waits are unknown. Outputs resumed within 300 s in only one of four
+  100-workload runs. The wait was longer with more shards, but the runner was
+  saturated and there are few data points, so the cause is not isolated. The
+  control plane's lease path described in
+  [felix#1009](https://github.com/GetFelix/felix/issues/1009) is the likely
+  place to look. With the broker started again, outputs resumed within 40 s
+  at 500 workloads or fewer; at 1000 on 0.6.2, hundreds of workloads still
+  had none after 300 s.
+
+So plan for hundreds of workloads per cluster on these releases, not
+thousands, and keep long-lived workloads fewer and bigger where you can. The
+measurements are the evidence behind the "A stream per workload" risk above.
 
 ## Determinism
 
@@ -1223,8 +1577,9 @@ failovers. Three rules hold that:
 State is not capped by the size of one record. Snapshots are written in chunks,
 and a snapshot writes only the chunks that changed since the last one, with
 separate fuel from `step`. A module is stored the same way, in chunks
-([Modules](#modules)). Snapshots are taken by input count and by time, old
-snapshots and inputs are trimmed by a stated retention, and each workload has a
+([Modules](#modules)). Snapshots are taken by input count and by time,
+`keep_snapshots` deletes old snapshots and the merge log
+([Retention](#retention); inputs wait for #150), and each workload has a
 recovery time budget that bounds how far a resume may replay.
 
 ## The workload contract, version 0.2
@@ -1239,6 +1594,22 @@ new module agrees on the inputs it has already seen.
 
 The interface, the guarantees and the record formats are in
 [contract.md](contract.md).
+
+## The workload contract, version 0.3
+
+Policy has to depend on who asked, and a step could not see that: the
+requester of a request cannot come from the payload, which any publisher can
+fill with anything. Version 0.3 adds one field, `publisher`, to the record a
+step reads: the principal the broker authenticated the write from, as the
+broker stored it. Because the host reads it from the stored record, a live
+step, a takeover, a snapshot resume, `felixd check` and `felixd replay` all
+pass the same value, so a workload that decides on it stays deterministic.
+
+The publisher is `none` when the broker recorded none, and for the output of
+another workload, which a node wrote and which names no one useful to the next
+stage. A workload that needs an identity treats `none` as unknown. The host
+runs 0.2 and 0.3 workloads side by side, so only a workload that wants the
+publisher is rebuilt. [contract.md](contract.md#the-publisher) has the rules.
 
 ## Upgrading felixd and scale
 
@@ -1562,7 +1933,8 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   failure carries its class ([records.md](records.md)). Defining them in WIT
   with the workload contract waits for the effect records, which are not
   built.
-- Every error has a class: **transient** (retried while the lease is held),
+- Every error has a class: **transient** (retried while the lease is held, up
+  to the stuck bound below),
   **needs operator** (a missing module, an input past retention, a changed
   incarnation) or **poison** (an input the workload deterministically fails on).
   The [trap classes](#determinism) map onto these. The text is detail, never
@@ -1585,16 +1957,32 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   `sys.specs` after 30 s is recorded, so a lagging spec-history read stops the
   workload cluster-wide until the spec is submitted again. `felixd ps` shows it
   as `needs-operator` with the reason and detail.
-- A workload stuck on a transient error past a bound releases its lease and is
-  recorded `degraded` with its class and reason, so it is visible instead of
-  retrying silently on one node. `degraded` is not built yet
-  ([#99](https://github.com/GetFelix/felixd/issues/99)).
+- **A workload stuck on a transient error releases its lease and is recorded
+  `degraded`**, so it is visible instead of retrying silently on one node.
+  `degraded` says that a holder gave up and another node may try. It is an
+  observation, not a stop: the spec stays `running`. This is built per holder.
+  Once a run's attempts have failed for `--stuck-after-ms` with no progress
+  between them, the holder appends a record on `wl.<id>.out` with the spec
+  record, the class, its node id and the detail, fenced by epoch like the
+  needs-operator record, and deletes its lease
+  ([Leases and failure detection](#leases-and-failure-detection) has the
+  steps). The record lands before any later owner's claim or not at all. It is
+  never written behind a failure or needs-operator record, which it would hide
+  from the nodes that read the last record. The state `felixd ps` shows lasts
+  until the next holder's claim record is written, and `felixd_degraded_total{class}` counts releases. Only
+  the transient class is written today; a failure, poison or needs-operator
+  error never produces one. Counting degraded records across holders, and
+  keeping every node from claiming past a limit, is
+  [#99](https://github.com/GetFelix/felixd/issues/99).
 - **Restart intensity is counted cluster-wide.** The release above is per
   holder, so a workload that fails everywhere would bounce between nodes, each
   spending its own budget. The spec sets MaxR takeovers per window. Any
   claimer counts them from the claim records on `wl.<id>.out`; past the limit
   it records `degraded` with class needs operator, fenced by epoch like the
   `failed` write (#70), and nothing claims the workload until an operator acts.
+  That blocking record will get a new kind. Kind 8 never blocks, and builds
+  that predate the blocking kind treat kind 8 as non-blocking whatever its
+  class, so reusing it would let those nodes claim anyway.
   There is no escalation tree. The TLA model gets the counter under
   `NoStaleFailure` (#104). Implementation is #99.
 - **Poison has a recorded way out.** The failing input is in the log, so every
@@ -1609,9 +1997,36 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   format. Adding an outcome is a new version. Contract 0.2 already treats
   running out of snapshot fuel as an abandoned snapshot and out of restore fuel
   as needs operator (`docs/contract.md`); this section does not change that.
-- A divergence record carries the node, its determinism ABI, the input offset,
-  the snapshot it started from, and the digests of both the expected and the
-  actual output, so `felixd replay` can reproduce it. Not built yet.
+- **A divergence is recorded** (#73). When a holder's replay produces an
+  output that differs from what the stream holds, or finds records at its
+  tail that are not its output, the workload fails as poison. Before the
+  failure record the holder appends a divergence record on `wl.<id>.out`,
+  fenced by epoch like the needs-operator and degraded records, with the spec
+  record, the input offset and index of the output, the input offset of the
+  snapshot the replay restored (or none), its node id, the determinism ABI of
+  its build, the sha256 of the output the stream holds and of the one the
+  replay produced, and the detail ([records.md](records.md) has the layout).
+  The ABI is three strings for now: the workload contract version, the
+  wasmtime version and the felixd version; one identifier for all of it waits
+  for the determinism ABI ([#62](https://github.com/GetFelix/felixd/issues/62)).
+  The failure record that follows keeps its class, poison. The divergence
+  record is an observation: it is passed over by every reader, raises no
+  floor, and a node that cannot read it does not take the workload. It is
+  best effort, so the workload fails with or without it, and a deposed node
+  writes neither. `felixd ps` shows it under the failure, `felixd replay
+  --diff` names it, and `felixd_divergences_total` counts them. It exists so
+  the question after a poison failure from replay, whether the module, the
+  inputs or the build changed, can be answered from the log: the record has
+  the digests of both sides and the build that found it, and `felixd replay`
+  can reproduce the rest. A merge log that holds records its holder did not
+  write is a different fault, retried as transient and recorded as degraded
+  when stuck, not as a divergence.
+- **What #73 leaves out on purpose.** Two things. The system records are
+  defined once in `core`, not in WIT, because WIT definitions go with the
+  effect records, and effects are not built. Metrics are scraped from each
+  node as Prometheus text, which an OpenTelemetry Collector reads; felixd does
+  not push OTLP. The rest is built: typed spec and failure records, error
+  classes, and the needs-operator, degraded and divergence records.
 - Metrics are Prometheus text per node, which an OpenTelemetry Collector
   scrapes with its Prometheus receiver; [Metrics](metrics.md) lists them.
   Input lag, claims, handoffs, steps, step latency, outputs, refusals and
@@ -1691,8 +2106,8 @@ now:
    agents run only what a record says; `workloads` is still how they learn of
    a change.
 2. **Requests go to an intake stream, `sys.intake`.** A request carries the
-   module hash, the spec and the requester, taken from the authenticated
-   publisher and never from the payload. Changes, stops and removals of
+   module hash and the spec. The requester is the record's authenticated
+   publisher and never in the payload. Changes, stops and removals of
    workloads are requests on the same stream.
 3. **Admission is an ordinary deterministic felixd workload**, like the
    scheduler (#60). It reads `sys.intake`, checks the module is present and
@@ -1779,15 +2194,33 @@ Nodes can still point `workloads` at an old record, which the gate refuses as
 before, and it still checks every record, so a deployment that grants more
 than this table is no less safe than before.
 
-Not built: the requester. Felix records a record's publisher only when the
-broker is configured to and a reader asks, and the workload contract has no
-field for it, so admission decides from the payload alone and policy cannot
-depend on who asked. Any node can write `wl.admission.out`, as it can any
-output, until per-lease tokens (#74, GetFelix/felix#1625), and admission's
-projector records what it finds there. Admission's credential is node
-configuration (`--admission-token-file` and the control plane token) rather
-than a name bound in admission's spec (#97), so a node given it holds it
-whether or not it holds admission's lease.
+Built (#182): the requester. A broker stores a record's publisher when it is
+set up to (`FELIX_RECORD_PUBLISHERS=true` on a lone broker, the
+`publisher_principal` fleet feature in a cluster), and the workload contract
+0.3 hands it to a step ([contract.md](contract.md#the-publisher)). Admission
+runs on 0.3. Its decision records the requester, the principal that published
+the request, whether it accepts or rejects. Policy can depend on it in two
+ways:
+
+- A request whose publisher the broker did not record is rejected as
+  `no_requester`. Admission fails closed because without a requester there is
+  nobody to hold to a rule, and a broker not yet set to record publishers
+  would otherwise let anyone with publish rights through unseen. A deployment
+  that enables admission must enable recording first.
+- `Policy::requesters` lists the principals allowed to ask. Empty, the default,
+  allows any recorded requester, as before: the grants on `sys.intake` already
+  decide who can publish at all. With a list, any other requester is rejected
+  as `not_permitted`. The list is compiled into the admission module like every
+  other limit, so changing it is a module change that `felixd replay --diff
+  --module` checks against past requests.
+
+The requester in the payload is not read, and a payload that claims one is
+ignored. Any node can still write `wl.admission.out`, as it can any output,
+until per-lease tokens (#74, GetFelix/felix#1625), and admission's projector
+records what it finds there. Admission's credential is node configuration
+(`--admission-token-file` and the control plane token) rather than a name bound
+in admission's spec (#97), so a node given it holds it whether or not it holds
+admission's lease.
 
 Open: the quota model (per tenant, per submitter, or per namespace, and what
 it counts: workloads, module bytes, fuel and memory limits).
@@ -1813,7 +2246,8 @@ release binaries are built reproducibly and signed (#23).
 
 When a node can't reach Felix, it stops stepping every workload, native ones
 included, once two thirds of the lease TTL have passed (as in
-[Leases](#leases-and-failure-detection)). It will report itself `degraded` locally
+[Leases](#leases-and-failure-detection)). It will report the node itself as `degraded`
+locally, a node state apart from the workload state `felixd ps` shows
 (not built yet, [#99](https://github.com/GetFelix/felixd/issues/99)),
 marks nothing failed, and claims again when Felix is back. Recovery is resume
 from an offset, which is the normal path. If the whole Felix quorum is gone,

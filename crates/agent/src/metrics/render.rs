@@ -3,7 +3,7 @@
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 
-use super::{Histogram, Metrics, REASONS, reason_label};
+use super::{CLASSES, Histogram, Metrics, REASONS, class_label, reason_label};
 
 impl Metrics {
     /// Every series, as a scrape returns them.
@@ -60,9 +60,9 @@ impl Metrics {
             &mut out,
             "felixd_lease_handoffs_total",
             "counter",
-            "Leases this node let go of for another node to take, by reason: drained or lost.",
+            "Leases this node let go of for another node to take, by reason: drained, lost or degraded.",
         );
-        for (reason, count) in ["drained", "lost"].iter().zip(&self.handoffs) {
+        for (reason, count) in ["drained", "lost", "degraded"].iter().zip(&self.handoffs) {
             let _ = writeln!(
                 out,
                 "felixd_lease_handoffs_total{{reason=\"{reason}\"}} {}",
@@ -83,6 +83,31 @@ impl Metrics {
                 count.load(Ordering::Relaxed)
             );
         }
+        family(
+            &mut out,
+            "felixd_degraded_total",
+            "counter",
+            "Workloads this node released after they stayed stuck on an error, by its class.",
+        );
+        for (class, count) in CLASSES.iter().zip(&self.degraded) {
+            let _ = writeln!(
+                out,
+                "felixd_degraded_total{{class=\"{}\"}} {}",
+                class_label(*class),
+                count.load(Ordering::Relaxed)
+            );
+        }
+        family(
+            &mut out,
+            "felixd_divergences_total",
+            "counter",
+            "Divergence records this node wrote: replays that differed from the output stream.",
+        );
+        let _ = writeln!(
+            out,
+            "felixd_divergences_total {}",
+            self.divergences.load(Ordering::Relaxed)
+        );
         family(
             &mut out,
             "felixd_workload_failures_total",

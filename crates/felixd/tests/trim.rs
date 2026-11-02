@@ -1,5 +1,7 @@
 //! A workload that keeps its last snapshots writes trim records, and a crash
 //! with one in flight changes nothing a resume, `check` or `replay` reads.
+//! `check` starts from the snapshot the last one names, and a trim carries
+//! what a deleted head of `.out` would take with it.
 //!
 //! Needs a Felix broker; see `common`.
 
@@ -40,10 +42,11 @@ async fn a_crash_with_a_trim_in_flight_resumes_and_checks() {
         .await;
     t.publish_all(INPUT, (0..60).map(count)).await;
     // The second trim follows the third snapshot, at input 29.
-    let mut agent = t.start_agent_with_faults("crash-after-trim-sent=2");
+    // The test reads the whole snapshot stream, so nothing is deleted.
+    let mut agent = t.start_agent_with_faults("crash-after-trim-sent=2,skip-deletion=1");
     assert!(!agent.exited(Duration::from_secs(60)).await.success());
 
-    let mut agent = t.start_agent();
+    let mut agent = t.start_agent_with_faults("skip-deletion=1");
     t.publish_all(INPUT, (60..90).map(count)).await;
     assert_uninterrupted(&t, &module, 90).await;
     agent.kill();
@@ -70,6 +73,126 @@ async fn a_crash_with_a_trim_in_flight_resumes_and_checks() {
     }
     let (ok, report) = t.check(&["--id", ID, "--complete"]);
     assert!(ok, "{report}");
+}
+
+/// Waits for a trim at input `step` or later, which a holder writes right
+/// after its snapshot of that input.
+async fn trimmed_past(t: &common::TestFelix, step: u64) {
+    eventually("a trim past the start", Duration::from_secs(60), || async {
+        trims(t)
+            .await
+            .iter()
+            .any(|(_, trim)| trim.step >= step)
+            .then_some(())
+    })
+    .await;
+}
+
+/// With trim records on `.out`, `check --from-snapshot` restores the oldest
+/// snapshot the last one keeps and starts after it. It gives the verdict a
+/// check from the first input gives, clean or not, for a fault after that
+/// snapshot. Without the flag the head is still there, so it replays all.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_from_the_snapshot_gives_the_verdict_of_check_from_the_start() {
+    let Some(t) = test_felix().await else { return };
+    let module = t
+        .submit(
+            "counter",
+            &["--snapshot-every", "10", "--keep-snapshots", "2"],
+        )
+        .await;
+    t.publish_all(INPUT, (0..60).map(count)).await;
+    let mut agent = t.start_agent();
+    assert_uninterrupted(&t, &module, 60).await;
+    trimmed_past(&t, 39).await;
+    agent.kill();
+
+    let args = ["--id", ID, "--complete", "--from-snapshot"];
+    let (ok, from_snapshot) = t.check(&args);
+    assert!(ok, "{from_snapshot}");
+    assert!(
+        from_snapshot.contains("checked after the snapshot of input"),
+        "{from_snapshot}"
+    );
+    let (ok, from_start) = t.check(&["--id", ID, "--complete"]);
+    assert!(ok, "{from_start}");
+    assert!(!from_start.contains("checked after"), "{from_start}");
+
+    // A second output for input 55, which both replays produce.
+    let tail = t.read_all(OUTPUT).await.last().unwrap().0 + 1;
+    let header = output::OutputHeader {
+        input_offset: 55,
+        index: 0,
+    };
+    let wrong = output::encode(header, u64::MAX / 2, &count(0));
+    t.publish_all(OUTPUT, [wrong]).await;
+    let (ok, from_snapshot) = t.check(&args);
+    assert!(!ok, "{from_snapshot}");
+    let (_, from_start) = t.check(&["--id", ID, "--complete"]);
+    let duplicate = format!("duplicate at offset {tail}: input 55 output 0");
+    assert!(from_snapshot.contains(&duplicate), "{from_snapshot}");
+    assert!(from_start.contains(&duplicate), "{from_start}");
+
+    // One for an input the snapshot covers is still found, as an output the
+    // replay after the snapshot did not produce.
+    let early = output::OutputHeader {
+        input_offset: 3,
+        index: 0,
+    };
+    t.publish_all(OUTPUT, [output::encode(early, u64::MAX / 2, &count(9))])
+        .await;
+    let (ok, from_snapshot) = t.check(&args);
+    assert!(!ok);
+    assert!(
+        from_snapshot.contains("input 3 output 0"),
+        "{from_snapshot}"
+    );
+}
+
+/// A trim carries the spec record of the stream's first claim from one owner
+/// to the next, and the highest one claimed so far.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trim_carries_the_first_claims_spec_across_owners() {
+    let Some(t) = test_felix().await else { return };
+    let module = t
+        .submit(
+            "counter",
+            &["--snapshot-every", "5", "--keep-snapshots", "1"],
+        )
+        .await;
+    let first = t.spec().await.record.expect("the spec names its record");
+    t.publish_all(INPUT, (0..12).map(count)).await;
+    let mut agent = t.start_agent();
+    trimmed_past(&t, 9).await;
+    agent.kill();
+    let first_epoch = trims(&t).await.last().unwrap().0;
+
+    // The same spec again, as the record a later submission appends.
+    t.put_spec(&t.spec().await).await;
+    let second = t.spec().await.record.unwrap();
+    assert!(second > first);
+    let mut agent = t.start_agent();
+    t.publish_all(INPUT, (12..30).map(count)).await;
+    eventually(
+        "a trim by the next owner",
+        Duration::from_secs(60),
+        || async {
+            trims(&t)
+                .await
+                .iter()
+                .any(|(epoch, trim)| *epoch > first_epoch && trim.step >= 24)
+                .then_some(())
+        },
+    )
+    .await;
+    assert_uninterrupted(&t, &module, 30).await;
+    agent.kill();
+
+    for (epoch, trim) in trims(&t).await {
+        assert_eq!(trim.first_spec, Some(first), "{trim:?}");
+        let claimed = if epoch > first_epoch { second } else { first };
+        assert_eq!(trim.claimed, Some(claimed), "{trim:?}");
+    }
 }
 
 /// A holder is frozen just before its first trim record, after its own

@@ -14,7 +14,7 @@ On `wl.<id>.out`. The version is 4, followed by a kind byte.
 | Bytes | Field |
 |---|---|
 | 1 | version, 4 |
-| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator, 7 for a trim |
+| 1 | kind: 0 for an output, 1 for a claim, 2 for an unclassed failure, 3 for a rejection, 4 for a claim under a spec, 5 for a failure, 6 for needs operator, 7 for a trim, 8 for degraded, 9 for a divergence |
 | 8 | the writer's lease epoch |
 
 An output continues with:
@@ -42,10 +42,11 @@ The floor is the highest spec record claimed on the stream so far, this claim's 
 owner takes it from the last claim before its own, and from any claim it finds past the tail when
 its claim is refused, so the last claim alone says whether an older spec is being run, even when
 that claim's owner refused its spec. A needs-operator record after the last claim, whatever its reason, raises the floor
-to its spec record too, since it can be written with no claim. Kind 1 claims
+to its spec record too, since it can be written with no claim. Neither a degraded nor a divergence record does. Kind 1 claims
 still read, with no spec. `felixd check` and `felixd replay --diff` use the spec each claim names to
 judge the inputs after it, passing over claims whose owner refused the spec. An agent refuses to
-run a spec whose module or input differ from the one the stream's first claim names, or whose
+run a spec whose module or input differ from the one the stream's first claim names (a trim
+record carries it once that claim is gone), or whose
 record is below the floor. Needs-operator records before the first claim, whatever their reason, ran nothing and are passed
 over when finding it. A failure, kind 5, continues with:
 
@@ -88,6 +89,117 @@ node still reads as past the tail of `sys.specs` after 30 seconds is recorded as
 so a spec-history read lagging that long stops the workload on every node until the spec is
 submitted again.
 
+A degraded record, kind 8, says that the holder of a spec record gave up on a workload that stayed
+stuck on an error, and let go of its lease. It continues with:
+
+| Bytes | Field |
+|---|---|
+| 8 | the `sys.specs` offset of the spec record the holder ran |
+| 1 | the error class, as in a failure: 0 transient, 1 needs operator, 2 poison |
+| 1 | the length of the node id |
+| node id length | the node that held the workload, UTF-8; an id past 255 bytes is cut there |
+| rest | the error, UTF-8, for people |
+
+It is an observation, not a stop. The spec stays `running` and no node leaves the workload alone
+because of it. `felixd ps` shows `degraded` while it is the last record, so it lasts until the next
+holder's claim record is written. It does not raise the spec floor, and kind 8 never blocks claims
+whatever its class; a record that did would need a kind of its own. Another node claims after its
+claim delay. While a scheduler runs and the workload is assigned to the node that gave up, the others
+wait for that node for up to `--assignment-bound-ms` first, since its `nodes` entry still says it
+takes work.
+
+When it is written:
+
+- This build writes it only with class 0. The run failed on transient errors for `--stuck-after-ms`
+  with no progress in between: no new input stepped and no record appended, and no attempt that ran
+  for the whole bound ([design.md](design.md#leases-and-failure-detection)). `--stuck-after-ms 0` turns it off.
+- The holder appends it with `publish_if` at the tail, behind everything of earlier epochs, and then
+  deletes its lease.
+- It is not written over a failure record under the same spec version or later, or a needs-operator
+  record for the same spec record, which it would hide from the nodes that read the last record.
+- A degraded record already last for the same spec record is not written again.
+
+How readers treat it:
+
+- A holder whose claim never landed can write it with no claim before it, so the search for the first
+  claim passes over it, as it does over needs-operator records.
+- A build from before kind 8 refuses it. A node of that build that claims a workload whose last
+  record is a degraded one fails the workload as poison. One that finds it as the stream's first
+  record never claims and retries. A workload reading the stream needs an operator. During a rolling
+  upgrade run the new build with `--stuck-after-ms 0` until no old node is left.
+- A reader that reads the record in full accepts any known class and refuses an unknown one. A node
+  that finds one it cannot read last on the stream does not claim the workload, as with an unreadable
+  needs-operator record, and leaves it to a node of the build that wrote it. A node
+  that only needs to pass over it, or to show the spec record it names, reads its version, kind and
+  spec record alone.
+
+A divergence record, kind 9, says that a holder replayed inputs the stream already had outputs
+for and got a different output, so it is failing the workload as poison. It is the record to read
+when a workload fails with `replayed output differs`: it names the output, the node and the build,
+and the digests of both sides. It continues with:
+
+| Bytes | Field |
+|---|---|
+| 8 | the `sys.specs` offset of the spec record the holder ran |
+| 8 | the input offset of the output that differs, or of the last output the replay produced when the stream holds an unreadable record after it |
+| 4 | the index of that output among the input's outputs |
+| 1 | 1 if the replay started from a snapshot, 0 if from the initial state |
+| 8 | the input offset the snapshot covers through, 0 if none |
+| 1 + 0 or 32 | the sha256 of what the stream holds there, as a length byte (0 or 32) and the digest |
+| 1 + 0 or 32 | the sha256 of what the holder's replay produced there, the same way |
+| 1 + n | the node that found it, UTF-8; an id past 255 bytes is cut there |
+| 1 + n | the contract version the workload's module implements, `0.2.0` or `0.3.0` |
+| 1 + n | the wasmtime version of the build, such as `50.0.0` |
+| 1 + n | the felixd version of the build |
+| rest | what was found, UTF-8, for people |
+
+The three versions are the determinism ABI: what a replay depends on besides the module and its
+inputs. A replay that differs on a build whose versions differ from the ones that wrote the stream
+is a different finding from one that differs on the same build. Only the three strings are
+recorded for now; a single identifier for the ABI is not built
+([#62](https://github.com/GetFelix/felixd/issues/62)).
+
+Both digests are of the bytes the comparison looks at: the record's header and content, with the
+writer's epoch set to 0, so the same output written by two owners has one digest. That is the
+same comparison `output::same_output` makes. A digest is absent when the stream holds nothing that
+compares at that place: it ended, or holds a record that does not decode. The expected
+side is what the stream holds, because the stream is what other nodes and downstream workloads have
+read. The actual side is what this node produced.
+
+When it is written:
+
+- It is written where a holder finds the difference and is about to fail the workload as poison:
+  an output it replays and skips (the skipped-output check), or the records it finds where it
+  appends (reconcile). The failure record that follows keeps its class, poison.
+- The holder renews its lease, then appends it with `publish_if` at the tail, behind everything of
+  earlier epochs, like a failure record. A node that has been deposed finds a later claim at the
+  tail and writes neither it nor the failure.
+- It is best effort. If it cannot be written after three tries the workload fails without it.
+- It is not written over a failure record under the same spec version or later, or a needs-operator
+  record for the same spec record. The same finding already last is not written again.
+- A merge log that holds records its holder did not write is not recorded this way. That error is
+  retried until the workload is stuck, and then recorded as degraded.
+
+How readers treat it:
+
+- It is an observation like a degraded record: no step produced it, so the resume fold, the
+  skipped-output checks, reconcile, `felixd check`, `felixd replay` and a downstream workload pass
+  over it as they pass over a claim. It does not raise the spec floor, and the search for the first
+  claim passes over it.
+- `felixd ps` shows it on the line after the failure while the stream still ends on it, behind the
+  failure record and any other note after it, within the stream's last 8 records. `felixd replay --diff` names it when its own diff
+  finds the same output differing.
+- A reader that reads the record in full refuses a snapshot flag other than 0 or 1 and a digest
+  length other than 0 or 32. A node that finds one it cannot read last on the stream does not
+  claim the workload, as with an unreadable degraded record. A node that only needs to pass over
+  it, or to show the spec record it names, reads its version, kind and spec record alone.
+- A build from before kind 9 refuses it. That matters only for a workload that has already failed,
+  since the failure record follows it: an old node that claims the workload after its spec is
+  submitted again reads back past the failure, meets the divergence record and fails the new spec
+  as poison. Old `felixd ps`, `check` and `replay` report the stream unreadable. A workload reading
+  the stream needs an operator. There is no switch to stop the record being written. Finish the
+  rolling upgrade before submitting a failed workload again.
+
 A rejection says the workload's `step` returned `reject` for an input and carried on. It continues with:
 
 | Bytes | Field |
@@ -100,20 +212,23 @@ A rejection says the workload's `step` returned `reject` for an input and carrie
 A rejection is that input's only output. The resume fold, the skipped-output checks, reconcile and
 `felixd check` match it by `(input offset, index)` and compare it exactly like an output, so a
 stream with a rejection where a replay produces an output, or the other way round, diverges. They
-pass over claims, failures and needs-operator records. A workload whose input is another workload's output stream reads only
+pass over claims, failures, needs-operator, trim, degraded and divergence records. A workload whose input is another workload's output stream reads only
 the outputs addressed to one name, `out`, and passes over these, rejections and outputs of
 other names (`output::addressed_to`). Its step gets the output's key and payload, not the record. It
-decides by the version and kind bytes and reads the body of outputs only, so a failure or
-needs-operator record with a class or reason this build does not know is still passed over. A
+decides by the version and kind bytes and reads the body of outputs only, so a failure, needs-operator,
+degraded or divergence record with a class, reason or field this build does not know is still passed over. A
 version or kind it does not know is refused, never skipped: the reader cannot tell whether it holds
 an input, so the workload is recorded as needing an operator (reason 7), and upgrading the node
-fixes it. That includes kinds 5 and 6 read by a build from before them, so upgrade every node before
-a workload can write them. An output that does not decode is poison.
+fixes it. That includes kinds 5 and 6 read by a build from before them, kind 8 read by a build from
+before it, and kind 9 read by a build from before that, so upgrade every node before a workload can
+write them. `--stuck-after-ms 0` stops the new build writing kind 8; nothing stops kind 9, which is
+written only for a workload that is failing. An output that does not decode is poison.
 
 A trim, kind 7, names the floors below which this workload's resume reads nothing
-([design.md](design.md#retention)). `felixd check` and `felixd replay` still read from the start
-while the records are there. Its holder appends it after a snapshot of its own when the spec sets
-`keep_snapshots`, with `publish_if` at the tail like an output. It continues with:
+([design.md](design.md#retention)). `felixd check --from-snapshot` starts after the snapshot the last one names (by default only once the `.out` head is deleted), and
+`felixd replay` reads from the start while the records are there. Its holder appends it after a snapshot of its own
+when the spec sets `keep_snapshots`, with `publish_if` at the tail like an output, and only once it has landed
+deletes `.snap` and the merge log below the snapshot and merge log floors. It continues with:
 
 | Bytes | Field |
 |---|---|
@@ -124,9 +239,30 @@ while the records are there. Its holder appends it after a snapshot of its own w
 | 2 | input count |
 | 8 each | per input, in the spec's order, this workload's floor: the record the step read with one input; the entry's `next`, lowered to the entry's own record, with several |
 
-Bytes after the last floor are refused. Readers pass over a trim like a claim, and only its epoch is
-checked. Nothing is deleted at these floors yet (Felix #1662), and an input floor is one reader's:
-an input shared with other readers is deleted only below all of theirs (#150).
+The body may end there, or continue with what a deleted head of `.out` would take with it:
+
+| Bytes | Field |
+|---|---|
+| 1 | flags: 1 if a first spec follows, 2 if a claimed spec follows, 3 for both; no other value |
+| 8 | the first spec: the `sys.specs` offset the stream's first claim names, copied unchanged from the trim before it. Present only with flag 1 |
+| 8 | the claimed spec: the highest spec record claimed on the stream up to this record, the floor a claim written here would carry. Present only with flag 2 |
+
+A body that ends at the floors carries neither. The first trim writes the first spec, read from the
+first claim, and every later trim copies it; the claimed spec is read from the stream at each trim.
+A flags byte of 0 or above 3, and bytes past the fields the flags name, are refused, so a later layout is not misread as this one. Readers pass over a trim like a claim, and only its epoch is checked, apart from the two
+uses of these fields:
+
+- The first spec says what module and input the stream was written under once the first claim is
+  gone: the oldest record Felix keeps may then be a trim, or an output with a trim after it, and the
+  reader takes the first claim or trim it finds there (see "Spec lineage" in
+  [design.md](design.md#retention)). Every claim's spec has the first claim's module and input,
+  because an owner refuses one that differs.
+- The claimed spec stands in for the last claim when a reader walks back from the tail for the highest
+  spec claimed, so a stale node is still refused when the claims are gone.
+
+A holder that finds a trim whose floors are not yet deleted, as after a crash, deletes then. An input
+floor is one reader's and nothing acts on it: an input shared with other readers is deleted only below
+all of theirs (#150).
 
 A version 3 record has the same layout without a name or key in an output, and no rejections. Its
 outputs read as name `out` with no key. A version 2 record is an output with no kind byte: version,
@@ -238,16 +374,22 @@ counts as admission's, so a node fails closed on one from a newer build.
 
 Requests are on `sys.intake`, one shard. Each is JSON: `format` (1), `id`, the workload id, `spec`,
 a workload spec as below with no `record` or `failure`, `module_bytes`, the module's length, and
-`replication_factor`. Who asked is not in the payload, which a publisher can fill with anything.
+`replication_factor`. Who asked is not in the payload, which a publisher can fill with anything:
+admission reads it from the record's publisher, the principal the broker authenticated the write
+from, which a broker stores only when it is set to (`FELIX_RECORD_PUBLISHERS=true`, or the
+`publisher_principal` fleet feature in a cluster).
 
 Admission's outputs on `wl.admission.out` are ordinary output records under the name `out`, keyed
 by the workload id (no key for a request that did not decode). Each payload is JSON: `format` (1),
-`request`, the `sys.intake` offset it answers, `id`, and `outcome`:
+`request`, the `sys.intake` offset it answers, `id`, `requester`, the request's publisher, and
+`outcome`. `requester` is left out when the broker recorded none, and in decisions written before
+requesters were recorded, which read the same way:
 
 - `accepted`, with `spec`, `module_bytes` and `replication_factor` as asked.
 - `rejected`, with `reason` and `detail`, for people. Reasons and their codes: `unreadable` (1),
   `invalid_id` (2), `reserved` (3), `invalid_inputs` (4), `invalid_spec` (5), `over_limit` (6),
-  `module_too_large` (7).
+  `module_too_large` (7), `no_requester` (8, the broker recorded no publisher for the request) and
+  `not_permitted` (9, the policy lists who may ask and the requester is not on it).
 
 Every request gets exactly one decision. A reader refuses another format.
 

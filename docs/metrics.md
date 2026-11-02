@@ -36,8 +36,10 @@ scrape_configs:
 | `felixd_node_draining` | gauge | 1 while the node is marked draining and claims nothing |
 | `felixd_leases_held` | gauge | workloads the node holds the lease of and runs |
 | `felixd_lease_claims_total{result}` | counter | `won`, `contended` (another node's lease was there) or `error` |
-| `felixd_lease_handoffs_total{reason}` | counter | leases the node let go of for another to take: `drained`, or `lost` when it was not renewed in time or was taken |
+| `felixd_lease_handoffs_total{reason}` | counter | leases the node let go of for another to take: `drained`, `lost` when it was not renewed in time or was taken, or `degraded` when the workload stayed stuck on an error |
 | `felixd_needs_operator_total{reason}` | counter | workloads the node stopped for an operator, by the reason code `ps` shows, as `module_refused`, `module_missing`, `spec_unrecorded`, `spec_conflict`, `spec_stale`, `restore_fuel`, `input_unreadable`, `input_behind`, `history_trimmed`, `spec_unadmitted` |
+| `felixd_degraded_total{class}` | counter | workloads the node released after they stayed stuck on an error for `--stuck-after-ms`, by the error's class: `transient`, `needs_operator` or `poison`. Only `transient` is produced today |
+| `felixd_divergences_total` | counter | divergence records the node wrote: replays that differed from the output stream, just before the workload failed as poison |
 | `felixd_workload_failures_total` | counter | workloads the node marked failed |
 | `felixd_snapshots_total{result}` | counter | `written`, or `skipped` when a snapshot ran out of `snapshot_fuel` |
 | `felixd_snapshot_duration_seconds` | histogram | taking and writing a snapshot, all workloads |
@@ -98,7 +100,10 @@ not built; effects are not either (see
   above 0 with no drain, or `felixd_lease_handoffs_total{reason="lost"}`:
   leases are not renewed in time, which is a slow node or broker.
 - *Did a stale holder try to write?* `felixd_output_refused_total`.
-- *Is something stuck?* `felixd_needs_operator_total` by reason, then
+- *Is something stuck?* `felixd_needs_operator_total` by reason, or
+  `felixd_degraded_total` for a workload a node gave up on, then
   `felixd ps` for the workload.
+- *Did a replay differ from the stream?* `felixd_divergences_total`, then
+  `felixd ps` for the workload, which shows where.
 - *Is a drain finished?* `felixd_node_draining` is 1 and `felixd_leases_held`
   is 0.

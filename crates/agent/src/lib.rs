@@ -19,6 +19,7 @@
 //! - [`merge`]: appends to the merge log of a workload with several inputs.
 //! - [`input`]: what a step is given and what it produced, the same for every
 //!   caller.
+//! - [`stuck`]: when a workload failing on transient errors counts as stuck.
 //! - [`snapshots`]: reads snapshots and their chunks back.
 //! - [`admission`]: the gate a spec record passes before it runs, the
 //!   projector of admission's decisions, and requests on `sys.intake`.
@@ -45,6 +46,8 @@ mod input;
 mod lease;
 mod merge;
 mod output;
+mod retention;
 mod runner;
 mod snapshots;
 mod specs;
+mod stuck;

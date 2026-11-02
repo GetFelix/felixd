@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use felix_client::{
     AckMode, BrokerError, CacheCondition, CacheConditionResult, Client, ClientConfig,
-    ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy, StartPosition, StreamRecord,
-    SubscribeCursorError, VersionedValue, root_store_from_pem_file,
+    ConditionalTrim, ConditionalWrite, CursorErrorReason, ErrorCode, ReconnectPolicy,
+    StartPosition, StreamRecord, SubscribeCursorError, VersionedValue, root_store_from_pem_file,
 };
 
 use felixd_core::names;
@@ -59,6 +59,10 @@ impl Felix {
             token_provider: Some(Arc::new(settings.token.clone())),
             // Time-based snapshot points come from input append times.
             timestamps: true,
+            // A step is given its record's publisher. Reads return it once the
+            // broker has stored one; the flag also asks for it on live events,
+            // so a live step and a replay see the same value.
+            publishers: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
         let client = Client::connect_seeds(
@@ -221,6 +225,30 @@ impl Felix {
             .await
     }
 
+    /// Hides the records of `stream` below `before`, if its next offset is
+    /// exactly `expected`. The trim is a record of its own at `expected`.
+    ///
+    /// Not retried: a refused tail is an answer, and a trim that timed out
+    /// may have landed.
+    pub(crate) async fn trim_before(
+        &self,
+        stream: &str,
+        before: u64,
+        expected: u64,
+    ) -> Result<ConditionalTrim> {
+        self.client
+            .trim_before(
+                &self.tenant,
+                &self.namespace_of(stream),
+                stream,
+                0,
+                before,
+                expected,
+                None,
+            )
+            .await
+    }
+
     /// The stream's next offset.
     ///
     /// Felix has no call for this that a node's own grants allow, so this asks
@@ -350,16 +378,7 @@ impl Felix {
         from: u64,
         end: u64,
     ) -> Result<(Vec<StreamRecord>, bool)> {
-        match self.read_range(stream, from, end).await {
-            Ok(records) => Ok((records, from == 0)),
-            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
-                Some(oldest) if oldest > from && oldest >= end => Ok((Vec::new(), true)),
-                Some(oldest) if oldest > from => {
-                    Ok((self.read_range(stream, oldest, end).await?, true))
-                }
-                _ => Err(error),
-            },
-        }
+        read_held(from, end, |from| self.read_range(stream, from, end)).await
     }
 
     /// The last record of the stream, given its `tail`.
@@ -482,6 +501,32 @@ impl Felix {
     }
 }
 
+/// How many times a read walking back follows a trim that moves while it reads.
+const TRIM_ROUNDS: usize = 4;
+
+/// Reads `from..end` with `read`, which fails with [`Trimmed`] below what
+/// Felix holds. Then it reads again from the oldest offset held, and says the
+/// walk ends there. A trim that lands between the two reads moves that offset
+/// up, so it follows it a few rounds before giving up.
+async fn read_held<T, F, Fut>(from: u64, end: u64, mut read: F) -> Result<(Vec<T>, bool)>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<Vec<T>>>,
+{
+    let mut start = from;
+    for _ in 0..TRIM_ROUNDS {
+        match read(start).await {
+            Ok(records) => return Ok((records, start == 0 || start > from)),
+            Err(error) => match Trimmed::of(&error).map(|t| t.oldest) {
+                Some(oldest) if oldest >= end => return Ok((Vec::new(), true)),
+                Some(oldest) if oldest > start => start = oldest,
+                _ => return Err(error),
+            },
+        }
+    }
+    read(start).await.map(|records| (records, true))
+}
+
 /// Calls `page` until it gets past `from`. A page stops short at what the
 /// broker has committed, which can lag the tail a caller was given, for
 /// example just after a leader change. Returning that short page as the whole
@@ -581,6 +626,27 @@ impl Trimmed {
     /// The trim `error` reports, if it is one.
     pub fn of(error: &anyhow::Error) -> Option<&Trimmed> {
         error.downcast_ref::<Trimmed>()
+    }
+
+    /// `error`, for a command that reads `stream` from an offset Felix has
+    /// trimmed past, said so the operator can act on it. Any other error is
+    /// returned as it came.
+    pub(crate) fn explained(error: anyhow::Error, command: &str) -> anyhow::Error {
+        match Trimmed::of(&error) {
+            Some(t) => anyhow::anyhow!(
+                "{command} needs {} from offset {}, but Felix holds it only from offset {}: \
+                 the history before was trimmed{}",
+                t.stream,
+                t.requested,
+                t.oldest,
+                if command == "felixd check" {
+                    "; `felixd check --from-snapshot` starts after a snapshot instead"
+                } else {
+                    ""
+                }
+            ),
+            None => error,
+        }
     }
 }
 

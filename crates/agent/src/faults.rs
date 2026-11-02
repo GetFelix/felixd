@@ -11,6 +11,8 @@
 //!   below the floors of its last trim record, read when a run starts and
 //!   updated as trims land, with the error Felix gives for trimmed history,
 //!   as if they were deleted. One that reaches the run aborts the process.
+//! - `skip-deletion=1`: write trim records but delete nothing, for a test
+//!   that reads a whole `.snap` or merge log.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-projection-sent=N`: abort once admission's projector has
@@ -67,6 +69,15 @@
 //!   record is appended. It carries on at `SIGCONT`.
 //! - `fail-workload=1`: fail every workload this node claims, as a trap would,
 //!   but only on this node.
+//! - `fail-after-append=1`: every append of output records, once it has
+//!   landed, fails with an error that is retried. The workload gets one
+//!   step further on each attempt.
+//! - `fail-after-first-step=1`: the first time each input is stepped, the
+//!   attempt fails with an error that is retried, whether or not the step
+//!   wrote anything. Later attempts replay it and go one input further.
+//! - `fail-transient=1`: every attempt to run a workload on this node fails
+//!   with an error that is retried, as when Felix cannot be reached, so the
+//!   workload is stuck here and only here.
 //! - `drop-watch=MS`: when the key `drop-watch` is written to the workloads
 //!   cache, end the workloads watch and wait MS milliseconds before opening a
 //!   new one.
@@ -201,6 +212,11 @@ pub(crate) async fn scoped<F: std::future::Future>(id: &str, run: F) -> F::Outpu
 /// Whether to act as if history below each trim floor were deleted.
 pub(crate) fn enforce_trim_floors() -> bool {
     fault("enforce-trim-floors") == Some(1)
+}
+
+/// Whether to leave the history a trim record names where it is.
+pub(crate) fn skip_deletion() -> bool {
+    fault("skip-deletion") == Some(1)
 }
 
 /// Refuses workload `id`'s reads of `stream` below `floor` from now on.
@@ -388,6 +404,22 @@ pub(crate) fn before_failure_append() {
 
 pub(crate) fn fail_workload() -> bool {
     fault("fail-workload") == Some(1)
+}
+
+/// Whether to fail after stepping the input at `offset`, which it does the
+/// first time each input is stepped and never again.
+pub(crate) fn fail_after_first_step(offset: u64) -> bool {
+    static FAILED_THROUGH: AtomicU64 = AtomicU64::new(0);
+    fault("fail-after-first-step") == Some(1)
+        && FAILED_THROUGH.fetch_max(offset + 1, Ordering::Relaxed) <= offset
+}
+
+pub(crate) fn fail_after_append() -> bool {
+    fault("fail-after-append") == Some(1)
+}
+
+pub(crate) fn fail_transient() -> bool {
+    fault("fail-transient") == Some(1)
 }
 
 /// How long to stay without a watch, if the change to `key` should end it.

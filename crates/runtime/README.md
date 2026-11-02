@@ -1,7 +1,7 @@
 # felixd-runtime
 
 The wasmtime host that runs one workload component. It loads a component of
-[workload contract 0.2](../../docs/contract.md), steps it one input at a time, and takes and
+[workload contract 0.3 or 0.2](../../docs/contract.md), chosen by the interfaces it exports, steps it one input at a time, and takes and
 restores its snapshots. It does no I/O and does not know about Felix.
 
 It depends on `felixd-core` (for `Limits`) and wasmtime. `felixd-agent` and the `felixd` binary
@@ -33,6 +33,8 @@ Every node must reach the same result for the same input, including where a work
   crate, not left to wasmtime's defaults, because they decide where a workload fails.
 - The host refuses a chunk over 4 MiB, more than 65,536 chunks, an invalid output name and an
   effect request, each as a contract failure.
+- `Input` carries the record's `publisher`. A 0.3 workload sees it; a 0.2 workload runs unchanged
+  and never does.
 - A component of the old contract, 0.1, is refused.
 
 The limits come from the workload's spec, so every node applies the same ones.

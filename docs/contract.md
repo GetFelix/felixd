@@ -1,36 +1,52 @@
-# The workload contract, version 0.2
+# The workload contract, version 0.3
 
 This is the interface between felixd and a workload, and what each side
-promises. `wit/workload.wit` holds the WIT below; it replaced the 0.1 world. It settles the
-outline in [design.md, The workload contract, version 0.2](design.md#the-workload-contract-version-02)
+promises. `wit/0.3/workload.wit` holds the WIT below.
+
+Version 0.3 adds one thing to 0.2: the **publisher** of each input record, the
+identity the broker authenticated the write from. It lets a workload, admission
+first, decide by who asked. Nothing else changed. felixd runs workloads built
+against 0.3 and against 0.2, so no existing workload has to be rebuilt; a 0.2
+workload simply never sees the publisher. [Upgrading from 0.2](#upgrading-from-02)
+says what to change in a workload that wants it.
+
+The contract settles the outline in
+[design.md, The workload contract, version 0.2](design.md#the-workload-contract-version-02)
 (#64) and leaves room for effects (#71) and typed records (#73) without
 another breaking change.
 
 ## Naming and versions
 
-The WIT package is `felixd:workload@0.2.0`. A workload exports two
+The WIT package is `felixd:workload@0.3.0`. A workload exports two
 interfaces and imports nothing:
 
 | Export | Holds |
 |---|---|
-| `felixd:workload/step@0.2.0` | the input and output types and `step` |
-| `felixd:workload/state@0.2.0` | `snapshot`, `snapshot-chunk`, `restore`, `restore-chunk`, `inspect` |
+| `felixd:workload/step@0.3.0` | the input and output types and `step` |
+| `felixd:workload/state@0.3.0` | `snapshot`, `snapshot-chunk`, `restore`, `restore-chunk`, `inspect` |
 
-The world is `felixd:workload/workload@0.2.0`. The types live in the `step`
+The world is `felixd:workload/workload@0.3.0`. The types live in the `step`
 interface rather than a types-only interface, because a component that uses
 a types-only interface imports it, and a workload imports nothing.
 
 The host identifies the contract by the exported interface names, which carry
-the version. A minor version (0.2.x) may only add what an older guest never
-sees. Anything that changes a type a guest already uses is a new version, as
-the component model requires anyway: an added variant case does not
-typecheck against the old one. That is why `output` and `input` below already
+the version. A component that exports the `@0.3.0` interfaces runs as 0.3; one
+that exports the `@0.2.0` interfaces runs as 0.2, from `wit/0.2/workload.wit`,
+which is unchanged. Anything else is refused ([0.1 workloads](#01-workloads)).
+Both versions run side by side on one node, and a replay of a workload uses the
+version its module was built against.
+
+A minor version (0.3.x) may only add what an older guest never sees. Anything
+that changes a type a guest already uses is a new version, as the component
+model requires anyway: an added variant case or record field does not
+typecheck against the old one. That is why 0.3 is a new version and not 0.2.1:
+`record-in` gained a field. It is also why `output` and `input` below already
 have the cases effects need.
 
 ## The interface
 
 ```wit
-package felixd:workload@0.2.0;
+package felixd:workload@0.3.0;
 
 interface step {
   /// Where an input came from, as recorded in the workload's spec when it
@@ -65,6 +81,11 @@ interface step {
   record record-in {
     key: option<list<u8>>,
     payload: list<u8>,
+    /// Who published the record: the principal the broker authenticated the
+    /// write from, as the broker stored it. `none` when the broker did not
+    /// record one, and always `none` when the record is another workload's
+    /// output. It vouches for the publisher only, not for the payload.
+    publisher: option<string>,
   }
 
   /// Something a step produces.
@@ -160,7 +181,8 @@ metadata above. A workload with several inputs gets their records in the order
 its merge log records ([Several inputs](#several-inputs)). Every field of
 `input` is a function of the input streams, the merge log and the spec alone, so a replay, a resume after takeover, `felixd check` and
 `felixd replay` pass identical values. The host never fills in a field from
-the node it runs on.
+the node it runs on, and `publisher` is the stored record's, not the node's
+or the connection's.
 
 The guest returns its outputs in order, or an error:
 
@@ -181,6 +203,39 @@ The guest returns its outputs in order, or an error:
 A step whose result breaks the contract is poison too, since it would break
 the same way on any node: an output name that is not valid, a request (until
 effects exist), or more output than one write to Felix may hold.
+
+### The publisher
+
+`record-in.publisher` is the principal the broker authenticated the record's
+write from: the subject of the token the publisher connected with, such as
+`p:alice`, exactly as the broker stored it. A workload can rely on it to
+tell who asked, because it is not part of the payload and a publisher cannot
+choose it. It is `none` when:
+
+- the broker recorded no publisher. A Felix broker stores one only when it is
+  set up to: `FELIX_RECORD_PUBLISHERS=true` on a lone broker, or the
+  `publisher_principal` fleet feature finalized in a cluster. Finalizing is
+  one-way: records with a publisher are storage format v6, which older brokers
+  refuse to open, so take a backup and read [Felix's upgrades page](https://docs.getfelix.dev/deployment/upgrades/) first. Records written
+  before that have none, and so do records from a connection with no
+  principal;
+- the input is another workload's output ([Inputs from another
+  workload](#inputs-from-another-workload)). Whichever node held that
+  workload's lease wrote the record, so its publisher names a node and says
+  nothing about the data. The host leaves it out so that a pipeline's
+  downstream sees the same thing wherever the upstream ran.
+
+The publisher vouches for who wrote the record, not for what is in it: a
+principal allowed to publish can publish anything. A workload that must refuse
+records from an unknown publisher treats `none` as unknown and refuses, as
+admission does.
+
+The host reads the publisher from the stored record and passes the same value
+live, after a takeover, from a snapshot resume, in a merged workload, in
+`felixd check` and in `felixd replay`, including `replay --diff` against a
+different module. A merge log entry names a record by input and offset, so the
+publisher is read back from that record each time and is never copied into the
+merge log.
 
 ### `state`
 
@@ -362,27 +417,53 @@ live manifest references.
 
 A spec's input may be another workload's output stream, as now. It gets the
 outputs addressed to one name, `out`, with their keys; a spec cannot name
-another yet. Claims, failures, needs-operator records, rejections and other
-names are passed over ([design.md, Pipelines](design.md#pipelines)).
+another yet. Claims, failures, needs-operator, trim, degraded and divergence records,
+rejections and other names are passed over ([design.md, Pipelines](design.md#pipelines)). Their
+`publisher` is `none` ([The publisher](#the-publisher)).
 
 ## Several inputs
 
 A spec may name several input streams. The lease holder merges their records
 as they arrive and appends the order it chose to the workload's merge log,
 `wl.<id>.merge`, before it steps any of them. Each step gets the record's own
-`source.stream`, `offset` and `timestamp-micros`, so a step can tell its
-inputs apart. Within one input the records come in offset order; across inputs
+`source.stream`, `offset`, `timestamp-micros` and `publisher`; `source.stream`
+tells a step its inputs apart. Within one input the records come in offset order; across inputs
 the order is whatever the holder recorded, and the guest must not assume
 another. Replay, a resume after takeover and `felixd check` read the merge log
 and step the same records in the same order. An output's input offset is the
 step's offset on the merge log ([records.md](records.md#merge-log-records)).
 
+## Upgrading from 0.2
+
+A 0.2 workload keeps running as it is. To read the publisher, rebuild it against
+0.3:
+
+1. Point the bindings at `wit/0.3` instead of `wit/0.2`. With `wit-bindgen`
+   that is `path: "../../wit/0.3"` in `generate!`.
+2. Read `record.publisher`, an `Option<String>` in Rust, wherever a decision
+   depends on who published. A guest that only reads `record-in` needs no other
+   change. A guest that builds a `record-in` itself, in a test say, adds the
+   field.
+3. Decide what `none` means for the workload and say it in its README.
+
+The rebuilt component is a new module. `felixd run` refuses a new module for a
+workload that has already written output, so submit it under a new id, as for
+any new code. In particular a deployment that already runs admission keeps its
+0.2 module, which records no requester, until module upgrades exist.
+
+Upgrade every node and the `felixd` CLI before submitting a 0.3 module or
+running the 0.3 admission. A felixd from this release on that meets a contract
+version it does not know leaves the module to an operator, as for a 0.1 module,
+and does not fail the workload; earlier builds fail it as poison. The examples show both versions: `admission` and the `faulty`
+fixture are built against 0.3, and `counter`, `window` and `scheduler` against
+0.2.
+
 ## 0.1 workloads
 
-The host refuses a component that does not export the 0.2 interfaces. It
-names what it found: a component with the 0.1 top-level `step`, `snapshot`,
-`restore` and `inspect` functions is reported as "built against
-felixd:workload@0.1.0, rebuild it against 0.2". `felixd run` refuses it
+The host refuses a component that exports neither the 0.3 nor the 0.2
+interfaces. It names what it found: a component with the 0.1 top-level `step`,
+`snapshot`, `restore` and `inspect` functions is reported as "built against
+felixd:workload@0.1.0, rebuild it against 0.3". `felixd run` refuses it
 before storing anything. An agent that finds one in a spec does not run
 the workload and does not mark it failed: it is a needs-operator condition,
 recorded once on the output stream (design.md, System records and errors),
@@ -413,8 +494,10 @@ build has no effect executors.
 
 - Module upgrades at a recorded input offset (#64's last item). Spec history
   is now records on `sys.specs` (#72); the upgrade itself is not built.
-- Typed spec and failure records (#73). The error classes here are the ones
-  #73 will record.
+- The system records defined in WIT (#73). They wait for the effect records,
+  which are not built. Until then they are defined once in `felixd-core`
+  ([records.md](records.md)), and the error classes here are the ones they
+  carry.
 
 ## Decisions
 
@@ -439,3 +522,11 @@ design.md fixes the outline. These are the choices this note adds:
 7. Snapshot compatibility is declared in an optional custom section, not in the
    WIT, so declaring it needs no new contract version and a module without it
    stays valid.
+8. The host serves 0.2 and 0.3 side by side, chosen by the exported interface
+   names, instead of ending 0.2. A workload that does not need the publisher
+   should not have to be rebuilt and resubmitted as new code.
+9. `publisher` is a field of `record-in` and not of `input`, because it
+   describes a record from a stream. A response to an effect request (#71) is
+   not published by anyone.
+10. The publisher of another workload's output is always `none`, so a
+    pipeline's downstream does not depend on which node wrote the record.

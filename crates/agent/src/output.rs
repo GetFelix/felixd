@@ -3,14 +3,15 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use felix_client::ConditionalWrite;
 use felixd_core::class;
-use felixd_core::output::{self, Reconciled, Record};
+use felixd_core::output::{self, Abi, Diverged, OutputHeader, Reconciled, Record};
 
 use crate::faults;
 use crate::felix::Felix;
 use crate::lease::Fence;
 use crate::metrics::WorkloadMetrics;
 use crate::runner::{
-    FailedOnStream, LostLease, NeedsOperator, NeedsOperatorOnStream, Superseded, poison,
+    Divergence, FailedOnStream, LostLease, NeedsOperator, NeedsOperatorOnStream, Superseded,
+    diverged, poison,
 };
 use crate::specs;
 
@@ -31,9 +32,12 @@ pub(crate) struct OutputLog<'a> {
     tail: u64,
     /// Counts this log's appends when metrics are on.
     pub(crate) metrics: Option<Arc<WorkloadMetrics>>,
+    /// The input offset of the snapshot this run restored, for a divergence.
+    pub(crate) snapshot: Option<u64>,
 }
 
-/// How [`record_failure`] or [`record_needs_operator`] ended.
+/// How [`record_failure`], [`record_needs_operator`], [`record_degraded`] or
+/// [`record_divergence`] ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Recorded {
     /// The failure record landed, or was already there: under this spec
@@ -45,6 +49,11 @@ pub(crate) enum Recorded {
     /// The needs-operator record landed, or one for the same spec record and
     /// reason was already there.
     NeedsOperator,
+    /// The degraded record landed, or one for the same spec record was
+    /// already last.
+    Degraded,
+    /// The divergence record landed, or the same one was already last.
+    Diverged,
     /// A later owner has written, so this node must not fail the workload.
     Superseded(u64),
 }
@@ -150,6 +159,122 @@ fn needs_operator_found(
     }
 }
 
+/// Appends a record at `epoch` saying the holder let go of spec record
+/// `spec` for being stuck on an error of `class`, fenced like
+/// [`record_failure`]. One already last for the same spec record is not
+/// written again. A failure last under `spec_version` or later ends the run
+/// instead, and so does a needs-operator record for `spec`: a degraded
+/// record after either would hide it from the nodes that read the last
+/// record.
+pub(crate) async fn record_degraded(
+    felix: &Felix,
+    stream: &str,
+    fence: &Fence,
+    epoch: u64,
+    (spec_version, spec): (u64, u64),
+    (class, detail): (class::ErrorClass, &str),
+) -> Result<Recorded> {
+    let record = output::encode_degraded(epoch, spec, class, fence.node(), detail);
+    append_last(
+        felix,
+        stream,
+        fence,
+        epoch,
+        record,
+        Recorded::Degraded,
+        |found| degraded_found(found, (spec_version, spec)),
+    )
+    .await
+}
+
+/// What [`record_degraded`] makes of `found`, the last record.
+fn degraded_found(found: &Record<'_>, (spec_version, spec): (u64, u64)) -> Option<Recorded> {
+    match found {
+        Record::Failure {
+            spec_version: found,
+            class,
+            reason,
+            ..
+        } if *found >= spec_version => Some(Recorded::Failed {
+            spec_version: *found,
+            failure: class::Failure {
+                class: *class,
+                detail: String::from_utf8_lossy(reason).into_owned(),
+            },
+        }),
+        found if found.needs_operator_under(spec).is_some() => Some(Recorded::NeedsOperator),
+        found => found.degraded_under(spec).map(|_| Recorded::Degraded),
+    }
+}
+
+/// Appends a record at `epoch` saying that this holder's replay of spec
+/// record `spec` differs from the stream at `found.header`, fenced like
+/// [`record_failure`]. The same finding already last is not written again.
+/// A failure last under `spec_version` or later ends the run instead, and so
+/// does a needs-operator record for `spec`.
+pub(crate) async fn record_divergence(
+    felix: &Felix,
+    stream: &str,
+    fence: &Fence,
+    (spec_version, spec): (u64, u64),
+    (found, detail): (&Divergence, &str),
+    abi: Abi<'_>,
+) -> Result<Recorded> {
+    let ours = Diverged {
+        spec,
+        header: found.header,
+        snapshot: found.snapshot,
+        node: fence.node().as_bytes(),
+        abi,
+        expected: found.expected.as_ref(),
+        actual: found.actual.as_ref(),
+        detail: detail.as_bytes(),
+    };
+    let record = output::encode_divergence(fence.epoch(), &ours);
+    append_last(
+        felix,
+        stream,
+        fence,
+        fence.epoch(),
+        record,
+        Recorded::Diverged,
+        |last| divergence_found(last, (spec_version, spec), &ours),
+    )
+    .await
+}
+
+/// What [`record_divergence`] makes of `last`, the last record: a failure
+/// under `spec_version` or later, or a needs-operator record for `spec`, is
+/// the outcome, and the same finding means it is already written.
+fn divergence_found(
+    last: &Record<'_>,
+    (spec_version, spec): (u64, u64),
+    ours: &Diverged<'_>,
+) -> Option<Recorded> {
+    match last {
+        Record::Failure {
+            spec_version: found,
+            class,
+            reason,
+            ..
+        } if *found >= spec_version => Some(Recorded::Failed {
+            spec_version: *found,
+            failure: class::Failure {
+                class: *class,
+                detail: String::from_utf8_lossy(reason).into_owned(),
+            },
+        }),
+        last if last.needs_operator_under(spec).is_some() => Some(Recorded::NeedsOperator),
+        last => last
+            .divergence_under(spec)
+            .filter(|found| {
+                (found.header, found.expected, found.actual)
+                    == (ours.header, ours.expected, ours.actual)
+            })
+            .map(|_| Recorded::Diverged),
+    }
+}
+
 /// Appends `record`, the last of this run, at the tail unless the last record
 /// there is from a later epoch or is what `already` recognises. Returns
 /// `ours` once it lands.
@@ -235,6 +360,7 @@ impl<'a> OutputLog<'a> {
             spec_record,
             tail,
             metrics: None,
+            snapshot: None,
         }
     }
 
@@ -529,6 +655,12 @@ impl<'a> OutputLog<'a> {
             .read_range(self.stream, self.tail, seen_tail)
             .await?;
         let found: Vec<&[u8]> = existing.iter().map(|r| r.payload.as_ref()).collect();
+        let differs = || {
+            format!(
+                "{} holds records at {}..{} that differ from this workload's output",
+                self.stream, self.tail, seen_tail
+            )
+        };
         match output::reconcile(self.fence.epoch(), batch, &found) {
             Reconciled::Skip(n) => {
                 batch.drain(..n);
@@ -560,12 +692,38 @@ impl<'a> OutputLog<'a> {
                 },
             }
             .into()),
-            Reconciled::Failed { .. } | Reconciled::Diverged => Err(poison(format!(
-                "{} holds records at {}..{} that differ from this workload's output",
-                self.stream, self.tail, seen_tail
-            ))),
+            Reconciled::Failed { .. } => Err(poison(differs())),
+            Reconciled::Diverged { found: held, ours } => Err(diverged(
+                differs(),
+                divergence_in(batch, &found, (held, ours), self.snapshot),
+            )),
         }
     }
+}
+
+/// Where `batch`, what this owner meant to write, and `existing`, what the
+/// stream holds there, disagree: at `existing[held]`, against `batch[ours]`.
+/// A record past the batch has no place in it, so it is named after the
+/// batch's last record, the last output compared, and digests nothing of ours.
+fn divergence_in(
+    batch: &[Vec<u8>],
+    existing: &[&[u8]],
+    (held, ours): (usize, Option<usize>),
+    snapshot: Option<u64>,
+) -> Divergence {
+    let placed = ours.and_then(|at| batch.get(at)).map(Vec::as_slice);
+    let named = placed.or_else(|| batch.last().map(Vec::as_slice));
+    let header = named
+        .and_then(|record| output::decode(record).ok())
+        .and_then(|record| record.written())
+        .map_or(
+            OutputHeader {
+                input_offset: 0,
+                index: 0,
+            },
+            |written| written.header,
+        );
+    Divergence::of(header, snapshot, (existing.get(held).copied(), placed))
 }
 
 #[cfg(test)]

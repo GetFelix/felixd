@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use connection::Connection;
 use felixd_agent::admission;
 use felixd_agent::agent::AgentConfig;
-use felixd_agent::check::check;
+use felixd_agent::check::{Origin, check};
 use felixd_agent::drain;
 use felixd_agent::felix::{Felix, Lookup};
 use felixd_agent::replay::{Target, diff, replay};
@@ -76,6 +76,19 @@ enum Command {
         /// left out.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         facts_every_ms: Option<u64>,
+        /// How long, in milliseconds, a workload this node holds may keep
+        /// failing on a transient error, with no progress in between, before
+        /// the node records it as degraded and releases the lease so another
+        /// node can try. At least the lease TTL. 60000, or the lease TTL if
+        /// that is longer, when left out. 0 turns it off: the node retries
+        /// for ever and writes no degraded record, which a rolling upgrade
+        /// from a build that predates the record needs.
+        #[arg(long)]
+        stuck_after_ms: Option<u64>,
+        /// How long, in milliseconds, this node leaves a workload alone after
+        /// releasing it as degraded, so another node gets a turn.
+        #[arg(long, default_value_t = felixd_agent::agent::DEFAULT_DEGRADED_BACKOFF.as_millis() as u64)]
+        degraded_backoff_ms: u64,
         /// Serve Prometheus metrics at `/metrics` on this address, such as
         /// 127.0.0.1:9464. Off when left out. Plain HTTP with no
         /// authentication: it names workloads and streams, so keep it on an
@@ -98,7 +111,8 @@ enum Command {
     },
     /// Check output streams: replay each workload's module over its input and
     /// report gaps, duplicates, records out of order, epoch regressions and
-    /// outputs that differ. Exits with 1 if anything is found.
+    /// outputs that differ. A workload that trims its history is checked from
+    /// the oldest snapshot it keeps. Exits with 1 if anything is found.
     Check {
         #[command(flatten)]
         connection: Connection,
@@ -114,6 +128,16 @@ enum Command {
         /// reads, up the whole pipeline. Stages are checked upstream first.
         #[arg(long)]
         upstream: bool,
+        /// Replay from the first input. This is the default; it fails once
+        /// Felix has deleted history the replay needs.
+        #[arg(long, conflicts_with = "from_snapshot")]
+        from_start: bool,
+        /// Start after the oldest snapshot the last trim record keeps. The
+        /// snapshot's state is taken as given, and outputs below its tail
+        /// are not compared. Used by default only when Felix has deleted
+        /// the head of the output stream.
+        #[arg(long)]
+        from_snapshot: bool,
     },
     /// Rebuild a workload's state as of an input offset or a time and print
     /// what its `inspect` returns, or with `--diff` compare the outputs a
@@ -211,6 +235,12 @@ enum Command {
         /// single broker.
         #[arg(long, default_value_t = felixd_agent::submit::DEFAULT_REPLICATION_FACTOR)]
         replication_factor: u32,
+        /// Let nodes delete history under `--keep-snapshots`: grants the node
+        /// role `stream.trim` on every stream of the namespace, which can
+        /// erase any of them for good. Without it nodes record what could be
+        /// deleted and delete nothing.
+        #[arg(long)]
+        grant_trim: bool,
         /// The admission workload, a WebAssembly component.
         module: PathBuf,
     },
@@ -287,6 +317,8 @@ async fn main() -> Result<()> {
             assignment_bound_ms,
             assignment_grace_ms,
             facts_every_ms,
+            stuck_after_ms,
+            degraded_backoff_ms,
             metrics_bind,
             metrics_max_workloads,
             admission_token_file,
@@ -294,13 +326,11 @@ async fn main() -> Result<()> {
             let admission_token = admission_token_file
                 .map(TokenSource::from_file)
                 .transpose()?;
+            let shutdown = shutdown_signal();
             let node_id = node_id.unwrap_or_else(default_node_id);
             if let Some(bind) = metrics_bind {
                 felixd_agent::metrics::start(bind, &node_id, metrics_max_workloads).await?;
             }
-            let shutdown = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
             let config = AgentConfig {
                 node_id,
                 lease: LeaseTiming {
@@ -316,6 +346,12 @@ async fn main() -> Result<()> {
                     3 * Duration::from_millis(lease_ttl_ms),
                     Duration::from_millis,
                 ),
+                stuck_after: stuck_after_ms.map_or(
+                    felixd_agent::agent::DEFAULT_STUCK_AFTER
+                        .max(Duration::from_millis(lease_ttl_ms)),
+                    Duration::from_millis,
+                ),
+                degraded_backoff: Duration::from_millis(degraded_backoff_ms),
                 admission_token,
             };
             felixd_agent::agent::run(&connection.settings()?, config, shutdown).await
@@ -325,13 +361,23 @@ async fn main() -> Result<()> {
             ids,
             complete,
             upstream,
+            from_start,
+            from_snapshot,
         } => {
-            let reports = check(&connection.settings()?, &ids, complete, upstream).await?;
+            let origin = match (from_start, from_snapshot) {
+                (true, _) => Origin::Start,
+                (_, true) => Origin::Snapshot,
+                _ => Origin::Auto,
+            };
+            let reports = check(&connection.settings()?, &ids, complete, upstream, origin).await?;
             let mut found = false;
             for report in &reports {
                 if report.findings.is_empty() {
+                    let after = report.from_snapshot.map_or(String::new(), |input| {
+                        format!(", checked after the snapshot of input {input}")
+                    });
                     println!(
-                        "{}: {} records, ok, from {}",
+                        "{}: {} records, ok, from {}{after}",
                         report.output,
                         report.records,
                         report.inputs.join(", ")
@@ -522,6 +568,7 @@ async fn main() -> Result<()> {
         Command::Init {
             connection,
             replication_factor,
+            grant_trim,
             module,
         } => {
             let bytes =
@@ -531,7 +578,7 @@ async fn main() -> Result<()> {
             felixd_agent::admin::refuse_legacy_streams(&settings).await?;
             let felix = Felix::connect(&settings).await?;
             felixd_agent::admin::ensure_namespace(&settings).await?;
-            felixd_agent::admin::ensure_grants(&settings).await?;
+            felixd_agent::admin::ensure_grants(&settings, grant_trim).await?;
             if let Lookup::Value(Some(found)) = felix
                 .cache_lookup(names::WORKLOADS, names::ADMISSION)
                 .await?
@@ -549,6 +596,38 @@ async fn main() -> Result<()> {
             println!("admission running module {hash}; felixd run now submits through it");
             Ok(())
         }
+    }
+}
+
+/// Resolves on Ctrl-C or, on Unix, SIGTERM, which is what `docker stop` and
+/// `systemctl stop` send. Either way the agent stops its workloads and
+/// releases their leases. The handlers are installed here, not when the
+/// future is first polled, so a signal during startup is not lost to the
+/// default action.
+#[cfg(unix)]
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut int = signal(SignalKind::interrupt());
+    let mut term = signal(SignalKind::terminate());
+    async move {
+        match (&mut int, &mut term) {
+            (Ok(int), Ok(term)) => {
+                tokio::select! {
+                    _ = int.recv() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            _ => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    async {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

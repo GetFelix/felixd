@@ -9,11 +9,12 @@ use felixd_core::check::Produced;
 use felixd_core::module::{self, ModuleInfo, SectionError, Unreadable};
 use felixd_core::names;
 use felixd_core::replay::{self, Divergence, Initial, Recorded, Start};
+use felixd_core::snapshot::SnapshotHeader;
 use felixd_core::spec::{Limits, WorkloadSpec};
 use felixd_runtime::{Runtime, Workload};
 
 use crate::check::{judged, module_bytes};
-use crate::felix::Felix;
+use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed};
 use crate::settings::Settings;
 use crate::snapshots::{self, Snapshot};
@@ -92,7 +93,8 @@ pub async fn replay(
             None::<()>
         },
     )
-    .await?;
+    .await
+    .map_err(|e| Trimmed::explained(e, "felixd replay"))?;
     let state = workload.inspect().context("inspect")?;
     Ok(Replayed {
         end,
@@ -128,11 +130,14 @@ pub async fn diff(
     let mut feed = Feed::new(&felix, id, &spec);
     let input_tail = felix.tail(feed.stream()).await?;
     let end = end_of(&felix, feed.stream(), to, input_tail).await?;
-    let recorded = Recorded::read(records.iter().map(|r| r.payload.as_ref()), from..end)
-        .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
+    let recorded = Recorded::read(
+        records.iter().map(|r| (r.offset, r.payload.as_ref())),
+        from..end,
+    )
+    .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
     let (mut workload, start) = start(&felix, id, &spec, module, from, from_start).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records).await?;
+    let (_, limits) = judged(&felix, id, &spec, &records, false).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
     let first = run_inputs(
@@ -156,7 +161,8 @@ pub async fn diff(
             found
         },
     )
-    .await?;
+    .await
+    .map_err(|e| Trimmed::explained(e, "felixd replay"))?;
     let mut found_all = first.into_iter().chain(found_all);
     Ok(Diffed {
         from,
@@ -225,13 +231,10 @@ async fn start(
     }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
-    let records = felix.read_range(&snap_stream, 0, snap_tail).await?;
-    let mut found = Vec::with_capacity(records.len());
-    for record in &records {
-        let snapshot = Snapshot::decode(&record.payload)
-            .map_err(|e| anyhow!("snapshot at {snap_stream}:{}: {e}", record.offset))?;
-        found.extend(snapshot);
-    }
+    // From the oldest snapshot Felix holds: `keep_snapshots` deletes the rest.
+    let (records, _) = felix.read_back(&snap_stream, 0, snap_tail).await?;
+    let found =
+        snapshots::restorable(&snap_stream, records.iter().map(|r| (r.offset, &r.payload)))?;
     let headers = found.iter().map(|s| s.taken().header);
     let Some(index) = replay::nearest_snapshot(headers, before) else {
         return Ok((workload, Start::Initial(Initial::NoSnapshot)));
@@ -240,9 +243,22 @@ async fn start(
     if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
         return Ok((workload, Start::Initial(Initial::Unreadable(why))));
     }
-    let snapshot = &found[index];
+    let header = restore(felix, &snap_stream, &found[index], &mut workload, swapped).await?;
+    Ok((workload, Start::Snapshot(header)))
+}
+
+/// Restores `snapshot`, read from `stream`, into `workload`, and returns its
+/// header. `swapped` says the workload runs another module than the one that
+/// took the snapshot, which changes what a failed restore is called.
+pub(crate) async fn restore(
+    felix: &Felix,
+    stream: &str,
+    snapshot: &Snapshot,
+    workload: &mut Workload,
+    swapped: bool,
+) -> Result<SnapshotHeader> {
     let header = snapshot.taken().header;
-    let chunks = snapshots::chunks(felix, &snap_stream, snapshot)
+    let chunks = snapshots::chunks(felix, stream, snapshot)
         .await
         .map_err(snapshots::ReadError::into_anyhow)?;
     let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_ref()).collect();
@@ -254,7 +270,7 @@ async fn start(
             anyhow!(e).context(format!("restore the snapshot of input {offset}"))
         }
     })?;
-    Ok((workload, Start::Snapshot(header)))
+    Ok(header)
 }
 
 /// The module a replay tries, as its hash and bytes. `module` is the hash of

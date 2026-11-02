@@ -50,8 +50,9 @@ Each twin turns one mechanism off, or drops one assumption, and must find the na
 Every configuration has two nodes.
 
 Distinct states and times are from TLC 1.7.4 with `-workers 4` on the CI runner (`ubuntu-latest`),
-where the whole script takes about 21 minutes. The trimming configurations (`FelixdTrim*`) run in their
-own job, `TLA_MODULE=FelixdTrimming`, so the rest keep their 30 minutes. Their times below are from a laptop and not yet
+where the whole script takes 21 to 30 minutes, depending on the runner, under the job's 45-minute limit.
+The trimming configurations (`FelixdTrim*`) run in their own job, `TLA_MODULE=FelixdTrimming`, so they
+do not count toward that limit. Their times below are from a laptop and not yet
 measured on the runner. A twin's count varies a little between runs,
 since TLC stops at the first violation a worker finds.
 
@@ -122,7 +123,8 @@ Paths are from the repository root, as of workload contract 0.2.
 | `OSend`, `OAck` | `OutputLog::append`, with the fence check before each write: `crates/agent/src/output.rs:393-436` |
 | `Reconcile` | `skip_written` and `output::reconcile`: `crates/agent/src/output.rs:438-489`, `crates/core/src/output.rs:520-569` |
 | `TrimStep` | `Runner::trim` after a snapshot, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
-| `DeleteSnaps`, `DeleteInputs` | not built: Felix has no call to delete below an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)). The model deletes what a trim record names, once the record has landed |
+| `DeleteSnaps` | `Steps::delete_trimmed` and `retention::trim_stream`, after the trim record has landed and again when a holder resumes: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`, `crates/core/src/trim.rs`. The model does not cover the trim record taking an offset on `.snap`, which the snapshot write then meets as a changed tail, nor a trim at another writer's tail (the code gives up there) |
+| `DeleteInputs` | not built: an input is deleted only below every reader's floor ([#150](https://github.com/GetFelix/felixd/issues/150)). The model deletes what a trim record names, once the record has landed |
 | `Continue`, `SnapSend` | the snapshot cadence and the `replaying` guard: `crates/agent/src/runner.rs:459-464`, `crates/core/src/resume.rs:82-85` |
 | `SSend`, `SAck`, `SRefused`, `SLost` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs:468-577`. `SSend` is the write that holds the manifest; chunk records written before it are inert until a manifest names them, so the model leaves them out |
 | `Sup` | `Outcome::Superseded` and the confirm: `crates/agent/src/agent.rs:814-832` |
@@ -342,7 +344,8 @@ append there first: comparing epochs alone, it steps the new record at the old o
 | `QuietStep` | a step whose input produces no output |
 | `SnapTake`, `SnapGiveUp`, `SnapLand` | `snapshot` and `write_snapshot`: `crates/agent/src/runner.rs` |
 | `TrimStep` | `Runner::trim`, with `trim::plan`: `crates/agent/src/runner.rs`, `crates/core/src/trim.rs` |
-| `DeleteMerge`, `DeleteInputs` | not built ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)) |
+| `DeleteMerge` | `Steps::delete_trimmed` and `retention::trim_stream`: `crates/agent/src/runner.rs`, `crates/agent/src/retention.rs`. The model does not cover the trim record taking a merge log offset, which the next merge append meets as a changed tail, nor a trim at another writer's tail |
+| `DeleteInputs` | not built ([#150](https://github.com/GetFelix/felixd/issues/150)) |
 | `Deliver`, `LoseAnswer`, `Timeout`, `DeliverPrefix` | `publish_if` landing late or not at all, and the `drop-*`, `lose-*-answer` and `append-prefix` test faults: `crates/agent/src/faults.rs` |
 | `Crash` | an agent killed, or `crash-after-merge` |
 | `Recreate` | the `epochs` cache recreated |
@@ -430,8 +433,9 @@ decisions; and the module check, reduced to whether the module is there.
 
 `felixd run --keep-snapshots K` makes a holder record a trim on `.out` after each snapshot of its
 own: the floors below which this workload's resume reads nothing ([design.md](design.md#retention)).
-Felix cannot delete below an offset yet, so the code deletes nothing. The models include the
-deletion that will follow, so the rules are checked before it exists.
+The holder then deletes `.snap` and the merge log up to those floors. Deleting inputs is not built
+yet ([#150](https://github.com/GetFelix/felixd/issues/150)), but the models include it, so the
+rules are checked before it exists.
 
 Both `Felixd.tla` and `FelixdMerge.tla` add three things:
 
@@ -528,3 +532,7 @@ composition.
   that comes with the code.
 - Trimming an input shared with other readers, which is deleted only below every reader's floor
   (#150). The models check one workload's floors.
+
+A degraded record is a fenced append that every reader passes over. It stops no node and
+raises no floor, and the release after it is a holder stopping and deleting its lease, which the
+models already cover as `Crash` followed at once by `Expire`. None has an action for it.

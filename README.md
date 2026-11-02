@@ -14,8 +14,8 @@ A node agent that runs programs across a cluster with
 > and ends with `felixd check`. `felixd replay`
 > rebuilds a workload as of any input offset or time, and `--diff` checks a
 > replay, or a new module, against the recorded outputs. Workloads implement
-> [contract 0.2](docs/contract.md): named and keyed outputs, rejections and
-> chunked snapshots. Pipelines, where one workload reads another's output,
+> [contract 0.3](docs/contract.md) (0.2 still runs): named and keyed outputs,
+> rejections, chunked snapshots and the authenticated publisher of each input. Pipelines, where one workload reads another's output,
 > survive failover at every stage. Operations so far: `felixd ps`, `felixd
 > drain`, Prometheus metrics, and an optional scheduler, itself a felixd
 > workload, whose assignments the nodes follow with first claim wins as the
@@ -119,7 +119,11 @@ whose output tail does not match their input offset, and exits with 1 if it
 finds any. `--id` limits it to one workload; `--complete` also
 reports outputs missing from the end of a stream, for when the workloads
 should have caught up. `--upstream` also checks the workloads a checked one
-reads from, up the pipeline. It writes nothing.
+reads from, up the pipeline. It replays from the first input; once Felix has
+deleted the head of an output stream it starts from the oldest snapshot the
+workload keeps (`--keep-snapshots`), which the output line says, and
+`--from-snapshot` asks for that earlier. A snapshot's state is taken as given.
+It writes nothing.
 
 If Felix refuses a create, `felixd run` stops and prints Felix's reason. The usual
 cause is a stream or cache with that name that was deleted earlier: Felix will not
@@ -138,7 +142,8 @@ felixd check --id second --upstream --complete
 ```
 
 A downstream gets only the records its upstream addresses to `out`, with
-their keys. Claims, failures, rejections and other names are passed over, so
+their keys. Claims, failures, needs-operator, trim, degraded and divergence
+records, rejections and other names are passed over, so
 a stage can fail over, even in the middle of a batch, without the next stage
 seeing anything but the same outputs in the same order.
 
@@ -204,11 +209,21 @@ inputs' append times on the broker, whichever comes first, so a slow input
 still gets snapshots and every node takes them at the same inputs. With
 `--keep-snapshots 3` the holder records, after each snapshot, what history
 before the oldest of the last three its resume no longer reads (a trim record
-on the output stream). Nothing is deleted until Felix can trim a stream
-at an offset ([Felix #1662](https://github.com/GetFelix/felix/issues/1662)).
-A workload is a Wasm component of [workload contract 0.2](docs/contract.md)
-(`wit/workload.wit`). Each step gets the input's stream, offset, append time,
-key and payload, and returns outputs, each with a name and an optional key, or
+on the output stream), which `felixd check --from-snapshot` starts from, and
+then deletes the snapshot stream and the merge log
+up to there, so a long-running workload stops growing them. Deleting needs the
+Felix fleet to have finalized `head_trim`, a one-way step, and a node token
+with `stream.trim`. That grant is off by default because it lets any node
+erase any stream in the namespace for good: run `felixd init --grant-trim` to
+turn it on, then mint the nodes new tokens. Without them the workload runs on,
+keeps its history, and the node logs a warning once. Inputs and the output
+stream are not deleted. [Retention](docs/design.md#retention) has the details,
+including what `felixd check` and `felixd replay` do afterwards.
+A workload is a Wasm component of [workload contract 0.3](docs/contract.md)
+(`wit/0.3/workload.wit`); components of 0.2 (`wit/0.2/workload.wit`) run too.
+Each step gets the input's stream, offset, append time, key, payload and, from
+0.3, the publisher: the identity the broker authenticated the write from, which
+is `none` unless the broker records publishers (see below). A step returns outputs, each with a name and an optional key, or
 rejects the input. A rejection is recorded on the output stream and the
 workload carries on. Snapshots are written in chunks, and a chunk the last
 snapshot already holds is not written again. `felixd run` refuses a component
@@ -233,8 +248,9 @@ while another took over can't fail it. Its class says whether it is poison or
 needs an operator.
 
 `felixd ps` shows where every workload is: its state (`running`, `waiting`
-for a holder, `needs-operator` with the reason, `failed` with the reason, or
-`stopped`), the node holding it and its epoch, the output stream's tail, and
+for a holder, `needs-operator` with the reason, `degraded` with the class and
+detail, `failed` with the reason and, if it failed on a replay that differed,
+where it diverged, or `stopped`), the node holding it and its epoch, the output stream's tail, and
 for each input the next offset it steps, the input's tail and the lag between
 them. A workload with several inputs gets a line per input, for how far each
 is merged, and one for its merge log. Below that it lists the nodes: up or
@@ -242,6 +258,98 @@ not, leases held, `--max-workloads`, version and whether draining. It reads
 everything from the caches and streams, so it shows the same on any machine,
 and it writes nothing. A workload's position comes from its last output or
 snapshot, so one that writes nothing for a while shows behind where it is.
+
+A workload shows `degraded` when the node holding it gave up on it. While a
+node holds a workload it retries errors from Felix, such as a stream it cannot
+read or write. If the retries keep failing for `--stuck-after-ms` (60 s by
+default, never less than the lease TTL) and no attempt got further, meaning it
+stepped no new input and appended no output, the node writes a `degraded`
+record with the error, deletes its lease and leaves the workload alone for
+`--degraded-backoff-ms` (120 s by default). Another node can then claim the
+workload, after its usual random `--claim-delay-ms`. While a scheduler runs and
+the workload is assigned to the node that gave up, the others first wait for
+that node for up to `--assignment-bound-ms` (15 s). Time a node spends running
+well does not count: an attempt that ran for a whole `--stuck-after-ms` before
+it failed starts the count again, so a quiet workload whose connection drops
+now and then is left alone. The spec stays `running`,
+so nothing has to be done for the workload to carry on. `ps` shows `degraded`,
+the node and the error until the next holder's claim record is written:
+
+```
+WORKLOAD  STATE     HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG
+counter   degraded  -       (7)    120      in     120   140   20
+counter: degraded (transient) on node-2: the input stream closed
+```
+
+If a workload keeps coming back as `degraded`:
+
+1. Read the line under the table. It names the node that gave up and the error.
+2. On that node, search its log for `stuck, recording it and releasing the
+   lease`. The line has the workload, the epoch and the node, and the
+   `retrying` warnings just before it show each error.
+3. A node that cannot reach Felix at all loses its leases first, at two thirds
+   of the lease TTL, so `degraded` usually points at the workload's own
+   streams or module rather than at the node. If it comes back on every node,
+   look there; `felixd check --id counter` reads them. Draining the node only
+   moves the problem. `felixd_degraded_total` in a node's metrics counts how
+   often it gave up.
+
+The limits belong to each node. To change them:
+
+```
+felixd agent --lease-ttl-ms 10000 --stuck-after-ms 30000 --degraded-backoff-ms 60000
+```
+
+An agent refuses to start if `--stuck-after-ms` is above 0 and below the lease
+TTL. `--stuck-after-ms 0` turns the bound off: the node retries for ever and
+writes no degraded record. Use it when upgrading from a build that predates
+the record, which cannot read it. An old node that claims a workload whose last
+record is a degraded one marks the workload `failed`. One that meets it as the
+first record of the stream never claims the workload and logs `could not read
+the output stream`. A workload reading that stream needs an operator. So start
+the new build with `--stuck-after-ms 0` on every node, and restart without it
+once no old node is left.
+
+A workload fails as `poison` with `replayed output differs from the record` or
+`records ... that differ from this workload's output` when a node replays its
+inputs and gets an output other than the one the stream holds. Either the
+stream was written by something else, or the workload is not deterministic, or
+the node's build runs the module differently from the one that wrote the
+stream. The node that finds it appends a `divergence` record just before the
+failure record, and `ps` prints it under the failure line:
+
+```
+WORKLOAD  STATE   HOLDER  EPOCH  OUTPUTS  INPUT  NEXT  TAIL  LAG
+counter   failed  -       (7)    54       in     41    60    19
+counter: failed (poison): replayed output differs from the record at offset 52 of the output stream
+counter: diverged at input 41 output 0 on node-2 at epoch 7: the stream holds sha256 7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed, the replay produced sha256 3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3, started from the snapshot of input 30, contract 0.2.0, wasmtime 50.0.0, felixd 0.1.0: replayed output differs from the record at offset 52 of the output stream
+```
+
+The line gives the input and output that differ, the node and epoch that found
+it, the sha256 of what the stream holds there and of what the node's replay
+produced, the snapshot the replay started from (or the initial state), and the
+build: the workload contract, wasmtime and felixd versions. Each digest covers
+the whole output as compared (name, key and payload, not the writer's epoch),
+so it is not the payload digest `felixd replay --diff` prints. To look into it:
+
+1. Run `felixd replay --id counter --diff` on your own machine. It replays the
+   same inputs and prints the first output that differs, and says which
+   divergence record the stream holds for it.
+2. If it finds nothing, your build replays the stream cleanly, so the node that
+   found it ran something different. Compare the build in the record with
+   yours: `felixd --version` and the VERSION column of `ps` give the felixd
+   version.
+3. If it finds the same input, the stream holds a record this module did not
+   write, perhaps an older version of it. `felixd replay --id counter --diff
+   --module <old>` finds out.
+
+The record is only written for a workload that is failing already. A build
+from before it reads it as an unknown kind: an old node that claims the
+workload after its spec is submitted again fails the new spec as poison, and
+an old `ps`, `check` or `replay` reports the stream unreadable, and a
+downstream workload run by an old node needs an operator. There is no
+switch, so finish a rolling upgrade before submitting a failed workload again.
+[docs/records.md](docs/records.md) has the layout.
 
 `felixd drain node-1` takes a node out of service without waiting out lease
 TTLs: the node stops each workload it holds and deletes the lease, so another
@@ -272,7 +380,16 @@ a drained node's workloads go where the scheduler moves them. See
 `felixd init admission.wasm` brings up admission, itself a felixd workload.
 From then on `felixd run` publishes a request on `sys.intake` and prints
 admission's decision, accepted or rejected with a reason code, and nodes run
-only specs admission accepted. Its decisions replay, so `felixd replay --id
+only specs admission accepted. Each decision records the requester, the
+principal the broker authenticated the request from, which admission reads from
+the record's publisher and never from the payload. That needs a broker that
+stores publishers: `FELIX_RECORD_PUBLISHERS=true` on a single broker, or the
+`publisher_principal` fleet feature finalized in a cluster
+(`POST /v1/fleet/features/publisher_principal/finalize`). Finalizing is
+one-way: records with a publisher are storage format v6, which older brokers
+refuse to open, so take a backup and read [Felix's upgrades page](https://docs.getfelix.dev/deployment/upgrades/) first. Without it admission
+fails closed and rejects every request as `no_requester`. The test stack and
+`deploy/compose.yaml` turn it on. Its decisions replay, so `felixd replay --id
 admission --diff --all --module <hash>` shows which past requests a new policy
 would decide otherwise. See [Submitting work](docs/design.md#submitting-work).
 
@@ -501,6 +618,7 @@ snapshot would take too long.
 | Snapshots | A durable stream per workload |
 | Replay to a time | `offset_for_time` and range reads |
 | What each node may write | RBAC grants on each node's token |
+| Who asked for a workload | The record's stored publisher (`FELIX_RECORD_PUBLISHERS`, or the `publisher_principal` fleet feature) |
 
 ## How it works
 
@@ -532,7 +650,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics and the upgrade check done |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check, deleting snapshots and the merge log, and a scale test done; deleting inputs open. A cluster carries hundreds of workloads, not thousands: [Scale](docs/design.md#scale) |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Operator docs done |
 
 ## Crates
@@ -553,6 +671,24 @@ and `felixd check` follow that log, so the order is the same everywhere.
 - [docs/operating.md](docs/operating.md): running a cluster: configuration, grants, sizing, what failover guarantees, upgrades
 - [docs/metrics.md](docs/metrics.md): the Prometheus metrics a node serves
 - [Felix docs](https://docs.getfelix.dev/)
+
+## Felix version
+
+The Felix release felixd builds on is in [`.felix-version`](.felix-version).
+When Felix publishes a release, a bot opens a "chore: use Felix <version>" PR
+that moves every pin listed in [`.github/felix-bump.sh`](.github/felix-bump.sh)
+and the lockfile.
+
+Every night a workflow ([`felix-nightly.yml`](.github/workflows/felix-nightly.yml))
+points felixd at the commit behind Felix's `nightly` tag and runs
+[`.github/felix-nightly.sh`](.github/felix-nightly.sh): it starts the test
+stacks from the `:nightly` Felix images and runs the integration tests against
+one broker and against three, then the failover check on the deploy stack. When
+a run on `main` fails it opens an issue labelled `felix-nightly`, and a green
+run closes it, so a Felix change that breaks felixd shows up before the next
+release. See the latest run with
+`gh run list -R GetFelix/felixd --workflow "Felix nightly" --limit 1`, or start
+one from the Actions tab.
 
 ## Contributing
 

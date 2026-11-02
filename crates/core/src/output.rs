@@ -23,6 +23,17 @@
 //! - Needs operator: `spec (8) | reason code (2) | detail`. No node can run
 //!   the spec record at `spec` until an operator acts. It is the last record
 //!   of that run, and an owner of that spec record that finds it stops.
+//! - Degraded: `spec (8) | class (1) | node length (1) | node | detail`. The
+//!   holder on `node` released the workload after it stayed stuck on an
+//!   error of that class while running the spec record at `spec`. It is an
+//!   observation: nothing stops, and any node may claim after it.
+//! - Divergence: `spec (8) | input_offset (8) | index (4) | snapshot flag (1)
+//!   | snapshot input offset (8) | expected length (1) | expected | actual
+//!   length (1) | actual | node, contract, wasmtime and felixd version, each
+//!   as `length (1) | text` | detail`. The owner's replay of the spec record at
+//!   `spec` produced an output that differs from what the stream holds at
+//!   that input and index. A digest is 32 bytes or absent. It is an
+//!   observation: the failure record that follows ends the run.
 //! - A rejection: `input_offset (8) | index (4, always 0) | code (4) |
 //!   detail`. It is that input's only output, and is matched, skipped and
 //!   compared like one.
@@ -46,13 +57,19 @@ const CLAIM_UNDER: u8 = 4;
 const CLASSED_FAILURE: u8 = 5;
 const NEEDS_OPERATOR: u8 = 6;
 const TRIM: u8 = 7;
+const DEGRADED: u8 = 8;
+const DIVERGENCE: u8 = 9;
+
+mod divergence;
+
+pub use divergence::{Abi, Diverged, compared_digest, encode_divergence};
 
 /// The name an output gets when the workload gives none, and the one a
 /// downstream workload reads unless its spec says otherwise.
 pub const DEFAULT_NAME: &str = "out";
 
 /// Where an output record came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OutputHeader {
     /// Offset of the input record whose step produced this output.
     pub input_offset: u64,
@@ -135,6 +152,20 @@ pub enum Record<'a> {
     /// longer read ([`crate::trim`]). It holds no output. `body` decodes with
     /// [`Record::trim`].
     Trim { epoch: u64, body: &'a [u8] },
+    /// The owner at `epoch`, on node `node`, released the workload because it
+    /// stayed stuck on an error of `class` while running spec record `spec`.
+    /// It holds no output, and no node is kept from claiming after it.
+    Degraded {
+        epoch: u64,
+        spec: u64,
+        class: ErrorClass,
+        node: &'a [u8],
+        detail: &'a [u8],
+    },
+    /// The owner at `epoch` replayed the inputs the stream already had
+    /// outputs for and got something else. It holds no output, and the
+    /// failure record that follows ends the run.
+    Divergence { epoch: u64, found: Diverged<'a> },
 }
 
 impl<'a> Record<'a> {
@@ -145,7 +176,9 @@ impl<'a> Record<'a> {
             Record::Claim { epoch, .. }
             | Record::Failure { epoch, .. }
             | Record::NeedsOperator { epoch, .. }
-            | Record::Trim { epoch, .. } => *epoch,
+            | Record::Trim { epoch, .. }
+            | Record::Degraded { epoch, .. }
+            | Record::Divergence { epoch, .. } => *epoch,
         }
     }
 
@@ -157,6 +190,17 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// The spec record a claim names, or a trim record carries as the
+    /// stream's first claim's. Either says what module and input the stream
+    /// was written under.
+    pub fn names_spec(&self) -> Option<u64> {
+        match self {
+            Record::Claim { spec, .. } => *spec,
+            Record::Trim { .. } => self.trim().and_then(|t| t.first_spec),
+            _ => None,
+        }
+    }
+
     /// The header of an output or a rejection, the records a step produces.
     pub fn written(&self) -> Option<Written> {
         match self {
@@ -164,7 +208,9 @@ impl<'a> Record<'a> {
             Record::Claim { .. }
             | Record::Failure { .. }
             | Record::NeedsOperator { .. }
-            | Record::Trim { .. } => None,
+            | Record::Trim { .. }
+            | Record::Degraded { .. }
+            | Record::Divergence { .. } => None,
         }
     }
 
@@ -180,14 +226,43 @@ impl<'a> Record<'a> {
         }
     }
 
-    /// The spec record a needs-operator record names. Such a record may be
-    /// written with no claim before it, so code that looks for the first
-    /// claim passes over it, and the highest spec claimed counts it.
+    /// The spec record a needs-operator record names. Its writer passed the
+    /// refusals a claimer does, so the highest spec claimed counts it.
     pub fn needs_operator_spec(&self) -> Option<u64> {
         match self {
             Record::NeedsOperator { spec, .. } => Some(*spec),
             _ => None,
         }
+    }
+
+    /// The class, if this records that the holder let go of spec record
+    /// `spec` for being stuck.
+    pub fn degraded_under(&self, spec: u64) -> Option<ErrorClass> {
+        match self {
+            Record::Degraded {
+                spec: found, class, ..
+            } if *found == spec => Some(*class),
+            _ => None,
+        }
+    }
+
+    /// What the record says, if it is a divergence record naming spec
+    /// record `spec`.
+    pub fn divergence_under(&self, spec: u64) -> Option<&Diverged<'a>> {
+        match self {
+            Record::Divergence { found, .. } if found.spec == spec => Some(found),
+            _ => None,
+        }
+    }
+
+    /// Whether code that looks for the first claim passes over the record:
+    /// a needs-operator record, or a degraded or divergence record, which
+    /// ran nothing the claim after it did not.
+    pub fn precedes_claims(&self) -> bool {
+        matches!(
+            self,
+            Record::NeedsOperator { .. } | Record::Degraded { .. } | Record::Divergence { .. }
+        )
     }
 
     /// The output, unless this is another kind of record.
@@ -314,6 +389,32 @@ pub fn encode_needs_operator(
     out
 }
 
+/// Builds the record a holder at `epoch` on `node` appends when it releases
+/// the workload for being stuck on an error of `class` under spec record
+/// `spec`. A node id past 255 bytes is cut there, at a character boundary.
+pub fn encode_degraded(
+    epoch: u64,
+    spec: u64,
+    class: ErrorClass,
+    node: &str,
+    detail: &str,
+) -> Vec<u8> {
+    let mut end = node.len().min(usize::from(u8::MAX));
+    while !node.is_char_boundary(end) {
+        end -= 1;
+    }
+    let node = &node[..end];
+    let mut out = Vec::with_capacity(20 + node.len() + detail.len());
+    out.extend([VERSION, DEGRADED]);
+    out.extend(epoch.to_be_bytes());
+    out.extend(spec.to_be_bytes());
+    out.push(class.code());
+    out.push(node.len() as u8);
+    out.extend(node.as_bytes());
+    out.extend(detail.as_bytes());
+    out
+}
+
 /// Builds the trim record an owner at `epoch` appends.
 pub fn encode_trim(epoch: u64, trim: &Trim) -> Vec<u8> {
     let mut out = vec![VERSION, TRIM];
@@ -372,6 +473,23 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
             spec: r.u64()?,
             reason: OperatorReason::from_code(u16::from_be_bytes(r.array()?))?,
             detail: r.rest(),
+        }),
+        DEGRADED => {
+            let spec = r.u64()?;
+            let class = ErrorClass::from_code(r.u8()?)?;
+            let node_len = r.u8()?;
+            let node = r.bytes(node_len.into())?;
+            Ok(Record::Degraded {
+                epoch,
+                spec,
+                class,
+                node,
+                detail: r.rest(),
+            })
+        }
+        DIVERGENCE => Ok(Record::Divergence {
+            epoch,
+            found: divergence::decode_body(&mut r)?,
         }),
         TRIM => {
             let body = r.rest();
@@ -442,7 +560,13 @@ fn kind_after(version: u8, r: &mut Reader<'_>) -> Result<u8, DecodeError> {
     if !matches!(kind, OUTPUT | CLAIM | FAILURE)
         && !(matches!(
             kind,
-            REJECTION | CLAIM_UNDER | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM
+            REJECTION
+                | CLAIM_UNDER
+                | CLASSED_FAILURE
+                | NEEDS_OPERATOR
+                | TRIM
+                | DEGRADED
+                | DIVERGENCE
         ) && version == VERSION)
     {
         return Err(DecodeError::UnknownKind(kind));
@@ -462,21 +586,60 @@ fn kind_of(record: &[u8]) -> Result<u8, DecodeError> {
     kind_after(version, &mut r)
 }
 
-/// Whether `record` is a claim, a failure, a needs-operator or a trim record, which
-/// no step produced, judged by its version and kind bytes only. The
-/// owner's own checks pass over them; rejections are not passed over, since
-/// they stand in for an input's outputs.
+/// Whether `record` is a claim, a failure, a needs-operator, a trim, a
+/// degraded or a divergence record, which no step produced, judged by its version and kind
+/// bytes only. The owner's own checks pass over them; rejections are not
+/// passed over, since they stand in for an input's outputs.
 pub fn is_marker(record: &[u8]) -> bool {
     matches!(
         kind_of(record),
-        Ok(CLAIM | CLAIM_UNDER | FAILURE | CLASSED_FAILURE | NEEDS_OPERATOR | TRIM)
+        Ok(CLAIM
+            | CLAIM_UNDER
+            | FAILURE
+            | CLASSED_FAILURE
+            | NEEDS_OPERATOR
+            | TRIM
+            | DEGRADED
+            | DIVERGENCE)
     )
 }
 
 /// The spec record a needs-operator record names, read from its header
 /// alone, so a record whose reason this build does not know still counts.
 pub fn needs_operator_spec_of(record: &[u8]) -> Option<u64> {
-    if kind_of(record).ok()? != NEEDS_OPERATOR {
+    spec_of(record, NEEDS_OPERATOR)
+}
+
+/// The spec record a degraded record names, read from its header alone, so
+/// a record whose class this build does not know still counts.
+pub fn degraded_spec_of(record: &[u8]) -> Option<u64> {
+    spec_of(record, DEGRADED)
+}
+
+/// The spec record a divergence record names, read from its header alone, so
+/// a record whose later fields this build cannot read still counts.
+pub fn divergence_spec_of(record: &[u8]) -> Option<u64> {
+    spec_of(record, DIVERGENCE)
+}
+
+/// The epoch and the output a divergence record names, read from its header
+/// alone, for a record whose later fields this build cannot read.
+pub fn divergence_position_of(record: &[u8]) -> Option<(u64, OutputHeader)> {
+    divergence_spec_of(record)?;
+    let mut r = Reader::new(record);
+    r.bytes(2).ok()?;
+    let epoch = r.u64().ok()?;
+    r.u64().ok()?;
+    let header = OutputHeader {
+        input_offset: r.u64().ok()?,
+        index: r.u32().ok()?,
+    };
+    Some((epoch, header))
+}
+
+/// The spec record, the first field after the epoch, of a record of `kind`.
+fn spec_of(record: &[u8], kind: u8) -> Option<u64> {
+    if kind_of(record).ok()? != kind {
         return None;
     }
     let mut r = Reader::new(record);
@@ -542,8 +705,10 @@ pub enum Reconciled {
     /// An earlier owner wrote past this batch. Resume from the streams again
     /// to skip what it wrote.
     Behind,
-    /// What is there is not this workload's output.
-    Diverged,
+    /// What is there is not this workload's output. `existing[found]` is the
+    /// first record that disagrees, and `batch[ours]` what this owner has
+    /// for its place, if it has one: a record past the batch has none.
+    Diverged { found: usize, ours: Option<usize> },
     /// A failure record is there, written under `spec_version`.
     Failed {
         spec_version: u64,
@@ -562,9 +727,17 @@ pub enum Reconciled {
 /// earlier epochs hold no output and are passed over.
 pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconciled {
     let mut found = Vec::with_capacity(existing.len());
-    for &record in existing {
+    for (at, &record) in existing.iter().enumerate() {
         let Ok(decoded) = decode(record) else {
-            return Reconciled::Diverged;
+            // It sits where the next output of the batch would go.
+            let before = found
+                .iter()
+                .filter(|(r, _): &&(Record<'_>, &[u8])| r.written().is_some())
+                .count();
+            return Reconciled::Diverged {
+                found: at,
+                ours: (before < batch.len()).then_some(before),
+            };
         };
         found.push((decoded, record));
     }
@@ -591,18 +764,22 @@ pub fn reconcile(epoch: u64, batch: &[Vec<u8>], existing: &[&[u8]]) -> Reconcile
     }) {
         return failed;
     }
-    let outputs: Vec<&[u8]> = found
+    let outputs: Vec<(usize, &[u8])> = found
         .iter()
-        .filter(|(r, _)| r.written().is_some())
-        .map(|&(_, record)| record)
+        .enumerate()
+        .filter(|(_, (r, _))| r.written().is_some())
+        .map(|(at, &(_, record))| (at, record))
         .collect();
     let compared = outputs.len().min(batch.len());
-    if !outputs[..compared]
+    if let Some((ours, &(at, _))) = outputs[..compared]
         .iter()
-        .zip(batch)
-        .all(|(found, ours)| same_output(found, ours))
+        .enumerate()
+        .find(|&(ours, &(_, found))| !same_output(found, &batch[ours]))
     {
-        return Reconciled::Diverged;
+        return Reconciled::Diverged {
+            found: at,
+            ours: Some(ours),
+        };
     }
     if outputs.len() > batch.len() {
         Reconciled::Behind
