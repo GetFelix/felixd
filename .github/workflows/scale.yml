@@ -19,12 +19,6 @@ on:
       timeout_minutes:
         description: Whole job timeout
         default: "300"
-  # Temporary, so the branch can be measured before it reaches main.
-  push:
-    branches: [feat/20-scale]
-    paths:
-      - .github/workflows/scale.yml
-      - crates/felixd/tests/scale.rs
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '300') }}
     env:
-      COUNTS: ${{ inputs.counts || '100,1000' }}
+      COUNTS: ${{ inputs.counts || '100,500,1000,10000' }}
       BUILD_SECS: ${{ inputs.build_secs || '1200' }}
       FAILOVER_SECS: ${{ inputs.failover_secs || '300' }}
       RUST_LOG: warn

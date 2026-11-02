@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Scale test (#20). The manually run `Scale` workflow starts three Felix brokers and three agents, creates N
+  workloads and reports create time, memory, and how long recovery takes when an agent and then a broker is
+  killed (`crates/felixd/tests/scale.rs`, `.github/workflows/scale.yml`; see CONTRIBUTING.md). The numbers
+  are in design.md under "Scale": hundreds of workloads work on Felix 0.6.2 and 0.7.0-preview.2, 1000 do not
+  settle on 0.7.0-preview.2, and creating streams and a broker failure are slow
+  ([felix#1760](https://github.com/GetFelix/felix/issues/1760),
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761),
+  [felix#1009](https://github.com/GetFelix/felix/issues/1009)).
 - Modules over 8 MiB (#21). A module over 8 MiB is stored in the `modules`
   cache as 4 MiB chunks under `<sha256>/<n>` with a JSON manifest under the
   module's own key, chunks first and manifest last. A module of 8 MiB or less,
