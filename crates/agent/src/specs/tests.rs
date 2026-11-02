@@ -229,6 +229,17 @@ async fn the_first_claim_says_what_the_stream_was_written_under() {
     assert_eq!(written(0, held).await, Some(4));
 }
 
+/// A degraded record can be written before any claim and ran nothing.
+#[tokio::test]
+async fn a_degraded_record_before_the_first_claim_names_nothing() {
+    use felixd_core::class::ErrorClass;
+    let degraded = output::encode_degraded(1, 9, ErrorClass::Transient, "node-a", "x");
+    let held = vec![degraded.clone(), output::encode_claim_under(1, 4, 4, "n")];
+    assert_eq!(written(0, held).await, Some(4));
+    let held = vec![degraded, output_at(40), trim_claiming(Some(7))];
+    assert_eq!(written(100, held).await, Some(0));
+}
+
 /// The head is gone and the oldest record kept is a trim record, which
 /// carries the first claim's spec.
 #[tokio::test]
