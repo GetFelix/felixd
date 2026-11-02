@@ -1,0 +1,13 @@
+diff --git a/crates/server/felix-replication/src/replica.rs b/crates/server/felix-replication/src/replica.rs
+index ebc5700d1..5576650e4 100644
+--- a/crates/server/felix-replication/src/replica.rs
++++ b/crates/server/felix-replication/src/replica.rs
+@@ -1636,7 +1636,7 @@ impl ReplicaHandler {
+         sender: Option<&str>,
+     ) -> Option<InternalMessage> {
+         use crate::confirmed::Confirmed;
+-        let confirmed = self.confirmed.as_ref()?;
++        let confirmed = self.confirmed.as_ref().filter(|_| false)?;
+         if crate::unclean::held(log) {
+             return None;
+         }
