@@ -30,16 +30,16 @@ pub async fn put(felix: &Felix, module: &[u8]) -> Result<String> {
         bail!(why);
     }
     let key = module::hash(module);
-    let layout = module::layout(module);
+    let parts = module::split(module);
     // A small value that is not WebAssembly would be stored but never read.
-    module::read_head(&key, &layout.head)?;
-    for (chunk_key, chunk) in &layout.chunks {
+    module::read_head(&key, &parts.head)?;
+    for (chunk_key, chunk) in &parts.chunks {
         felix
             .cache_put(names::MODULES, chunk_key, Bytes::copy_from_slice(chunk))
             .await?;
     }
     felix
-        .cache_put(names::MODULES, &key, Bytes::copy_from_slice(&layout.head))
+        .cache_put(names::MODULES, &key, Bytes::copy_from_slice(&parts.head))
         .await?;
     Ok(key)
 }

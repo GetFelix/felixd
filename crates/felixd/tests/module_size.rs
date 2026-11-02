@@ -178,9 +178,9 @@ async fn a_corrupt_or_missing_chunk_is_an_error_and_a_re_put_repairs_it() {
     // A manifest whose chunks were never written is missing them, not a panic.
     let lone = counter_of(CHUNK_BYTES + 4000);
     let lone_key = module::hash(&lone);
-    let layout = module::layout(&lone);
+    let parts = module::split(&lone);
     felix
-        .cache_put(names::MODULES, &lone_key, layout.head.to_vec().into())
+        .cache_put(names::MODULES, &lone_key, parts.head.to_vec().into())
         .await
         .unwrap();
     assert!(matches!(

@@ -17,7 +17,7 @@ binary depends on it.
 | `module_store` | `put` and `fetch` for the `modules` cache. A module over 4 MiB is stored as chunks and then a manifest; every reader of module bytes goes through `fetch`, which joins the chunks and checks each and the whole against the module's hash. |
 | `submit` | What `felixd run` does: stores the module in `modules`, creates the `wl.<id>.out` and `wl.<id>.snap` streams, and `wl.<id>.merge` for several inputs, appends the spec record to `sys.specs` and points `workloads` at it. |
 | `check` | What `felixd check` does: replays each workload and reports gaps, duplicates, records out of order, epoch regressions and outputs that differ, and checks a merge log against its inputs. |
-| `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. |
+| `replay` | What `felixd replay` does: `replay` rebuilds a workload's state as of an input offset or time, and `diff` compares a replay with the recorded outputs. Neither writes anything. Another module may replay the inputs, from the workload's snapshot if it declares it can read it. |
 | `ps` | What `felixd ps` does: each workload's state, holder, assignment and positions, and each node, read from the caches and streams. |
 | `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. Tokens are a `Secret`, which formats as a placeholder; `expose` is called only where a token is handed to Felix. |

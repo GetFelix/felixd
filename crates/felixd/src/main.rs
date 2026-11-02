@@ -142,14 +142,22 @@ enum Command {
         /// policy change decides otherwise.
         #[arg(long, requires = "diff")]
         all: bool,
-        /// The first input a diff compares.
+        /// The first input a diff compares. The diff also begins from the
+        /// nearest snapshot before it, so the default 0, which has none,
+        /// replays from the initial state.
         #[arg(long, default_value_t = 0, requires = "diff")]
         from: u64,
-        /// Run this module, the hash of one in the `modules` cache, over the
-        /// recorded inputs instead of the workload's own, from its initial
-        /// state. With `--diff` this checks an upgrade.
+        /// Run this module over the recorded inputs instead of the
+        /// workload's own: a component file, or the sha256 of one in the
+        /// `modules` cache. It starts from the workload's nearest snapshot if
+        /// it declares it can read that snapshot's layout, and from the
+        /// initial state if not. With `--diff` this checks an upgrade.
         #[arg(long)]
         module: Option<String>,
+        /// Start from the initial state even where a snapshot could be
+        /// restored, to run the whole history.
+        #[arg(long)]
+        from_start: bool,
     },
     /// Show each workload's state, holder, epoch, output stream tail and how
     /// far it is along each input, and each node: whether it is up, the
@@ -415,16 +423,15 @@ async fn main() -> Result<()> {
             to,
             diff: false,
             module,
+            from_start,
             ..
         } => {
             let to = to.context("--to is required without --diff")?;
-            let replayed = replay(&connection.settings()?, &id, to, module.as_deref()).await?;
-            let from = match replayed.restored {
-                Some(offset) => format!("the snapshot of input {offset}"),
-                None => "the initial state".to_owned(),
-            };
+            let settings = connection.settings()?;
+            let replayed = replay(&settings, &id, to, module.as_deref(), from_start).await?;
+            eprintln!("started from {}", replayed.start);
             eprintln!(
-                "from {from}, ran {} more of the inputs below {}",
+                "ran {} more of the inputs below {}",
                 replayed.steps, replayed.end
             );
             println!("{}", replayed.state);
@@ -437,10 +444,12 @@ async fn main() -> Result<()> {
             from,
             module,
             all,
+            from_start,
             ..
         } => {
             let settings = connection.settings()?;
-            let diffed = diff(&settings, &id, from, to, module.as_deref(), all).await?;
+            let diffed = diff(&settings, &id, from, to, module.as_deref(), all, from_start).await?;
+            eprintln!("started from {}", diffed.start);
             if let Some(divergence) = diffed.divergence {
                 println!("first divergence at {divergence}");
                 for divergence in diffed.more {
