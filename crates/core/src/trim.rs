@@ -130,11 +130,14 @@ impl Trim {
             .collect()
     }
 
-    /// Whether this record carries the first claim's spec, which is what lets
-    /// the head of `.out` go ([`crate::spec`] lineage). A stream whose first
-    /// claim named none keeps its head.
-    pub fn keeps_lineage(&self) -> bool {
-        self.first_spec.is_some()
+    /// Whether the holder of `workload` may delete the head of its `.out`
+    /// on this record. Not before the record carries the first claim's spec,
+    /// which is what tells a reader what the stream was written under once
+    /// the claim is gone. Not a system workload's: admission's decisions are
+    /// named by spec records for good, and the scheduler's output is read from
+    /// its latest table on.
+    pub fn cuts_output(&self, workload: &str) -> bool {
+        self.first_spec.is_some() && !names::is_system(workload)
     }
 }
 

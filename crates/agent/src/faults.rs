@@ -13,6 +13,9 @@
 //!   as if they were deleted. One that reaches the run aborts the process.
 //! - `skip-deletion=1`: write trim records but delete nothing, for a test
 //!   that reads a whole `.snap` or merge log.
+//! - `skip-shared-deletion=1`: delete `.snap`, the merge log and `sys.facts`
+//!   as usual but leave `.out` and the inputs, for a test that reads a whole
+//!   output or input stream.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
 //! - `crash-after-projection-sent=N`: abort once admission's projector has
@@ -217,6 +220,11 @@ pub(crate) fn enforce_trim_floors() -> bool {
 /// Whether to leave the history a trim record names where it is.
 pub(crate) fn skip_deletion() -> bool {
     fault("skip-deletion") == Some(1)
+}
+
+/// Whether to leave `.out` and the inputs shared with other workloads alone.
+pub(crate) fn skip_shared_deletion() -> bool {
+    fault("skip-shared-deletion") == Some(1)
 }
 
 /// Refuses workload `id`'s reads of `stream` below `floor` from now on.

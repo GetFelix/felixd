@@ -21,6 +21,8 @@
 //!   caller.
 //! - [`stuck`]: when a workload failing on transient errors counts as stuck.
 //! - [`snapshots`]: reads snapshots and their chunks back.
+//! - [`retention`]: deletes history below a trim record's floors.
+//! - [`readers`]: the workloads that read a stream, for deleting it.
 //! - [`admission`]: the gate a spec record passes before it runs, the
 //!   projector of admission's decisions, and requests on `sys.intake`.
 //! - [`specs`]: spec records on `sys.specs` and their projection into
@@ -46,6 +48,7 @@ mod input;
 mod lease;
 mod merge;
 mod output;
+mod readers;
 mod retention;
 mod runner;
 mod snapshots;

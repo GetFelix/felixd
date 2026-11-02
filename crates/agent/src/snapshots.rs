@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use felixd_core::snapshot::{self, Manifest, Record, Taken};
+use felixd_core::snapshot::{self, Manifest, Record, SnapshotHeader, Taken};
 use felixd_core::trim::Kept;
 
 use crate::felix::Felix;
@@ -140,6 +140,19 @@ pub(crate) async fn newest(
         window = window.saturating_mul(8);
     }
     Ok(found)
+}
+
+/// The header of the snapshot at `offset`, `None` if the record there is not
+/// one.
+pub(crate) async fn header_at(
+    felix: &Felix,
+    stream: &str,
+    offset: u64,
+) -> Result<Option<SnapshotHeader>> {
+    let found = felix.read_range(stream, offset, offset + 1).await?;
+    let record = found.first().filter(|r| r.offset == offset);
+    let snapshot = record.and_then(|r| Snapshot::decode(&r.payload).ok().flatten());
+    Ok(snapshot.map(|s| s.taken().header))
 }
 
 /// The snapshots among `records`, a read of the stream from the first offset

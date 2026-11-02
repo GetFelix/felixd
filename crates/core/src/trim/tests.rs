@@ -381,7 +381,19 @@ fn an_input_is_not_trimmed_twice_or_at_zero() {
 #[test]
 fn the_head_of_out_goes_only_when_the_record_carries_the_first_spec() {
     let mut trim = floors(1, 1);
-    assert!(!trim.keeps_lineage());
+    assert!(!trim.cuts_output("orders"));
     trim.first_spec = Some(0);
-    assert!(trim.keeps_lineage());
+    assert!(trim.cuts_output("orders"));
+}
+
+/// Admission's decisions are named by spec records for good, and the
+/// scheduler's output is read from its latest table on.
+#[test]
+fn the_output_of_a_system_workload_is_never_cut() {
+    let trim = Trim {
+        first_spec: Some(0),
+        ..floors(1, 1)
+    };
+    assert!(!trim.cuts_output(names::ADMISSION));
+    assert!(!trim.cuts_output(names::SCHEDULER));
 }

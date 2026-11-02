@@ -17,7 +17,11 @@ fn untrimmed(inputs: &[&str]) -> Known {
 
 #[test]
 fn a_shared_stream_is_deleted_below_the_lowest_floor() {
-    let workloads = [reads(&["in"], &[40]), reads(&["in"], &[12]), reads(&["in"], &[90])];
+    let workloads = [
+        reads(&["in"], &[40]),
+        reads(&["in"], &[12]),
+        reads(&["in"], &[90]),
+    ];
     assert_eq!(lowest_floor("in", &workloads), Some(12));
 }
 
