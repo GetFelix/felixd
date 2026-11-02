@@ -194,14 +194,18 @@ holds, wait on Felix ([#74](https://github.com/GetFelix/felixd/issues/74)).
 
 ## Sizing
 
-**Lease TTL.** A node renews every TTL/3 and stops its workloads two thirds of a TTL after its
-last successful renewal, before anyone else can claim. When a node dies, its workloads resume
+**Lease TTL.** A node renews every TTL/3 and pauses its workloads two thirds of a TTL after its
+last successful renewal, before anyone else can claim. A late renewal that is still applied
+resumes them (logged as "a late renewal landed, resuming"; frequent lines mean the TTL is too
+short for this cluster); a refused one stops them. When a node dies, its workloads resume
 elsewhere in about one TTL, plus up to `--claim-delay-ms` and the replay since the last snapshot. So:
 
 - A shorter TTL means faster failover and more renewal traffic. A renewal is a write to Felix
   per workload, three times per TTL.
 - A TTL that is too short for your broker's worst pause makes healthy nodes lose leases. Watch
-  `felixd_lease_handoffs_total{reason="lost"}`; it should stay at 0. A drain shows as
+  `felixd_lease_handoffs_total{reason="lost"}`; it should stay at 0. When leases do lapse, nodes
+  back off before claiming them again and slow their claims while renewals are slow, so a
+  cluster that is briefly overloaded recovers instead of re-claiming everything at once. A drain shows as
   `reason="drained"`.
 - Set the same value on every node. The compose files use 4000 for quick demonstrations. The
   default of 10000 is a safer start.

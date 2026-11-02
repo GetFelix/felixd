@@ -30,8 +30,14 @@ Behaviour that matters:
   previous lease as expired or deleted. The winner takes the next epoch, above every earlier
   claim's and every epoch already on the output stream, before it runs anything.
 - **Renew.** The holder renews every TTL/3. A refused renewal means the lease is gone and it stops
-  at once. A holder that cannot reach Felix stops by its own clock at two thirds of the TTL, before
-  another node can claim.
+  at once. A holder whose renewals are late pauses its writes by its own clock at two thirds of the
+  TTL, before another node can claim. It writes again only if a renewal it sent is then applied.
+  It gives up when a renewal is refused or fails after that point; one unanswered for a TTL counts
+  as failed.
+- **Under load.** A node makes at most 8 claims at once (the lease writes and the reads they need), and while its renewals are slow (one took
+  more than TTL/6) new claims wait up to TTL/3 for them to recover. After losing a workload it waits
+  before claiming it again: TTL/12 to TTL/6 at first, doubling with each loss in a row up to one TTL.
+  This keeps a slow cluster from tipping into a cycle of lapsed leases and mass re-claims.
 - **Spec records.** An agent runs a `workloads` value only when the `sys.specs` record it names
   says the same. It refuses a spec whose module or input differ from the one the output stream's
   first claim names, or whose record is below the last claim's floor (the highest spec record claimed so far, carried by every claim), before its lease claim

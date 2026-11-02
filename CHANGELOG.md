@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Agents degrade under load instead of tipping into lease churn (GetFelix/felix#1760). On a slow
+  cluster, leases lapsed together, every agent claimed them back at once, and the claims slowed
+  renewals further until nothing settled. Now a holder whose renewal is late pauses its writes at
+  two thirds of the TTL and carries on if that renewal is applied, instead of dropping the
+  workload. A renewal unanswered for a TTL counts as failed. A node makes at most 8 claims at
+  once, holds new claims back for up to TTL/3 while its renewals are slow, and waits before
+  claiming a workload it lost again (TTL/12 to TTL/6, doubling per loss in a row up to one TTL).
+  Lease and epoch rules are unchanged; these only delay claims and writes.
 - Fewer control plane requests per `felixd run` (GetFelix/felix#1760). Since the read back
   after a 409 (#149), each submit sent about nine extra requests to the control plane. A 409
   that says the stream or cache already exists is no longer read back; any other 409 still

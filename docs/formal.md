@@ -135,8 +135,8 @@ Paths are from the repository root, as of workload contract 0.2.
 | `Park` | the lease released and the task left waiting for a spec change: `own`, `Ended::NeedsOperator`. A needs-operator record found by `check_found` (`crates/agent/src/output.rs:345`) or before the claim (`recorded_needs_operator`: `crates/agent/src/agent.rs:573`) leads here |
 | `Derive` | `write_failed`: `crates/agent/src/agent.rs:1053-1089`; after a record found by `check_found` or `reconcile`, `Outcome::FailedOnStream`: `crates/agent/src/agent.rs:803-813` |
 | `WriteFail` | the spec written straight after the confirm, as before #70; only with `FailRecord` off |
-| `Renew` | `hold` and `renew`: `crates/agent/src/lease.rs:276-356` |
-| `LocalDeadline`, `StopLocal` | `Fence::holds` and the 2/3 TTL stop: `crates/agent/src/lease.rs:125-159`, `crates/core/src/lease.rs:87-93` |
+| `Renew` | `hold` and `renew` in `crates/agent/src/lease.rs` |
+| `LocalDeadline`, `StopLocal` | `Fence::holds`, `Fence::held` and the 2/3 TTL pause in `crates/agent/src/lease.rs`; `stop_after` in `crates/core/src/lease.rs`. `StopLocal` is the renewals ending, which ends the run |
 | `ClockFault` | a suspend (the monotonic clock stops) or the `leases` leader's clock jumping: design.md, Leases and failure detection |
 | `Expire` | the broker's TTL expiry (Felix `docs/cache-on-log.md`, TTL) |
 | `Deliver`, `Timeout` | `publish_if` landing at any later time, and an answer that never comes; the `drop-*` and `lose-*-answer` test faults: `crates/agent/src/faults.rs` |
@@ -495,7 +495,12 @@ composition.
 
 ## Not modelled
 
-- Lost answers to cache calls, and the renewal read-back (`crates/agent/src/lease.rs:341-355`).
+- Lost answers to cache calls, and the renewal read-back (`renew` in `crates/agent/src/lease.rs`).
+- A paused holder resuming. A holder past its deadline pauses its writes, and resumes only when a
+  renewal at the held version is applied, which means the lease never lapsed and no other node
+  can have claimed. That run is the model's run with no `LocalDeadline`, the holder taking no
+  steps for a while, so it adds no behaviour.
+- The claim limits and the backoff after a lost lease, which only delay claims.
 - Cache reads after a cache leader change (Felix leaves them undefined), and `Leader` caches that
   lose acknowledged writes on failover.
 - Spec versions: every failure record is taken to be for the spec that runs. The code passes

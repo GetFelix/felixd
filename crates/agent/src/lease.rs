@@ -3,9 +3,11 @@
 //! A claim is a `cache_put_if` on "absent", so it succeeds only once the
 //! broker itself counts the previous lease as expired or deleted. The holder
 //! renews every TTL/3 at the version it last wrote. A refused renewal is
-//! evidence that the lease is gone, and the holder stops at once. A holder that
-//! cannot reach Felix stops by its own clock at 2/3 of the TTL, before any
-//! other node can claim.
+//! evidence that the lease is gone, and the holder stops at once. A holder
+//! whose renewals are late pauses its writes by its own clock at 2/3 of the
+//! TTL, before any other node can claim. It writes again only once a renewal
+//! it sent is applied, which proves the lease never lapsed, and gives up when
+//! one is refused or none is answered in time.
 //!
 //! A claim that wins then takes the next epoch from the `epochs` cache with
 //! `cache_put_if`, and writes it into the lease before it runs anything.
@@ -164,6 +166,64 @@ impl Fence {
     pub(crate) fn holds(&self) -> bool {
         Instant::now() < *self.deadline.borrow()
     }
+
+    /// Whether this node may write, waiting while a late renewal is still
+    /// under way. A renewal applied at the held version proves no other node
+    /// could claim in between, so writing again after it is safe. `false`
+    /// once the renewals have stopped: the lease is lost.
+    ///
+    /// Giving up at the first lapse instead would turn every slow renewal
+    /// into a lost workload, a claim and a replay, which is more load on a
+    /// cluster that is already slow.
+    pub(crate) async fn held(&self) -> bool {
+        let mut deadline = self.deadline.clone();
+        loop {
+            if Instant::now() < *deadline.borrow_and_update() {
+                return true;
+            }
+            if deadline.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+}
+
+/// How this node's renewals are doing, shared by all its holders. While they
+/// are slow, new claims wait: a claim is several writes and starts a
+/// workload, and taking on more work then would slow every renewal further.
+#[derive(Debug, Default)]
+pub(crate) struct Strain {
+    slow_until: std::sync::Mutex<Option<Instant>>,
+}
+
+impl Strain {
+    /// Records a renewal that took `took`. One that used more than half the
+    /// time a renewal has before the holder pauses marks the node strained
+    /// for one renewal interval.
+    pub(crate) fn note(&self, took: Duration, timing: LeaseTiming) {
+        if took <= timing.renew_after() / 2 {
+            return;
+        }
+        let until = Instant::now() + timing.renew_after();
+        let mut slow = self.slow_until.lock().unwrap_or_else(|e| e.into_inner());
+        *slow = Some(slow.map_or(until, |at| at.max(until)));
+    }
+
+    /// Waits until no renewal has been slow for a renewal interval, but at
+    /// most `within`, so a node on a cluster that stays slow still claims,
+    /// only more slowly.
+    pub(crate) async fn calm(&self, within: Duration) {
+        let give_up = Instant::now() + within;
+        loop {
+            let until = *self.slow_until.lock().unwrap_or_else(|e| e.into_inner());
+            match until {
+                Some(until) if until > Instant::now() && Instant::now() < give_up => {
+                    tokio::time::sleep_until(until.min(give_up)).await;
+                }
+                _ => return,
+            }
+        }
+    }
 }
 
 /// Why a holder stopped holding.
@@ -255,6 +315,34 @@ async fn take_epoch<S: LeaseStore>(
     })
 }
 
+/// How many TTLs a workload must be held for before losing it again counts
+/// as a first loss.
+const LOSSES_FORGOTTEN_AFTER_TTLS: u32 = 6;
+
+/// The times in a row a node lost a workload or failed to claim it, which
+/// sets how long it backs off before the next claim.
+#[derive(Debug, Default)]
+pub(crate) struct Losses {
+    count: u32,
+}
+
+impl Losses {
+    /// A won claim that was held for `held_for`, however it ended. A long
+    /// hold starts the count again.
+    pub(crate) fn held(&mut self, held_for: Duration, timing: LeaseTiming) {
+        if held_for >= timing.ttl * LOSSES_FORGOTTEN_AFTER_TTLS {
+            self.count = 0;
+        }
+    }
+
+    /// Counts one more loss and returns how long to wait before claiming
+    /// again; see [`LeaseTiming::after_loss`].
+    pub(crate) fn lost(&mut self, timing: LeaseTiming, random: f64) -> Duration {
+        self.count = self.count.saturating_add(1);
+        timing.after_loss(self.count, random)
+    }
+}
+
 /// Asks the renewal task for a renewal now. See [`Confirmer::confirm`].
 pub(crate) type Asks = mpsc::Receiver<oneshot::Sender<()>>;
 
@@ -278,13 +366,15 @@ impl Confirmer {
 }
 
 /// Renews `held` until it is lost, moving `deadline` forward after each
-/// renewal. A request on `asks` renews at once and is answered only if that
-/// renewal is applied. Runs until it returns or is dropped.
+/// renewal and telling `strain` how long each took. A request on `asks`
+/// renews at once and is answered only if that renewal is applied. Runs until
+/// it returns or is dropped.
 pub(crate) async fn hold<S: LeaseStore>(
     store: &S,
     held: &mut Held,
     deadline: &watch::Sender<Instant>,
     asks: &mut Asks,
+    strain: &Strain,
 ) -> Lost {
     loop {
         let asked = tokio::select! {
@@ -292,8 +382,19 @@ pub(crate) async fn hold<S: LeaseStore>(
             Some(reply) = asks.recv() => Some(reply),
         };
         loop {
-            match renew(store, held).await {
+            // A renewal unanswered for a TTL counts as failed. That is past
+            // the deadline, so the holder gives up instead of waiting on it.
+            let started = Instant::now();
+            let paused_at = held.deadline();
+            let renewed = tokio::time::timeout(held.timing.ttl, renew(store, held))
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("no answer to the renewal in time")));
+            strain.note(started.elapsed(), held.timing);
+            match renewed {
                 Ok(true) => {
+                    if Instant::now() >= paused_at {
+                        tracing::info!(workload = %held.workload, late = ?(Instant::now() - paused_at), "a late renewal landed, resuming");
+                    }
                     let _ = deadline.send(held.deadline());
                     if let Some(reply) = asked {
                         let _ = reply.send(());
