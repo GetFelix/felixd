@@ -11,9 +11,18 @@ single=tests/felix/compose.yaml
 cluster=tests/felix/cluster.yaml
 deploy=deploy/compose.yaml
 
+# Every Felix image in the stacks takes its tag from FELIX_VERSION. A hardcoded
+# tag would run the pinned release and pass.
+for f in "$single" "$cluster" "$deploy"; do
+  if docker compose --profile '*' -f "$f" config --images | grep 'ghcr\.io/getfelix/felix-' | grep -qv ":${FELIX_VERSION}\$"; then
+    echo "$f has a Felix image that is not on the $FELIX_VERSION tag" >&2
+    exit 1
+  fi
+done
+
 logs() {
   [ $? -eq 0 ] || for f in "$single" "$cluster" "$deploy"; do
-    docker compose -f "$f" logs --no-color || true
+    docker compose --profile '*' -f "$f" logs --no-color || true
   done
 }
 trap logs EXIT
