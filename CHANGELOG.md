@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The scale test measures failover without waiting on its own harness. It scanned every output stream
+  in one pass with the whole phase as its budget, so one stuck read made `leaders_moved_secs` and
+  `without_output` measure the harness. Now a scan round takes at most 10 s, each read at most 3 s,
+  and the leaders are checked every round. The 300 s phase limit still bounds the whole wait.
 - A value over Felix's frame limit fails with a clear error (#196). A 20 MiB cache value used to fail
   as `write frame payload: sending stopped by peer` and a reconnect. felixd now measures cache puts
   and publishes before sending and returns `TooLarge`, naming the key or stream, the size and the
