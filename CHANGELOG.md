@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A value over Felix's frame limit fails with a clear error (#196). A 20 MiB cache value used to fail
+  as `write frame payload: sending stopped by peer` and a reconnect. felixd now measures cache puts
+  and publishes before sending and returns `TooLarge`, naming the key or stream, the size and the
+  most Felix takes (about 12 MiB for a cache value, which travels as base64). An output append that
+  gets it marks the workload failed. Felix is unchanged.
 - Agents degrade under load instead of tipping into lease churn (GetFelix/felix#1760). On a slow
   cluster, leases lapsed together, every agent claimed them back at once, and the claims slowed
   renewals further until nothing settled. Now a holder whose renewal is late pauses its writes at

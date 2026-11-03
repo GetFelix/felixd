@@ -2,6 +2,10 @@
 //! and checked when read, and runs like any other. A corrupt or missing chunk
 //! is an error and a re-put repairs it.
 //!
+//! A value over Felix's frame limit is refused before it is sent, with an
+//! error that names the key and the limit (#196), where Felix alone would
+//! drop the connection.
+//!
 //! `measure_cache_values` prints how long Felix takes over cache values of
 //! several sizes and is skipped unless `FELIXD_MEASURE_MODULES` is set; run it
 //! with `--nocapture`. Needs a Felix broker; see `common`.
@@ -13,7 +17,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use common::{ID, INPUT, OUTPUT, SNAPSHOTS, assert_uninterrupted, replication_factor, test_felix};
 use felixd_agent::admin::{StreamKind, ensure_cache, ensure_stream};
-use felixd_agent::felix::Lookup;
+use felixd_agent::felix::{Lookup, TooLarge};
 use felixd_agent::module_store::{self, Fetched};
 use felixd_core::class::OperatorReason;
 use felixd_core::module::{self, CHUNK_BYTES, Corrupt};
@@ -78,6 +82,36 @@ async fn measure_cache_values() {
             Err(error) => println!("MEASURE {mib} MiB put {put_took:?} get failed: {error:#}"),
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_over_the_frame_limit_is_refused_before_it_is_sent() {
+    let Some(t) = test_felix().await else { return };
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    ensure_cache(&t.settings, "toolarge", kind).await.unwrap();
+    let error = t
+        .felix
+        .cache_put("toolarge", "big", noise(20 * MIB, 7))
+        .await
+        .unwrap_err();
+    let refused = error.downcast_ref::<TooLarge>().expect("a typed refusal");
+    let message = error.to_string();
+    assert!(
+        message.contains("`big`") && message.contains("`toolarge`"),
+        "{message}"
+    );
+    assert!(message.contains(&refused.limit().to_string()), "{message}");
+    // Nothing was sent, so the connection carries on.
+    let small = noise(MIB, 8);
+    t.felix
+        .cache_put("toolarge", "small", small.clone())
+        .await
+        .unwrap();
+    let got = t.felix.cache_get("toolarge", "small").await.unwrap();
+    assert_eq!(got, Some(small));
+    assert_eq!(t.felix.cache_get("toolarge", "big").await.unwrap(), None);
 }
 
 /// The `modules` cache; `felixd run` creates it, but a test that stores a

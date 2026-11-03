@@ -16,6 +16,11 @@ use felixd_core::names;
 
 use crate::settings::Settings;
 
+mod limit;
+
+pub use limit::TooLarge;
+use limit::Wire;
+
 /// Reads of a stream page by page stay this small so one reply stays small.
 const PAGE_RECORDS: u32 = 256;
 
@@ -31,6 +36,10 @@ pub struct Felix {
     client: Arc<Client>,
     tenant: String,
     namespace: String,
+    /// The largest frame the client reads, which is what Felix's brokers
+    /// accept by default. A value that would not fit is refused before it is
+    /// sent; see [`limit`].
+    frame_bytes: usize,
 }
 
 pub use felix_client::{ClusterSubscription as Subscription, Event};
@@ -65,6 +74,7 @@ impl Felix {
             publishers: true,
             ..ClientConfig::optimized_defaults(quinn)
         };
+        let frame_bytes = config.max_frame_bytes;
         let client = Client::connect_seeds(
             &settings.brokers,
             &settings.server_name,
@@ -77,7 +87,34 @@ impl Felix {
             client: Arc::new(client),
             tenant: settings.tenant.clone(),
             namespace: settings.namespace.clone(),
+            frame_bytes,
         })
+    }
+
+    /// Fails with [`TooLarge`] if `payloads` would not fit in one request.
+    fn fits(
+        &self,
+        wire: Wire,
+        namespace: &str,
+        target: &str,
+        key: &str,
+        payloads: impl IntoIterator<Item = usize>,
+        what: impl FnOnce() -> String,
+    ) -> Result<()> {
+        let names = self.tenant.len() + namespace.len() + target.len() + key.len();
+        limit::check(self.frame_bytes, wire, names, payloads, what)?;
+        Ok(())
+    }
+
+    fn cache_value_fits(&self, cache: &str, key: &str, value: &Bytes) -> Result<()> {
+        self.fits(
+            Wire::Json,
+            &self.namespace,
+            cache,
+            key,
+            [value.len()],
+            || format!("the value for key `{key}` in cache `{cache}`"),
+        )
     }
 
     pub async fn cache_get(&self, cache: &str, key: &str) -> Result<Option<Bytes>> {
@@ -89,6 +126,7 @@ impl Felix {
     }
 
     pub async fn cache_put(&self, cache: &str, key: &str, value: Bytes) -> Result<()> {
+        self.cache_value_fits(cache, key, &value)?;
         until_ready(|| {
             self.client.cache_put(
                 &self.tenant,
@@ -110,6 +148,7 @@ impl Felix {
         value: Bytes,
         ttl_ms: u64,
     ) -> Result<()> {
+        self.cache_value_fits(cache, key, &value)?;
         until_ready(|| {
             self.client.cache_put(
                 &self.tenant,
@@ -158,6 +197,7 @@ impl Felix {
         ttl_ms: Option<u64>,
         condition: CacheCondition,
     ) -> Result<CacheConditionResult> {
+        self.cache_value_fits(cache, key, &value)?;
         self.client
             .cache_put_if(
                 &self.tenant,
@@ -191,8 +231,19 @@ impl Felix {
     }
 
     /// Publishes one record and waits until it is acknowledged.
+    ///
+    /// Sized as a raw binary frame. A broker without binary acks takes JSON,
+    /// which is a third larger, so there the broker's refusal can still come.
     pub async fn publish(&self, stream: &str, payload: Vec<u8>) -> Result<()> {
         let namespace = self.namespace_of(stream);
+        self.fits(
+            Wire::Binary,
+            &namespace,
+            stream,
+            "",
+            [payload.len()],
+            || format!("the record for stream `{stream}`"),
+        )?;
         until_ready(|| {
             self.client.publish(
                 &self.tenant,
@@ -213,15 +264,20 @@ impl Felix {
         payloads: Vec<Vec<u8>>,
         expected: u64,
     ) -> Result<ConditionalWrite> {
+        let namespace = self.namespace_of(stream);
+        self.fits(
+            Wire::Json,
+            &namespace,
+            stream,
+            "",
+            payloads.iter().map(Vec::len),
+            || match payloads.len() {
+                1 => format!("the record for stream `{stream}`"),
+                n => format!("a batch of {n} records for stream `{stream}`"),
+            },
+        )?;
         self.client
-            .publish_if(
-                &self.tenant,
-                &self.namespace_of(stream),
-                stream,
-                None,
-                payloads,
-                expected,
-            )
+            .publish_if(&self.tenant, &namespace, stream, None, payloads, expected)
             .await
     }
 

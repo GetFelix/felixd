@@ -231,6 +231,22 @@ tokens ([design.md](design.md#retention)). Finalizing `head_trim` is a one-way s
 **Modules.** A module can be up to 64 MiB; one over 8 MiB is stored in chunks
 ([design.md](design.md#modules)).
 
+**Request size.** Felix refuses a frame over 16 MiB by default. A cache value is sent as base64, so
+one over about 12 MiB does not fit, and neither does a conditional publish that big. felixd checks
+the size before it sends and fails with a message such as this one (the limit depends on the
+length of the tenant, namespace, cache and key):
+
+```
+the value for key `k` in cache `c` is 20971520 bytes, over the 12582132 bytes Felix takes in one
+request (its 16777216-byte frame limit, less encoding)
+```
+
+Without the check, Felix drops the connection and the failure looks like a broker going away.
+felixd's own writes are capped at 8 MiB, so you meet this error only with a smaller frame limit or
+from another caller. A workload output append that gets it marks the workload failed with this
+message. felixd takes the limit from its Felix client, which defaults to Felix's own; a broker
+started with a smaller `FELIX_MAX_FRAME_BYTES` still refuses requests the client thinks fit.
+
 ## What failover and replay guarantee
 
 When a node dies or is drained, another claims its workloads and carries on:
