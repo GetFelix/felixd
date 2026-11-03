@@ -332,6 +332,9 @@ async fn assignments(t: &TestFelix) -> Result<Vec<Value>> {
     let token = std::fs::read_to_string(file)?.trim().to_owned();
     let body: Value = tokio::task::spawn_blocking(move || -> Result<Value> {
         let mut response = ureq::get(&url)
+            .config()
+            .timeout_global(Some(PROBE))
+            .build()
             .header("Authorization", &format!("Bearer {token}"))
             .call()?;
         Ok(response.body_mut().read_json()?)
@@ -566,26 +569,31 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    /// Whether no shard is led by `old` any more. Reconnects once that is so,
-    /// since the old connection may still point at the dead broker.
-    async fn leaders_moved(&mut self, old: &str, deadline: Instant) -> bool {
+    /// Whether no shard is led by `old` any more.
+    async fn leaders_moved(&self, old: &str, deadline: Instant) -> bool {
         let Some(Ok(items)) = bounded(PROBE, deadline, assignments(self.t)).await else {
             return false;
         };
-        if items.iter().any(|item| item["leader"] == old) {
-            return false;
-        }
+        items.iter().all(|item| item["leader"] != old)
+    }
+
+    /// Opens a new connection, since the old one may still point at a dead
+    /// broker. Not capped by the phase deadline: the next phase needs it.
+    async fn reconnect(&mut self) -> bool {
         let connect = Felix::connect(&self.t.settings);
-        if let Some(Ok(felix)) = bounded(PROBE, deadline, connect).await {
-            self.felix = Arc::new(felix);
+        match tokio::time::timeout(PROBE, connect).await {
+            Ok(Ok(felix)) => {
+                self.felix = Arc::new(felix);
+                true
+            }
+            _ => false,
         }
-        true
     }
 
     /// Waits until every workload has an output for `target`, and notes when
     /// every lease is held by a live node and, if given, when no shard is led
-    /// by `old_broker`. Each round checks the leaders, then scans the outputs
-    /// for at most `SCAN_ROUND`, all inside the phase.
+    /// by `old_broker`. Each round scans the outputs for at most `SCAN_ROUND`
+    /// and checks the leaders at the same time, all inside the phase.
     async fn recovery(
         &mut self,
         started: Instant,
@@ -594,19 +602,26 @@ impl Run<'_> {
         old_broker: Option<&str>,
     ) -> Value {
         let (mut leases, mut leaders, mut outputs) = (None, None, None);
+        let mut reconnected = false;
         let mut pending = self.ids.clone();
         let deadline = started + self.phase;
         loop {
-            // Leaders first, every round and before the scan, so when they
-            // moved does not wait on reading the outputs.
-            if leaders.is_none()
-                && let Some(old) = old_broker
-                && self.leaders_moved(old, deadline).await
-            {
-                leaders = Some(secs(started));
-            }
+            // The leaders are checked alongside the scan, every round, so
+            // when they moved does not wait on reading the outputs.
             let round = SCAN_ROUND.min(deadline.saturating_duration_since(Instant::now()));
-            pending = without_output(&self.felix, pending, target, round).await;
+            let scan = without_output(&self.felix, pending.clone(), target, round);
+            let check = async {
+                match old_broker {
+                    Some(old) if leaders.is_none() => self
+                        .leaders_moved(old, deadline)
+                        .await
+                        .then(|| secs(started)),
+                    _ => None,
+                }
+            };
+            let (still, moved) = tokio::join!(scan, check);
+            pending = still;
+            leaders = leaders.or(moved);
             if pending.is_empty() {
                 outputs = Some(secs(started));
                 // The last round for this phase, so look once more.
@@ -616,6 +631,9 @@ impl Run<'_> {
                 {
                     leaders = Some(secs(started));
                 }
+            }
+            if leaders.is_some() && !reconnected {
+                reconnected = self.reconnect().await;
             }
             if leases.is_none()
                 && let Some(Ok(c)) = bounded(PROBE, deadline, census(&self.felix)).await
@@ -967,7 +985,7 @@ async fn a_round_ends_at_its_bound_and_keeps_what_it_confirmed() {
 }
 
 #[tokio::test]
-async fn unanswered_and_negative_checks_stay_missing() {
+async fn a_negative_check_stays_missing() {
     let check = |id: String| async move { id != "w1" };
     let missing = scan(ids(4), 2, PROBE, SCAN_ROUND, check).await;
     assert_eq!(missing, ["w1"]);
