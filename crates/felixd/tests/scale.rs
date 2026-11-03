@@ -940,8 +940,32 @@ fn ids(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("w{i}")).collect()
 }
 
+/// Aborts the test binary if a test outlives `limit`. It runs on its own
+/// thread, so it fires even when the runtime itself is stuck, and a hung test
+/// never keeps the binary alive. Dropping the guard disarms it.
+struct Watchdog {
+    _disarm: std::sync::mpsc::Sender<()>,
+}
+
+fn watchdog(limit: Duration) -> Watchdog {
+    let (disarm, armed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = armed.recv_timeout(limit) {
+            use std::io::Write;
+            // Straight to stderr: libtest's capture would swallow eprintln.
+            let _ = writeln!(
+                std::io::stderr(),
+                "a test ran past {limit:?}; aborting the test binary"
+            );
+            std::process::abort();
+        }
+    });
+    Watchdog { _disarm: disarm }
+}
+
 #[tokio::test]
 async fn a_hung_read_costs_only_its_own_workload() {
+    let _watchdog = watchdog(Duration::from_secs(10));
     let check = |id: String| async move {
         if id == "w3" {
             std::future::pending::<()>().await;
@@ -963,6 +987,7 @@ async fn a_hung_read_costs_only_its_own_workload() {
 
 #[tokio::test]
 async fn a_round_ends_at_its_bound_and_keeps_what_it_confirmed() {
+    let _watchdog = watchdog(Duration::from_secs(10));
     // One reader and every read after the first hangs: ten probes of 200 ms
     // would take 2 s without the round bound.
     let check = |id: String| async move {
@@ -986,6 +1011,7 @@ async fn a_round_ends_at_its_bound_and_keeps_what_it_confirmed() {
 
 #[tokio::test]
 async fn a_negative_check_stays_missing() {
+    let _watchdog = watchdog(Duration::from_secs(10));
     let check = |id: String| async move { id != "w1" };
     let missing = scan(ids(4), 2, PROBE, SCAN_ROUND, check).await;
     assert_eq!(missing, ["w1"]);
@@ -998,6 +1024,7 @@ async fn a_negative_check_stays_missing() {
 
 #[tokio::test]
 async fn a_step_never_runs_past_the_deadline() {
+    let _watchdog = watchdog(Duration::from_secs(10));
     let deadline = Instant::now() + Duration::from_millis(100);
     let started = Instant::now();
     let hung = bounded(
