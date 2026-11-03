@@ -9,12 +9,15 @@
 //! `scale-<N>-ttl<T>.row.md` (default `.`). `FELIXD_SCALE_TIMEOUT_SECS` bounds
 //! creating and starting the workloads (default 1200), `FELIXD_SCALE_FAILOVER_SECS`
 //! each later phase (default 300), and `FELIXD_SCALE_LEASE_TTL_SECS` is the
-//! agents' lease TTL (default 10). It also needs what `cluster.rs` needs:
+//! agents' lease TTL (default 10). A phase scans the output streams in rounds
+//! of at most 10 s, each read has 3 s, and the leaders are checked every round,
+//! so a stuck read cannot stretch what the failover figures measure. It also needs what `cluster.rs` needs:
 //! `FELIXD_CLUSTER` and `FELIX_OPERATOR_TOKEN_FILE`.
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,6 +42,11 @@ const SUBMITS: usize = 16;
 /// How many output streams are read at once.
 const READERS: usize = 32;
 const POLL: Duration = Duration::from_secs(2);
+/// The most one scan of the output streams may take. What it did not reach
+/// counts as still without output and is read again next round.
+const SCAN_ROUND: Duration = Duration::from_secs(10);
+/// The most one read or probe may take before it counts as a miss.
+const PROBE: Duration = Duration::from_secs(3);
 const SAMPLE_MEMORY_EVERY: Duration = Duration::from_secs(20);
 
 fn count(i: u64) -> Vec<u8> {
@@ -453,27 +461,72 @@ async fn has_output(felix: &Felix, id: &str, target: u64) -> bool {
     })
 }
 
-/// The workloads among `ids` with no output for `target` yet.
-async fn without_output(felix: &Arc<Felix>, ids: Vec<String>, target: u64) -> Vec<String> {
-    let size = ids.len().div_ceil(READERS).max(1);
+/// The workloads among `ids` with no output for `target` yet. One scan takes
+/// at most `SCAN_ROUND` and one workload's read at most `PROBE`, so a stuck
+/// read costs its workload a miss instead of the whole phase.
+async fn without_output(
+    felix: &Arc<Felix>,
+    ids: Vec<String>,
+    target: u64,
+    round: Duration,
+) -> Vec<String> {
+    let felix = felix.clone();
+    let check = move |id: String| {
+        let felix = felix.clone();
+        async move { has_output(&felix, &id, target).await }
+    };
+    scan(ids, READERS, PROBE, round, check).await
+}
+
+/// Runs `check` on every id from `readers` parallel readers and returns the
+/// ids it did not confirm: those it answered `false` for, those whose check
+/// took over `probe`, and those not reached within `round`. Ids confirmed
+/// before `round` ends stay confirmed.
+async fn scan<F, Fut>(
+    ids: Vec<String>,
+    readers: usize,
+    probe: Duration,
+    round: Duration,
+    check: F,
+) -> Vec<String>
+where
+    F: Fn(String) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = bool> + Send + 'static,
+{
+    let confirmed = Arc::new(Mutex::new(HashSet::new()));
+    let size = ids.len().div_ceil(readers).max(1);
     let mut tasks = JoinSet::new();
     for chunk in ids.chunks(size) {
-        let (felix, chunk) = (felix.clone(), chunk.to_vec());
+        let (check, confirmed, chunk) = (check.clone(), confirmed.clone(), chunk.to_vec());
         tasks.spawn(async move {
-            let mut missing = Vec::new();
             for id in chunk {
-                if !has_output(&felix, &id, target).await {
-                    missing.push(id);
+                if let Ok(true) = tokio::time::timeout(probe, check(id.clone())).await {
+                    confirmed.lock().unwrap().insert(id);
                 }
             }
-            missing
         });
     }
-    let mut missing = Vec::new();
-    while let Some(part) = tasks.join_next().await {
-        missing.extend(part.unwrap());
-    }
-    missing
+    let drain = async {
+        while let Some(part) = tasks.join_next().await {
+            part.unwrap();
+        }
+    };
+    // Past the round the readers are dropped (aborted) with `tasks`.
+    let _ = tokio::time::timeout(round, drain).await;
+    let confirmed = confirmed.lock().unwrap();
+    ids.into_iter()
+        .filter(|id| !confirmed.contains(id))
+        .collect()
+}
+
+/// Runs `work` for at most `limit`, and never past `deadline`.
+async fn bounded<T>(
+    limit: Duration,
+    deadline: Instant,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    tokio::time::timeout(limit.min(left), work).await.ok()
 }
 
 /// Publishes one input, retrying while the stream's leader is away, and
@@ -513,9 +566,26 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// Whether no shard is led by `old` any more. Reconnects once that is so,
+    /// since the old connection may still point at the dead broker.
+    async fn leaders_moved(&mut self, old: &str, deadline: Instant) -> bool {
+        let Some(Ok(items)) = bounded(PROBE, deadline, assignments(self.t)).await else {
+            return false;
+        };
+        if items.iter().any(|item| item["leader"] == old) {
+            return false;
+        }
+        let connect = Felix::connect(&self.t.settings);
+        if let Some(Ok(felix)) = bounded(PROBE, deadline, connect).await {
+            self.felix = Arc::new(felix);
+        }
+        true
+    }
+
     /// Waits until every workload has an output for `target`, and notes when
     /// every lease is held by a live node and, if given, when no shard is led
-    /// by `old_broker`. Reconnects once the leaders have moved.
+    /// by `old_broker`. Each round checks the leaders, then scans the outputs
+    /// for at most `SCAN_ROUND`, all inside the phase.
     async fn recovery(
         &mut self,
         started: Instant,
@@ -526,34 +596,33 @@ impl Run<'_> {
         let (mut leases, mut leaders, mut outputs) = (None, None, None);
         let mut pending = self.ids.clone();
         let deadline = started + self.phase;
-        let mut round = 0;
         loop {
-            round += 1;
-            let left = deadline.saturating_duration_since(Instant::now());
-            let checked = without_output(&self.felix, pending.clone(), target);
-            if let Ok(still) = tokio::time::timeout(left, checked).await {
-                pending = still;
+            // Leaders first, every round and before the scan, so when they
+            // moved does not wait on reading the outputs.
+            if leaders.is_none()
+                && let Some(old) = old_broker
+                && self.leaders_moved(old, deadline).await
+            {
+                leaders = Some(secs(started));
             }
+            let round = SCAN_ROUND.min(deadline.saturating_duration_since(Instant::now()));
+            pending = without_output(&self.felix, pending, target, round).await;
             if pending.is_empty() {
                 outputs = Some(secs(started));
+                // The last round for this phase, so look once more.
+                if leaders.is_none()
+                    && let Some(old) = old_broker
+                    && self.leaders_moved(old, deadline).await
+                {
+                    leaders = Some(secs(started));
+                }
             }
             if leases.is_none()
-                && let Ok(c) = census(&self.felix).await
+                && let Some(Ok(c)) = bounded(PROBE, deadline, census(&self.felix)).await
                 && c.held >= self.n
                 && old_owner.is_none_or(|o| !c.by_owner.contains_key(o))
             {
                 leases = Some(secs(started));
-            }
-            if leaders.is_none()
-                && let Some(old) = old_broker
-                && (round % 3 == 1 || outputs.is_some())
-                && let Ok(items) = assignments(self.t).await
-                && items.iter().all(|item| item["leader"] != old)
-            {
-                leaders = Some(secs(started));
-                if let Ok(felix) = Felix::connect(&self.t.settings).await {
-                    self.felix = Arc::new(felix);
-                }
             }
             eprintln!(
                 "recovery {:.0}s: {} without output, leases back {:?}, leaders moved {:?}",
@@ -562,10 +631,10 @@ impl Run<'_> {
                 leases,
                 leaders
             );
-            if outputs.is_some() || Instant::now() > deadline {
+            if outputs.is_some() || Instant::now() >= deadline {
                 break;
             }
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
         }
         json!({
             "outputs_secs": outputs,
@@ -729,7 +798,8 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
     let mut pending = ids.clone();
     let mut first = None;
     while published.elapsed() < phase {
-        pending = without_output(&felix, pending, input).await;
+        let round = SCAN_ROUND.min(phase.saturating_sub(published.elapsed()));
+        pending = without_output(&felix, pending, input, round).await;
         eprintln!("{} workloads without output", pending.len());
         if pending.is_empty() {
             first = Some(secs(published));
@@ -846,4 +916,80 @@ fn docker_figures_are_read() {
         Some("controlplane")
     );
     assert_eq!(service_of("felixd-cluster-felix-fleet-run-1"), None);
+}
+
+fn ids(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("w{i}")).collect()
+}
+
+#[tokio::test]
+async fn a_hung_read_costs_only_its_own_workload() {
+    let check = |id: String| async move {
+        if id == "w3" {
+            std::future::pending::<()>().await;
+        }
+        true
+    };
+    let started = Instant::now();
+    let missing = scan(
+        ids(8),
+        1,
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+        check,
+    )
+    .await;
+    assert_eq!(missing, ["w3"]);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn a_round_ends_at_its_bound_and_keeps_what_it_confirmed() {
+    // One reader and every read after the first hangs: ten probes of 200 ms
+    // would take 2 s without the round bound.
+    let check = |id: String| async move {
+        if id != "w0" {
+            std::future::pending::<()>().await;
+        }
+        true
+    };
+    let started = Instant::now();
+    let missing = scan(
+        ids(10),
+        1,
+        Duration::from_millis(200),
+        Duration::from_millis(300),
+        check,
+    )
+    .await;
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    assert_eq!(missing, ids(10)[1..]);
+}
+
+#[tokio::test]
+async fn unanswered_and_negative_checks_stay_missing() {
+    let check = |id: String| async move { id != "w1" };
+    let missing = scan(ids(4), 2, PROBE, SCAN_ROUND, check).await;
+    assert_eq!(missing, ["w1"]);
+    assert!(
+        scan(Vec::new(), 2, PROBE, SCAN_ROUND, check)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_step_never_runs_past_the_deadline() {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let started = Instant::now();
+    let hung = bounded(
+        Duration::from_secs(60),
+        deadline,
+        std::future::pending::<()>(),
+    )
+    .await;
+    assert!(hung.is_none());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // Past the deadline there is no time left, but ready work still answers.
+    assert_eq!(bounded(PROBE, deadline, async { 7 }).await, Some(7));
 }
