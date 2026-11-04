@@ -8,6 +8,10 @@
 //! snapshot stream of a chunk record holding it. Only a manifest is a
 //! snapshot, and it may name chunks written for an earlier one.
 //!
+//! An upgrade record, kind 2 with epoch 0, has the body `at (8) | specs_from
+//! (8)`: `felixd run --upgrade-at` writes it before the spec that names the
+//! upgrade, see [`Pending`].
+//!
 //! A version 2 record is a whole snapshot, `version | input_offset (8) |
 //! output_tail (8) | epoch (8) | state`, and reads as one chunk. Version 1
 //! has no epoch and reads as epoch 0.
@@ -21,6 +25,7 @@ const WHOLE: u8 = 2;
 const UNSTAMPED: u8 = 1;
 const CHUNK: u8 = 0;
 const MANIFEST: u8 = 1;
+const UPGRADE: u8 = 2;
 
 /// The most chunks a snapshot may have.
 pub const MAX_CHUNKS: u32 = 65_536;
@@ -74,6 +79,30 @@ pub enum Record<'a> {
     },
     /// A snapshot.
     Manifest(Manifest),
+    /// An upgrade about to be recorded. Not a snapshot.
+    Upgrade(Pending),
+}
+
+/// An upgrade at input `at` that `felixd run` checked against the snapshot
+/// stream and is about to record in a spec. It is appended with `publish_if`
+/// at the tail the check read, so no snapshot landed in between, and an owner
+/// whose spec predates it writes no snapshot once it has seen it: that owner
+/// may be running the old module past `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pending {
+    /// The first input the new module runs.
+    pub at: u64,
+    /// The `sys.specs` tail when it was written. The spec naming the upgrade,
+    /// and every spec that knows of it, has its record at or after this.
+    pub specs_from: u64,
+}
+
+impl Pending {
+    /// Whether it binds an owner running spec record `record`, which it does
+    /// unless that spec was written after it.
+    pub fn binds(&self, record: Option<u64>) -> bool {
+        record.is_none_or(|r| r < self.specs_from)
+    }
 }
 
 impl Record<'_> {
@@ -83,6 +112,7 @@ impl Record<'_> {
             Record::Whole(taken, _) => taken.epoch,
             Record::Chunk { epoch, .. } => *epoch,
             Record::Manifest(manifest) => manifest.taken.epoch,
+            Record::Upgrade(_) => 0,
         }
     }
 
@@ -90,7 +120,7 @@ impl Record<'_> {
     pub fn taken(&self) -> Option<Taken> {
         match self {
             Record::Whole(taken, _) => Some(*taken),
-            Record::Chunk { .. } => None,
+            Record::Chunk { .. } | Record::Upgrade(_) => None,
             Record::Manifest(manifest) => Some(manifest.taken),
         }
     }
@@ -139,6 +169,16 @@ pub fn encode_manifest(manifest: &Manifest) -> Vec<u8> {
     out
 }
 
+/// Builds an upgrade record.
+pub fn encode_upgrade(pending: &Pending) -> Vec<u8> {
+    let mut out = Vec::with_capacity(26);
+    out.extend([VERSION, UPGRADE]);
+    out.extend(0u64.to_be_bytes());
+    out.extend(pending.at.to_be_bytes());
+    out.extend(pending.specs_from.to_be_bytes());
+    out
+}
+
 /// Reads a snapshot stream record.
 pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
     let mut r = Reader::new(record);
@@ -154,10 +194,20 @@ pub fn decode(record: &[u8]) -> Result<Record<'_>, DecodeError> {
         }
         VERSION => {
             let kind = r.u8()?;
-            if kind != CHUNK && kind != MANIFEST {
+            if kind != CHUNK && kind != MANIFEST && kind != UPGRADE {
                 return Err(DecodeError::UnknownKind(kind));
             }
             let epoch = r.u64()?;
+            if kind == UPGRADE {
+                let pending = Pending {
+                    at: r.u64()?,
+                    specs_from: r.u64()?,
+                };
+                if r.remaining() > 0 {
+                    return Err(DecodeError::TrailingBytes(r.remaining()));
+                }
+                return Ok(Record::Upgrade(pending));
+            }
             if kind == CHUNK {
                 return Ok(Record::Chunk {
                     epoch,

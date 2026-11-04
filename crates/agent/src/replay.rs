@@ -20,6 +20,7 @@ use crate::input::{self, Feed};
 use crate::settings::Settings;
 use crate::snapshots::{self, Snapshot};
 use crate::specs;
+use crate::upgrade::Upgrades;
 
 /// Where a replay stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,11 +85,12 @@ pub async fn replay(
     let mut feed = Feed::new(&felix, id, &spec);
     let input_tail = felix.tail(feed.stream()).await?;
     let end = end_of(&felix, feed.stream(), Some(to), input_tail).await?;
-    let (mut workload, start, kept) = start(&felix, id, &spec, module, end, from_start).await?;
+    let (mut workload, start, kept, mut upgrades) =
+        start(&felix, id, &spec, module, end, from_start).await?;
     let mut steps = 0;
     run_inputs(
         &mut feed,
-        &mut workload,
+        (&mut workload, &mut upgrades),
         &[],
         replay::first_input(start.snapshot()),
         end,
@@ -155,13 +157,16 @@ pub async fn diff(
     )
     .map_err(|e| anyhow!("{} holds a record that does not decode: {e}", spec.output))?;
     let end = end.min(recorded.end());
-    let (mut workload, start, kept) = start(&felix, id, &spec, module, from, from_start).await?;
-    let (_, limits) = judged(&felix, id, &spec, &records, cut).await?;
+    // The upgrades the stream was written under, which may be later than the
+    // cached spec's. `start` takes them from the spec it is given.
+    let (judged_spec, limits) = judged(&felix, id, &spec, &records, cut).await?;
+    let (mut workload, start, kept, mut upgrades) =
+        start(&felix, id, &judged_spec, module, from, from_start).await?;
     let mut matched = 0;
     let mut found_all = Vec::new();
     let first = run_inputs(
         &mut feed,
-        &mut workload,
+        (&mut workload, &mut upgrades),
         &limits,
         replay::first_input(start.snapshot()),
         end,
@@ -199,7 +204,12 @@ async fn open(settings: &Settings, id: &str) -> Result<(Felix, WorkloadSpec)> {
         .cache_get(names::WORKLOADS, id)
         .await?
         .context("no such workload")?;
-    let spec = specs::lineage(&felix, id, WorkloadSpec::decode(&spec)?).await?;
+    let cached = WorkloadSpec::decode(&spec)?;
+    // Module and input are the first claim's; the upgrades are the latest
+    // spec's, which says where each later module takes over.
+    let upgrades = cached.upgrades.clone();
+    let mut spec = specs::lineage(&felix, id, cached).await?;
+    spec.upgrades = upgrades;
     Ok((felix, spec))
 }
 
@@ -234,20 +244,36 @@ async fn start(
     module: Option<&str>,
     before: u64,
     from_start: bool,
-) -> Result<(Workload, Start, Vec<u64>)> {
-    let (hash, bytes) = match module {
-        Some(module) => candidate(felix, module).await?,
-        None => (
-            spec.module.clone(),
-            module_bytes(felix, &spec.module).await?,
-        ),
-    };
+) -> Result<(Workload, Start, Vec<u64>, Upgrades)> {
     let runtime = Runtime::new().map_err(|e| anyhow!("{e}"))?;
-    let mut workload = runtime
-        .load(&bytes, spec.limits)
-        .map_err(|e| anyhow!("{e}"))?;
+    // Another module runs every input, so the spec's upgrades do not apply.
+    let rt = &runtime;
+    let upgrades = |taken: Option<u64>| async move {
+        match module {
+            Some(_) => Ok(Upgrades::none(rt)),
+            None => Upgrades::after(rt, felix, spec, taken).await,
+        }
+    };
+    // The module that runs from the state at `taken`: the one that wrote
+    // the snapshot, unless another was asked for.
+    let load = |taken: Option<u64>| async move {
+        let recorded = spec.module_at(taken.unwrap_or(0)).to_owned();
+        let (hash, bytes) = match module {
+            Some(module) => candidate(felix, module).await?,
+            None => (recorded.clone(), module_bytes(felix, &recorded).await?),
+        };
+        let workload = rt.load(&bytes, spec.limits).map_err(|e| anyhow!("{e}"))?;
+        Ok::<_, anyhow::Error>((workload, hash, bytes, recorded))
+    };
     if from_start {
-        return Ok((workload, Start::Initial(Initial::Requested), Vec::new()));
+        let (workload, ..) = load(None).await?;
+        let upgrades = upgrades(None).await?;
+        return Ok((
+            workload,
+            Start::Initial(Initial::Requested),
+            Vec::new(),
+            upgrades,
+        ));
     }
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
@@ -258,14 +284,31 @@ async fn start(
     let headers = found.iter().map(|s| s.taken().header);
     let kept: Vec<u64> = headers.clone().map(|h| h.input_offset).collect();
     let Some(index) = replay::nearest_snapshot(headers, before) else {
-        return Ok((workload, Start::Initial(Initial::NoSnapshot), kept));
+        let (workload, ..) = load(None).await?;
+        let upgrades = upgrades(None).await?;
+        return Ok((
+            workload,
+            Start::Initial(Initial::NoSnapshot),
+            kept,
+            upgrades,
+        ));
     };
-    let swapped = hash != spec.module;
-    if swapped && let Some(why) = unreadable(felix, spec, &bytes).await? {
-        return Ok((workload, Start::Initial(Initial::Unreadable(why)), kept));
+    let taken = found[index].taken().header.input_offset;
+    let (mut workload, hash, bytes, recorded) = load(Some(taken)).await?;
+    let swapped = hash != recorded;
+    if swapped && let Some(why) = unreadable(felix, &recorded, &bytes).await? {
+        let (workload, ..) = load(None).await?;
+        let upgrades = upgrades(None).await?;
+        return Ok((
+            workload,
+            Start::Initial(Initial::Unreadable(why)),
+            kept,
+            upgrades,
+        ));
     }
     let header = restore(felix, &snap_stream, &found[index], &mut workload, swapped).await?;
-    Ok((workload, Start::Snapshot(header), kept))
+    let upgrades = upgrades(Some(taken)).await?;
+    Ok((workload, Start::Snapshot(header), kept, upgrades))
 }
 
 /// `error` from replaying inputs, explained. When no kept snapshot is at or
@@ -355,14 +398,10 @@ fn is_hash(which: &str) -> bool {
 
 /// Why `candidate`, a module's bytes, cannot restore what the module the
 /// workload runs snapshotted, or `None` when it can.
-async fn unreadable(
-    felix: &Felix,
-    spec: &WorkloadSpec,
-    candidate: &[u8],
-) -> Result<Option<Unreadable>> {
-    let recorded = module_bytes(felix, &spec.module).await?;
+async fn unreadable(felix: &Felix, module: &str, candidate: &[u8]) -> Result<Option<Unreadable>> {
+    let recorded = module_bytes(felix, module).await?;
     let recorded = ModuleInfo::of(&recorded)
-        .map_err(|e| unparsed(&format!("the workload's module {}", spec.module), e))?;
+        .map_err(|e| unparsed(&format!("the workload's module {module}"), e))?;
     let candidate = ModuleInfo::of(candidate).map_err(|e| unparsed("the new module", e))?;
     Ok(module::can_restore(&recorded, &candidate).err())
 }
@@ -373,7 +412,7 @@ async fn unreadable(
 /// changes, as [`judged`] gives them.
 async fn run_inputs<T>(
     feed: &mut Feed<'_>,
-    workload: &mut Workload,
+    (workload, upgrades): (&mut Workload, &mut Upgrades),
     limits: &[(u64, Limits)],
     from: u64,
     end: u64,
@@ -387,6 +426,7 @@ async fn run_inputs<T>(
             while let Some((_, applied)) = limits.next_if(|(at, _)| *at <= step.at) {
                 workload.set_limits(*applied);
             }
+            upgrades.reach(workload, step.at)?;
             let Some(input) = step.input? else {
                 continue;
             };

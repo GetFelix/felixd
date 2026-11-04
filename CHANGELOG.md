@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Module upgrades at a recorded input (#64). `felixd run --id <id> --upgrade-at <input> <module>`
+  makes the new module the workload's from that input on. The spec keeps the module the workload
+  began with and lists each upgrade as an input and a module hash, so the lineage rules that
+  compare the module are unchanged and a spec without upgrades is written as before. The owner
+  hands its state to the new module through a snapshot and a restore in memory at the upgrade's
+  input, a node that resumes does the same, and `felixd check` and `felixd replay` switch at the
+  same inputs. `felixd run` refuses an input the workload has already run, and a module that does
+  not declare it can restore the old one's snapshot layout. It writes an upgrade record to `.snap`
+  with `publish_if` at the tail it checked before the spec, and an owner on an older spec writes no
+  snapshot once it has seen one, so the old module cannot leave a snapshot past the upgrade.
+  A later spec that drops a recorded upgrade is refused. Upgrade every node before using
+  `--upgrade-at`: older builds cannot read the upgrade record. Upgrades are an operator action and
+  admission rejects requests that name them.
 - The state classes table in `docs/design.md` covers every cache and system stream felixd uses (#81), and a test fails when a new name has no row. It now lists the `leases`, `epochs`, `workloads` and `modules` caches and the `sys.intake` stream.
 - The scale test measures failover without waiting on its own harness. It scanned every output stream
   in one pass with the whole phase as its budget, so one stuck read made `leaders_moved_secs` and

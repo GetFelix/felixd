@@ -21,6 +21,7 @@ use crate::module_store::{self, Fetched};
 use crate::settings::Settings;
 use crate::snapshots::Snapshot;
 use crate::specs;
+use crate::upgrade::Upgrades;
 
 /// What the check found for one workload.
 #[derive(Debug)]
@@ -149,7 +150,8 @@ async fn check_one(
     // of a later spec its owner refused.
     let (spec, limits) = judged(felix, id, &cached, &records, cut).await?;
     let mut limits = limits.into_iter().peekable();
-    let bytes = module_bytes(felix, &spec.module).await?;
+    // A check from a snapshot starts on the module that wrote it.
+    let bytes = module_bytes(felix, spec.module_at(trim.as_ref().map_or(0, |t| t.step))).await?;
     let mut workload = runtime
         .load(&bytes, spec.limits)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -172,6 +174,8 @@ async fn check_one(
         covered(error, header)?;
     }
     let first = first_input(start);
+    let mut upgrades =
+        Upgrades::after(runtime, felix, &spec, start.map(|h| h.input_offset)).await?;
     let mut feed = Feed::new(felix, id, &spec);
     let mut findings = Vec::new();
     if spec.merged() {
@@ -194,6 +198,9 @@ async fn check_one(
         for step in page {
             while let Some((_, applied)) = limits.next_if(|(from, _)| *from <= step.at) {
                 workload.set_limits(applied);
+            }
+            if upgrades.reach(&mut workload, step.at).is_err() {
+                break 'steps;
             }
             // An input that cannot be read or a step that fails ends the
             // workload there, on every node.

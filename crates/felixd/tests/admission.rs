@@ -252,6 +252,7 @@ async fn a_spec_written_around_admission_never_runs() {
         snapshot_every: 10,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits::default(),
         failure: None,

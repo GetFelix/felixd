@@ -74,7 +74,7 @@ history.
 | Users and permissions | Felix tenants and grants. A program's token is its capability. |
 | Boot | Reading the desired state and claiming leases. A cold start of the cluster is a replay. |
 | Logs, `ps`, debugging | The log already is the history. Debugging is replay. |
-| Upgrades | Run the new module over recorded inputs, compare, then switch at an offset |
+| Upgrades | Run the new module over recorded inputs, compare, then switch at an offset (`felixd run --upgrade-at`) |
 
 Programs come in three kinds, matching steps 1, 4 and 5 of the path:
 
@@ -380,7 +380,8 @@ the history. A running workload whose spec changes restarts under the new
 one: the agent stops the task, releases the lease and claims it again, and
 the next owner's claim names the new record. A new module or input stream
 would not reproduce what the streams already hold, so `felixd run` refuses
-that change once the output or snapshot stream has a record, and an agent
+that change once the output or snapshot stream has a record, unless it is an
+[upgrade](#switching-to-the-new-module) at a later input, and an agent
 refuses to run a spec whose module or input differ from the spec the output
 stream's first claim names. Claims only move forward too: each claim carries
 the highest spec record claimed so far, like the epoch floor, and an agent
@@ -1125,10 +1126,12 @@ in a custom section of its component named `felixd.snapshot`, which names the
 layout it writes and the other layouts it can restore
 ([contract.md, Snapshot layouts](contract.md#snapshot-layouts)).
 
-Every snapshot on the stream was written by the module in the spec. A workload
-runs one module for its life: `felixd run` refuses a new module once the output
-or snapshot stream has a record. So the question is only whether the new module
-understands that one module's layout.
+Every snapshot on the stream was written by the module that ran its input,
+which is the one module in the spec unless an
+[upgrade](#switching-to-the-new-module) took over earlier. `felixd run` refuses
+a different module once the output or snapshot stream has a record, except as
+an upgrade. So the question is whether the new module understands the layout
+of the module that wrote the snapshot.
 
 | The replay finds | It starts from | stderr says |
 |---|---|---|
@@ -1153,6 +1156,78 @@ before input 0. To check from a snapshot, pass a `--from` after one.
 
 `--module` without `--diff` prints the new module's state at `--to`. It
 restores the nearest snapshot before the end of the replay, by the same rules.
+The new module runs every input of the replay, including ones after an upgrade
+the spec already holds. Without `--module`, a replay switches modules where the
+spec says.
+
+### Switching to the new module
+
+Once the diff matches, make the new module the workload's at an input:
+
+```
+felixd run --id orders --input orders-in --upgrade-at 150000 orders-next.wasm
+```
+
+Inputs from 150000 on run the new module, and every earlier input keeps the
+old one, so the outputs already on the stream stay what a replay produces.
+Choose an input after the last one the workload has run. `felixd run` refuses
+an input at or below the highest one with an output or a snapshot, and a module
+that cannot restore the state of the one it replaces (the same layout rules as
+a diff from a snapshot). The workload keeps running throughout: the agent
+restarts it under the new spec, as for any spec change, and the owner resumes
+as before. The command writes the whole spec, so the workload's other flags
+(`--snapshot-every`, `--keep-snapshots`, the limits) are given again; one left
+out takes its default.
+
+The spec records the module that began the workload, in `module`, and a list of
+`upgrades`, each an input offset and a module hash. For a workload with several
+inputs the offset is the merge log's, as for outputs. Input `n` runs the module
+of the last upgrade at or below `n`. Because `module` never changes, the rules
+that compare it, the lineage and the refusal of a changed module, are the same
+as before.
+
+At the upgrade's input the owner takes a snapshot of the old module's state in
+memory, starts the new module and restores that snapshot into it. Nothing is
+written to the snapshot stream for the switch itself. A node that resumes from a snapshot
+loads the module that ran the snapshot's input and carries on to the upgrade
+the same way, so every node reaches the same state at the same input. If the
+new module traps while restoring, the workload fails as poison, like any trap.
+`felixd check` and `felixd replay` switch modules at the same inputs, using the
+upgrades of the latest spec that ran.
+
+The owner on the old spec keeps running until its agent sees the new one, and
+it must not leave a snapshot past the upgrade's input: a node that resumed from
+it would never run the switch. So `felixd run` writes an upgrade record to the
+snapshot stream before the spec, with `publish_if` at the tail it checked. If a
+snapshot landed after the check the write is refused and `felixd run` asks to
+be run again. An owner whose spec record comes before the upgrade record writes
+no more snapshots once it has seen it, either on the stream when it starts or
+as the record that refused its own snapshot write. The spec naming the upgrade
+is written after the record, so its owner is not held back, and neither is the
+owner of any later spec. If `felixd run` stops between the two writes, the old
+spec keeps running without snapshots until the next `felixd run`.
+
+Outputs are not held back the same way. An output the old module writes at or
+past the upgrade's input is replayed under the new module when the new spec
+resumes, and a different result fails the workload as a divergence. Choose an
+input far enough ahead of the live one that the agents have the new spec by
+the time it arrives.
+
+Every node must run a build that knows the upgrade record before anyone uses
+`--upgrade-at`: an older build cannot read the snapshot stream once the record
+is on it. A later spec must keep the upgrades already recorded, so `felixd run`
+and the agents refuse one that drops or changes them once the workload has
+output. Two `felixd run`s racing on one workload are not fenced against each
+other: one that read the spec before the upgrade was recorded writes a spec
+the upgrade record does not hold back. The new module's in-memory snapshot at
+the switch is metered like any snapshot, and running out of snapshot fuel
+there fails the workload, since the switch cannot be skipped.
+
+Upgrades are an operator action. `felixd run --upgrade-at` writes the spec
+directly and does not go through admission, which rejects a request that names
+upgrades. A rollback is a new upgrade to the old module at a later input.
+There is no way yet to shadow-run the new module on live input before the
+switch (#102).
 
 ## Grants
 
@@ -1799,7 +1874,8 @@ outputs are addressed (a key and a named output) rather than a single stream,
 a workload can `reject` one input without failing, and snapshots are exported
 in chunks. Upgrading a running workload's module is a recorded change that
 takes effect at a stated input offset, after `felixd replay --module` shows the
-new module agrees on the inputs it has already seen.
+new module agrees on the inputs it has already seen
+([Switching to the new module](#switching-to-the-new-module)).
 
 The interface, the guarantees and the record formats are in
 [contract.md](contract.md).
@@ -2132,9 +2208,10 @@ A name is resolved once, when a spec is written, and the result is recorded
 Built: spec records on `sys.specs`, claims that name the record they run,
 and `check` and `replay --diff` judging each input under the limits that
 applied ([Data model](#data-model)). The offset a spec takes effect at is
-where its owner's claim lands, not one the submitter states. Not built:
-incarnations, which Felix does not expose to clients yet (#133), dropping `output`
-from the spec, and module changes at an offset (#64).
+where its owner's claim lands, not one the submitter states, except for a module
+upgrade, which states its input ([Switching to the new
+module](#switching-to-the-new-module)). Not built: incarnations, which Felix
+does not expose to clients yet (#133), and dropping `output` from the spec.
 
 Plan 9 resolved a name at every `open`, so a rebind silently changed what a
 program read. Felix fixed the same class of bug for forwards in #1324.

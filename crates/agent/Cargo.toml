@@ -27,6 +27,7 @@ tracing = { workspace = true }
 ureq = { workspace = true }
 
 [dev-dependencies]
+felixd-testkit = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

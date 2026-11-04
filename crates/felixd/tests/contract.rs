@@ -228,6 +228,7 @@ async fn snapshot_layout(t: &TestFelix) -> String {
             snapshot::Record::Chunk { .. } => 'C',
             snapshot::Record::Manifest(_) => 'M',
             snapshot::Record::Whole(..) => 'W',
+            snapshot::Record::Upgrade(_) => 'U',
         })
         .collect()
 }
@@ -411,6 +412,7 @@ async fn refused_and_left_for_an_operator(old: Vec<u8>) {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits::default(),
         failure: None,
@@ -462,6 +464,7 @@ async fn a_missing_module_is_recorded_until_the_spec_changes() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits::default(),
         failure: None,

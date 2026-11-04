@@ -10,6 +10,7 @@ fn spec(id: &str) -> WorkloadSpec {
         snapshot_every: 10,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits::default(),
         failure: None,
@@ -331,4 +332,14 @@ fn a_module_larger_than_one_write_is_accepted_up_to_the_limit() {
         panic!("accepted");
     };
     assert_eq!(detail, "the module is 67108865 bytes, not 1 to 67108864");
+}
+
+#[test]
+fn a_request_cannot_name_module_upgrades() {
+    let mut asked = request("wl");
+    asked.spec.upgrades = vec![crate::spec::Upgrade {
+        at: 5,
+        module: "cd".repeat(32),
+    }];
+    assert_eq!(rejected(&decided(&asked)), Reason::InvalidSpec);
 }

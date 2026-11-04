@@ -398,6 +398,7 @@ are ignored.
 |---|---|
 | 0, chunk | sha256 (32), bytes |
 | 1, manifest | input offset (8), output tail (8), chunk count (4), then per chunk its sha256 (32) and the offset (8) on `.snap` of a chunk record holding it |
+| 2, upgrade | input offset (8) of the upgrade, `sys.specs` tail (8) when it was written. Epoch 0. Not a snapshot: an owner whose spec record is below that tail writes no snapshot once it has seen one |
 
 Every record carries the writer's epoch after the kind and is appended with
 `publish_if` at the snapshot tail, so the fence and the superseded check are
@@ -446,10 +447,11 @@ A 0.2 workload keeps running as it is. To read the publisher, rebuild it against
    field.
 3. Decide what `none` means for the workload and say it in its README.
 
-The rebuilt component is a new module. `felixd run` refuses a new module for a
-workload that has already written output, so submit it under a new id, as for
-any new code. In particular a deployment that already runs admission keeps its
-0.2 module, which records no requester, until module upgrades exist.
+The rebuilt component is a new module. Submit it under a new id, as for any new
+code, or upgrade the running workload to it at a later input with `felixd run
+--upgrade-at` ([design.md](design.md#switching-to-the-new-module)). A workload
+that has already written output refuses a different module otherwise. An
+upgrade needs the new module to restore the old one's snapshot layout.
 
 Upgrade every node and the `felixd` CLI before submitting a 0.3 module or
 running the 0.3 admission. A felixd from this release on that meets a contract
@@ -492,8 +494,6 @@ build has no effect executors.
 
 ## Not in this version
 
-- Module upgrades at a recorded input offset (#64's last item). Spec history
-  is now records on `sys.specs` (#72); the upgrade itself is not built.
 - The system records defined in WIT (#73). They wait for the effect records,
   which are not built. Until then they are defined once in `felixd-core`
   ([records.md](records.md)), and the error classes here are the ones they

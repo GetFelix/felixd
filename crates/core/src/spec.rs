@@ -36,6 +36,16 @@ pub struct WorkloadSpec {
     /// keeps everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_snapshots: Option<u32>,
+    /// Modules that replace `module` at an input offset, ascending. Input
+    /// `at` and every later one run the module of the last upgrade with
+    /// `at` at or below it. `module` stays the one the workload began with,
+    /// so the lineage rules that compare it still hold.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "ascending_upgrades"
+    )]
+    pub upgrades: Vec<Upgrade>,
     pub state: WorkloadState,
     /// What the workload may use. It is in the spec, not node configuration,
     /// so every node runs the workload under the same limits and fails it at
@@ -53,6 +63,16 @@ pub struct WorkloadSpec {
     /// Only the cache value has it. An agent runs a spec only with its record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<u64>,
+}
+
+/// A module that takes over at an input offset: for a workload with several
+/// inputs, the merge log's offset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Upgrade {
+    /// The first input the module runs.
+    pub at: u64,
+    /// Hex sha256 of the module.
+    pub module: String,
 }
 
 /// What a workload may use.
@@ -108,16 +128,65 @@ impl WorkloadSpec {
     /// Why `next` cannot replace this spec on streams that already hold its
     /// output or snapshots, if it cannot. Another module or inputs would not
     /// reproduce what is written, and the next owner would find the stream
-    /// diverged. The other fields may change: a running workload restarts
+    /// diverged, and so would dropping an upgrade. The other fields may change: a running workload restarts
     /// under the new spec.
     pub fn conflicts_with_history(&self, next: &WorkloadSpec) -> Option<String> {
         if self.module != next.module {
             Some(format!("it runs module {}", self.module))
         } else if self.inputs != next.inputs {
             Some(format!("it reads {}", self.inputs.join(", ")))
+        } else if !next.upgrades.starts_with(&self.upgrades) {
+            // Inputs from an upgrade on ran its module, and a snapshot past
+            // it holds that module's state.
+            Some("it drops or changes an upgrade already recorded".to_owned())
         } else {
             None
         }
+    }
+
+    /// The module that runs input `offset`.
+    pub fn module_at(&self, offset: u64) -> &str {
+        self.upgrades
+            .iter()
+            .rev()
+            .find(|u| u.at <= offset)
+            .map_or(&self.module, |u| &u.module)
+    }
+
+    /// The upgrades still ahead of a workload whose state is after input
+    /// `taken`, or its initial state for `None`.
+    pub fn upgrades_after(&self, taken: Option<u64>) -> &[Upgrade] {
+        let past = taken.map_or(0, |taken| self.upgrades.partition_point(|u| u.at <= taken));
+        &self.upgrades[past..]
+    }
+
+    /// Every module the workload runs, the first one first.
+    pub fn modules(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.module.as_str()).chain(self.upgrades.iter().map(|u| u.module.as_str()))
+    }
+
+    /// Why `self` cannot follow `previous`, the spec it replaces, if it
+    /// cannot. Upgrades already recorded are history. A new one must start
+    /// after `stepped`, the highest input with an output or a snapshot:
+    /// those inputs ran under the old module.
+    pub fn upgrade_conflict(
+        &self,
+        previous: &WorkloadSpec,
+        stepped: Option<u64>,
+    ) -> Option<String> {
+        let kept = previous.upgrades.len();
+        if self.upgrades.len() < kept || self.upgrades[..kept] != previous.upgrades[..] {
+            return Some("it drops or changes an upgrade already recorded".to_owned());
+        }
+        let first = self.upgrades.get(kept)?;
+        stepped
+            .filter(|&stepped| first.at <= stepped)
+            .map(|stepped| {
+                format!(
+                    "input {stepped} has already run, so a module cannot take over at {}",
+                    first.at
+                )
+            })
     }
 
     /// Whether the cache value `self` says what `record` does. The state may
@@ -222,6 +291,23 @@ mod inputs_field {
         super::validate_input_list(&inputs).map_err(D::Error::custom)?;
         Ok(inputs)
     }
+}
+
+/// Upgrades in ascending order, after input 0: an upgrade at 0 would be the
+/// module the workload begins with.
+fn ascending_upgrades<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Upgrade>, D::Error> {
+    use serde::de::Error as _;
+    let upgrades = Vec::<Upgrade>::deserialize(d)?;
+    let mut after = 0;
+    for upgrade in &upgrades {
+        if upgrade.at <= after {
+            return Err(D::Error::custom(
+                "upgrades must ascend and come after input 0",
+            ));
+        }
+        after = upgrade.at;
+    }
+    Ok(upgrades)
 }
 
 /// The `workloads` value format this build writes and reads.

@@ -300,6 +300,9 @@ fn check(
     if spec.output != names::output_stream(&request.id) {
         return invalid("the output stream is wl.<id>.out");
     }
+    if !spec.upgrades.is_empty() {
+        return invalid("a request names no module upgrades; an operator upgrades a module");
+    }
     if spec.record.is_some() || spec.failure.is_some() {
         return invalid("a request names no spec record and no failure");
     }

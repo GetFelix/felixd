@@ -164,6 +164,7 @@ fn scheduler_inputs() -> Vec<(&'static str, u64, u64, Vec<u8>)> {
             snapshot_every: 10,
             snapshot_every_ms: None,
             keep_snapshots: None,
+            upgrades: Vec::new(),
             state,
             limits: Limits::default(),
             failure: None,

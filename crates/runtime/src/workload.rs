@@ -122,6 +122,11 @@ impl Workload {
         self.limits = limits;
     }
 
+    /// The limits later calls run under.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// The reason the workload was stopped, if it was.
     pub fn failure(&self) -> Option<&Failure> {
         self.failure.as_ref()

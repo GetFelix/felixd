@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use felixd_core::snapshot::{self, Manifest, Record, SnapshotHeader, Taken};
+use felixd_core::snapshot::{self, Manifest, Pending, Record, SnapshotHeader, Taken};
 use felixd_core::trim::Kept;
 
 use crate::felix::Felix;
@@ -30,7 +30,7 @@ impl Snapshot {
     pub(crate) fn decode(record: &Bytes) -> Result<Option<Snapshot>, felixd_core::DecodeError> {
         Ok(match snapshot::decode(record)? {
             Record::Whole(taken, state) => Some(Snapshot::Whole(taken, record.slice_ref(state))),
-            Record::Chunk { .. } => None,
+            Record::Chunk { .. } | Record::Upgrade(_) => None,
             Record::Manifest(manifest) => Some(Snapshot::Chunked(manifest)),
         })
     }
@@ -52,11 +52,13 @@ impl Snapshot {
     }
 }
 
-/// The end of a snapshot stream: the epoch of its last record of any kind,
-/// and the latest snapshot, passing over chunk records.
+/// The end of a snapshot stream: the epoch of its last record written by an
+/// owner, the latest snapshot, passing over chunk records, and the upgrade
+/// records after it.
 pub(crate) struct Latest {
     pub(crate) last_epoch: Option<u64>,
     pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) pending: Vec<Pending>,
 }
 
 /// Reads back from `tail` for the latest snapshot. A record that does not
@@ -65,6 +67,7 @@ pub(crate) async fn latest(felix: &Felix, stream: &str, tail: u64) -> Result<Lat
     let mut latest = Latest {
         last_epoch: None,
         snapshot: None,
+        pending: Vec::new(),
     };
     let mut end = tail;
     let mut window = 16;
@@ -80,6 +83,10 @@ pub(crate) async fn latest(felix: &Felix, stream: &str, tail: u64) -> Result<Lat
                 ReadError::Bad(format!("snapshot at {stream}:{}: {e}", record.offset))
             };
             let decoded = snapshot::decode(&record.payload).map_err(|e| at(&e))?;
+            if let Record::Upgrade(pending) = decoded {
+                latest.pending.push(pending);
+                continue;
+            }
             latest.last_epoch.get_or_insert(decoded.epoch());
             if let Some(found) = Snapshot::decode(&record.payload).map_err(|e| at(&e))? {
                 latest.snapshot = Some(found);

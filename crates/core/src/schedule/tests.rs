@@ -11,6 +11,7 @@ fn spec_record(id: &str, state: WorkloadState) -> Vec<u8> {
         snapshot_every: 10,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state,
         limits: Limits::default(),
         failure: None,

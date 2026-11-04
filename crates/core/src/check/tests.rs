@@ -547,6 +547,7 @@ fn a_refused_new_module_never_decides_what_a_check_runs() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: fuel,
@@ -585,6 +586,7 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: fuel,
@@ -622,6 +624,7 @@ fn a_degraded_record_before_the_first_claim_is_passed_over() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Default::default(),
         failure: None,
@@ -970,6 +973,7 @@ fn a_check_judges_a_cut_stream_under_the_spec_its_trim_carries() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: fuel,
@@ -1124,6 +1128,7 @@ fn a_divergence_record_before_the_first_claim_is_passed_over() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Default::default(),
         failure: None,
@@ -1174,4 +1179,44 @@ fn a_divergence_record_between_outputs_is_not_a_finding() {
             .iter()
             .any(|f| matches!(f, Finding::EpochRegression { .. }))
     );
+}
+
+/// The module takes over at the offset the spec states. A claim of a later
+/// spec that lists the upgrade decides it for every input, including ones an
+/// earlier claim covered.
+#[test]
+fn the_latest_spec_that_ran_decides_the_upgrades() {
+    use crate::spec::{Limits, Upgrade, WorkloadSpec, WorkloadState};
+    let spec = |upgrades: Vec<Upgrade>| WorkloadSpec {
+        module: "aa".into(),
+        inputs: vec!["in".into()],
+        output: "wl.wl.out".into(),
+        snapshot_every: 1000,
+        snapshot_every_ms: None,
+        keep_snapshots: None,
+        upgrades,
+        state: WorkloadState::Running,
+        limits: Limits::default(),
+        failure: None,
+        record: None,
+    };
+    let upgraded = spec(vec![Upgrade {
+        at: 10,
+        module: "bb".into(),
+    }]);
+    let claimed = HashMap::from([(0, spec(Vec::new())), (1, upgraded.clone())]);
+    let records = [
+        output::encode_claim_under(1, 0, 0, "x"),
+        output::encode(header(0, 0), 1, b"x"),
+        output::encode_claim_under(2, 1, 1, "y"),
+    ];
+    let cached = WorkloadSpec {
+        record: Some(1),
+        ..upgraded.clone()
+    };
+    let (lineage, _) = judged_under(&cached, &claimed, records.iter().map(Vec::as_slice));
+    assert_eq!(lineage.module, "aa");
+    assert_eq!(lineage.upgrades, upgraded.upgrades);
+    assert_eq!(lineage.module_at(9), "aa");
+    assert_eq!(lineage.module_at(10), "bb");
 }
