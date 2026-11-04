@@ -15,6 +15,7 @@
   A later spec that drops a recorded upgrade is refused. Upgrade every node before using
   `--upgrade-at`: older builds cannot read the upgrade record. Upgrades are an operator action and
   admission rejects requests that name them.
+- The state classes table in `docs/design.md` covers every cache and system stream felixd uses (#81), and a test fails when a new name has no row. It now lists the `leases`, `epochs`, `workloads` and `modules` caches and the `sys.intake` stream.
 - The scale test measures failover without waiting on its own harness. It scanned every output stream
   in one pass with the whole phase as its budget, so one stuck read made `leaders_moved_secs` and
   `without_output` measure the harness. Now a scan round takes at most 10 s, each read at most 3 s,

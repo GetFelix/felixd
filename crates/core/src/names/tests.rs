@@ -51,3 +51,18 @@ fn a_system_namespace_is_not_a_workload_namespace() {
     // The system namespace of any workload namespace is itself refused.
     assert!(validate_namespace(&system_namespace("prod")).is_err());
 }
+
+#[test]
+fn every_state_name_has_a_row_in_the_state_classes_table() {
+    let design = include_str!("../../../../docs/design.md");
+    let table = design
+        .split("### State classes")
+        .nth(1)
+        .and_then(|rest| rest.split("\n### ").next())
+        .expect("design.md has a State classes section");
+    for name in [
+        WORKLOADS, LEASES, EPOCHS, NODES, MODULES, DRAINS, SPECS, FACTS, INTAKE,
+    ] {
+        assert!(table.contains(&format!("`{name}`")), "no row for {name}");
+    }
+}
