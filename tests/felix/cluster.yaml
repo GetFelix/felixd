@@ -10,11 +10,17 @@
 
 name: felixd-cluster
 
+# Container logs live on the host disk until the container goes; cap them.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 50m, max-file: "3"}
+
 x-broker: &broker
   image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.7.0-preview.2}
   depends_on:
     felix-dev-auth:
       condition: service_completed_successfully
+  logging: *logging
   volumes:
     - felix-dev:/var/lib/felix
   healthcheck:
