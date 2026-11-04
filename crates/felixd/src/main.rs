@@ -280,7 +280,9 @@ enum Command {
         /// Leave the workload to an operator once it has been taken over more
         /// than this many times in a row with no output in between, within
         /// `--takeover-window-ms`. Counted from the claim records, so every
-        /// node agrees. Drains and lost leases count too. Unset never stops it.
+        /// node agrees. Drains and lost leases count too, so a workload that
+        /// rarely writes needs room for them. Upgrade every node first. Unset
+        /// never stops it.
         #[arg(long, requires = "takeover_window_ms")]
         max_takeovers: Option<u32>,
         /// The window for `--max-takeovers`, in milliseconds, by the append

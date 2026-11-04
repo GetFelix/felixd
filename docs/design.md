@@ -2285,7 +2285,7 @@ Payloads stay opaque bytes. The system's own records do not (#73):
     ends at an output or rejection, a trim (written after a snapshot, so
     progress), a claim of another spec record or of none, a record this build
     cannot read, or a record appended more than `window_ms` before the newest
-    claim, by the broker's append times. A claim of an epoch already counted
+    claim, by the append times the broker stores with each record. A claim of an epoch already counted
     is not counted again. The first claim of the run is its start, so a run of
     n claims is n - 1 takeovers.
   - Every holder counts right after its claim lands and its spec is checked
@@ -2308,9 +2308,14 @@ Payloads stay opaque bytes. The system's own records do not (#73):
     does not know reason 11 still reads the spec record from the header and
     leaves the workload alone. Kind 8 would not have, since it never blocks.
   - Drains, lost leases and scheduler moves are takeovers too, as the stream
-    cannot tell them from a crash. An idle workload makes no outputs, so a
-    rolling restart of n nodes can take it over n times in a row; set the
-    limit above that.
+    cannot tell them from a crash. Progress is only an output, rejection or
+    trim, so a workload that is idle, or that steps inputs but rarely writes
+    (a filter, a rare aggregate with no `keep_snapshots`), counts every such
+    move. A rolling restart of n nodes can take it over n times in a row; set
+    the limit above that.
+  - Only the holder's verdict matters: its fenced record settles it. A build
+    from before the field ignores it, and an admission holder of that build
+    drops it from the spec it accepts. Upgrade every node before setting it.
   There is no escalation tree. The TLA model gets the counter under
   `NoStaleFailure` (#104).
 - **Poison has a recorded way out.** The failing input is in the log, so every
