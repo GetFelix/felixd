@@ -219,6 +219,9 @@ keeps running; it restarts under the new spec like any spec change, and the old
 spec takes no snapshot after `felixd run` starts recording the upgrade. It writes the spec itself, so
 it needs the operator's token and does not go through admission
 ([Switching to the new module](docs/design.md#switching-to-the-new-module)).
+The new spec takes its settings from this command like any `felixd run`, so
+pass `--snapshot-every` and the limits again; a flag left out goes back to
+its default.
 
 `felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
 workload every 1000 inputs and at the first input of each minute, by the

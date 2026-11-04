@@ -62,12 +62,19 @@ async fn a_module_takes_over_at_the_input_the_spec_names() {
     let behind = t.run(ID, &changed, INPUT, &["--upgrade-at", "10"]);
     assert!(!behind.success());
 
+    // `felixd run` writes the whole spec, so the cadence is given again.
     assert!(
-        t.run(ID, &changed, INPUT, &["--upgrade-at", "20"])
-            .success()
+        t.run(
+            ID,
+            &changed,
+            INPUT,
+            &["--upgrade-at", "20", "--snapshot-every", "5"]
+        )
+        .success()
     );
     t.publish_all(INPUT, (15..30).map(count)).await;
     assert_eq!(written(&t, 30).await, totals(30, 20));
+    snapshot_from(&t, 20).await;
 
     // A node that takes over resumes from a snapshot of the old module and
     // reaches the upgrade on its own.
@@ -150,19 +157,29 @@ async fn an_owner_on_the_old_spec_snapshots_nothing_once_an_upgrade_is_on_the_wa
     // The spec that names an upgrade is written after the record, so its
     // owner snapshots again.
     assert!(
-        t.run(ID, &changed, INPUT, &["--upgrade-at", "40"])
-            .success()
+        t.run(
+            ID,
+            &changed,
+            INPUT,
+            &["--upgrade-at", "40", "--snapshot-every", "5"]
+        )
+        .success()
     );
     t.publish_all(INPUT, (30..50).map(count)).await;
     assert_eq!(written(&t, 50).await, totals(50, 40));
+    snapshot_from(&t, 40).await;
+}
+
+/// Waits for a snapshot of input `at` or later.
+async fn snapshot_from(t: &common::TestFelix, at: u64) {
     eventually(
         "a snapshot after the upgrade",
         Duration::from_secs(60),
         || async {
-            snapshots_taken(&t)
+            snapshots_taken(t)
                 .await
                 .iter()
-                .any(|&at| at >= 40)
+                .any(|&taken| taken >= at)
                 .then_some(())
         },
     )

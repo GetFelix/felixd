@@ -1175,7 +1175,9 @@ an input at or below the highest one with an output or a snapshot, and a module
 that cannot restore the state of the one it replaces (the same layout rules as
 a diff from a snapshot). The workload keeps running throughout: the agent
 restarts it under the new spec, as for any spec change, and the owner resumes
-as before.
+as before. The command writes the whole spec, so the workload's other flags
+(`--snapshot-every`, `--keep-snapshots`, the limits) are given again; one left
+out takes its default.
 
 The spec records the module that began the workload, in `module`, and a list of
 `upgrades`, each an input offset and a module hash. For a workload with several
