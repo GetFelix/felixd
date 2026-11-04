@@ -24,6 +24,10 @@ on:
         description: "Felix image tag to run; empty runs the release in .felix-version"
         type: string
         default: ""
+      election:
+        description: "on makes the brokers elect leaders without the control plane; off leaves them as before"
+        type: string
+        default: "off"
   workflow_dispatch:
     inputs:
       counts:
@@ -41,6 +45,11 @@ on:
       felix_image_tag:
         description: "Felix image tag to run, such as nightly; empty runs the release in .felix-version"
         default: ""
+      election:
+        description: "Replica election: on starts brokers with FELIX_INTERNAL_ELECTION=true and finalizes joint_fence and replica_election"
+        type: choice
+        options: ["off", "on"]
+        default: "off"
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,6 +63,7 @@ jobs:
       BUILD_SECS: ${{ inputs.build_secs || '1200' }}
       FAILOVER_SECS: ${{ inputs.failover_secs || '300' }}
       FELIX_IMAGE_TAG: ${{ inputs.felix_image_tag }}
+      ELECTION: ${{ inputs.election || 'off' }}
       RUST_LOG: warn
       FELIXD_REQUIRE_FELIX: "1"
       FELIX_BROKERS: 127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300
@@ -81,6 +91,14 @@ jobs:
         run: |
           export FELIX_VERSION=${FELIX_IMAGE_TAG:-$(sed -n 's/^version=//p' .felix-version)}
           echo "felix images: $FELIX_VERSION" | tee -a results/runner.txt
+          # Read by cluster.yaml: the brokers' FELIX_INTERNAL_ELECTION and the
+          # fleet features felix-fleet finalizes. Off leaves both unset.
+          case $ELECTION in
+            on) export FELIXD_ELECTION=true ;;
+            off) ;;
+            *) echo "::error::election must be on or off, not $ELECTION"; exit 1 ;;
+          esac
+          echo "election: $ELECTION" | tee -a results/runner.txt
           cluster=tests/felix/cluster.yaml
           failed=0
           first=1
