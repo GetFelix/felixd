@@ -24,6 +24,7 @@ use tokio::task::JoinSet;
 use crate::faults;
 use crate::felix::{Felix, Trimmed};
 use crate::input::{self, Feed, StepInput, merge_unreadable};
+use crate::intensity;
 use crate::lease::Fence;
 use crate::merge::MergeLog;
 use crate::metrics::{self, InputMetrics, WorkloadMetrics};
@@ -511,6 +512,12 @@ async fn run(
     // The agent looked before the lease claim. Again now: an owner of an
     // older spec may have claimed since, and none can once this claim is on.
     specs::refuse_stale_or_foreign(felix, id, spec).await?;
+    // After the claim, so that a node that crashes before recording the
+    // verdict leaves its claim for the next one to count. On every attempt,
+    // so a retry after a failed read still looks.
+    if let Some(limit) = spec.restart_intensity {
+        intensity::refuse_over_limit(felix, &spec.output, log.tail(), spec_record, limit).await?;
+    }
     log.metrics = workload_metrics.clone();
     let merge_stream = names::merge_stream(id);
     let mut merge = match spec.merged() {

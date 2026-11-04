@@ -2268,20 +2268,51 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   from the nodes that read the last record. The state `felixd ps` shows lasts
   until the next holder's claim record is written, and `felixd_degraded_total{class}` counts releases. Only
   the transient class is written today; a failure, poison or needs-operator
-  error never produces one. Counting degraded records across holders, and
-  keeping every node from claiming past a limit, is
-  [#99](https://github.com/GetFelix/felixd/issues/99).
-- **Restart intensity is counted cluster-wide.** The release above is per
-  holder, so a workload that fails everywhere would bounce between nodes, each
-  spending its own budget. The spec sets MaxR takeovers per window. Any
-  claimer counts them from the claim records on `wl.<id>.out`; past the limit
-  it records `degraded` with class needs operator, fenced by epoch like the
-  `failed` write (#70), and nothing claims the workload until an operator acts.
-  That blocking record will get a new kind. Kind 8 never blocks, and builds
-  that predate the blocking kind treat kind 8 as non-blocking whatever its
-  class, so reusing it would let those nodes claim anyway.
+  error never produces one. Keeping every node from claiming past a limit
+  is the restart intensity below.
+- **Restart intensity is counted cluster-wide** (#99). The release above is
+  per holder, so a workload that fails everywhere would bounce between nodes,
+  each spending its own budget. The class is log record: the count is derived
+  from the claim records on `wl.<id>.out` and nothing else holds it, so there
+  is no counter to agree on, lose or repeat. The rules:
+  - The spec sets `restart_intensity: {max_takeovers, window_ms}`
+    (`felixd run --max-takeovers N --takeover-window-ms MS`). Unset, nothing
+    is counted and the spec encodes as before.
+  - A takeover is a claim record naming the same spec record as the one before
+    it, with no output or rejection between them: the earlier holder got
+    nowhere. A run of claims starts at the stream's newest claim and walks
+    back over failure, needs-operator, degraded and divergence records. It
+    ends at an output or rejection, a trim (written after a snapshot, so
+    progress), a claim of another spec record or of none, a record this build
+    cannot read, or a record appended more than `window_ms` before the newest
+    claim, by the broker's append times. A claim of an epoch already counted
+    is not counted again. The first claim of the run is its start, so a run of
+    n claims is n - 1 takeovers.
+  - Every holder counts right after its claim lands and its spec is checked
+    against later ones, and on every retry. Past `max_takeovers` it records
+    needs operator with reason 11, restart intensity, fenced by epoch like
+    every needs-operator record: it renews, appends with `publish_if` at the
+    tail and is refused behind a later claim, so a deposed holder writes
+    nothing. It then releases the lease and every node leaves the workload
+    alone until a new spec record, as for any needs-operator record.
+  - Every node agrees on whether a claim is past the limit, because the verdict
+    is a function of the records up to it and their append times, which every
+    node reads alike. A holder that crashes before recording the verdict leaves
+    its claim on the stream, and the next holder's walk counts it, so a
+    takeover is neither lost nor counted twice across a crash. A deposed owner
+    adds to the count only by a claim that lands, and a claim is a conditional
+    append at the tail, so it lands before the later owner's claim or not at
+    all. Its holder then got nowhere, which is what the count measures. A
+    deposed owner's verdict is refused behind the later claim.
+  - Reusing kind 6 instead of a new kind keeps older builds out: a build that
+    does not know reason 11 still reads the spec record from the header and
+    leaves the workload alone. Kind 8 would not have, since it never blocks.
+  - Drains, lost leases and scheduler moves are takeovers too, as the stream
+    cannot tell them from a crash. An idle workload makes no outputs, so a
+    rolling restart of n nodes can take it over n times in a row; set the
+    limit above that.
   There is no escalation tree. The TLA model gets the counter under
-  `NoStaleFailure` (#104). Implementation is #99.
+  `NoStaleFailure` (#104).
 - **Poison has a recorded way out.** The failing input is in the log, so every
   replay reaches it. An operator resolves it with a spec change at offset N
   that either skips input N, copying it to a dead-letter stream, or switches

@@ -10,6 +10,7 @@ fn spec(id: &str) -> WorkloadSpec {
         snapshot_every: 10,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits::default(),

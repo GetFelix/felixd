@@ -276,6 +276,7 @@ async fn spec_for(t: &common::TestFelix, module: &[u8]) -> WorkloadSpec {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits::default(),

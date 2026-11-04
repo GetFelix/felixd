@@ -84,6 +84,9 @@ pub enum OperatorReason {
     /// Admission runs, and the spec record names no decision of admission
     /// that accepted exactly this spec.
     SpecUnadmitted,
+    /// More takeovers in a row without progress than the spec's restart
+    /// intensity allows ([`crate::intensity`]).
+    RestartIntensity,
 }
 
 impl OperatorReason {
@@ -99,6 +102,7 @@ impl OperatorReason {
             OperatorReason::InputBehind => 8,
             OperatorReason::HistoryTrimmed => 9,
             OperatorReason::SpecUnadmitted => 10,
+            OperatorReason::RestartIntensity => 11,
         }
     }
 
@@ -114,6 +118,7 @@ impl OperatorReason {
             8 => OperatorReason::InputBehind,
             9 => OperatorReason::HistoryTrimmed,
             10 => OperatorReason::SpecUnadmitted,
+            11 => OperatorReason::RestartIntensity,
             other => return Err(DecodeError::UnknownReason(other)),
         })
     }
@@ -132,6 +137,7 @@ impl fmt::Display for OperatorReason {
             OperatorReason::InputBehind => "input stream behind the workload",
             OperatorReason::HistoryTrimmed => "a record the workload needs was trimmed",
             OperatorReason::SpecUnadmitted => "spec not admitted",
+            OperatorReason::RestartIntensity => "restart intensity exceeded",
         })
     }
 }

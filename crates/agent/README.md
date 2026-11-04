@@ -21,6 +21,7 @@ binary depends on it.
 | `ps` | What `felixd ps` does: each workload's state, holder, assignment and positions, and each node, read from the caches and streams. |
 | `retention` and `readers` | Deleting history below a trim record's floors, and finding the workloads that read a stream so it is deleted only below the lowest floor of all of them. |
 | `drain` | Drain marks in the `drains` cache: `mark`, `lift` and `held_by`. |
+| `intensity` | `refuse_over_limit`, which reads the output stream back from its tail until the restart intensity count has a verdict. |
 | `stuck` | `retry`, which runs a workload's attempts until one ends the run or they have failed for the stuck bound with no progress in between. |
 | `settings`, `admin`, `felix` | How to reach Felix, the control plane's REST calls, and the Felix calls felixd makes. Tokens are a `Secret`, which formats as a placeholder; `expose` is called only where a token is handed to Felix. |
 
@@ -82,6 +83,10 @@ Behaviour that matters:
   appended), the holder appends a degraded record behind its epoch, best effort, and deletes its
   lease, and leaves the workload alone for `--degraded-backoff-ms`. The spec stays `running`, so
   other nodes can claim it. `--stuck-after-ms 0` turns this off.
+- **Restart intensity.** With `restart_intensity` in the spec, a holder counts the takeovers in a
+  row before its own from the claim records on the output stream (`intensity`), right after its
+  claim lands. Past the limit it records needs operator, reason restart intensity, behind its epoch
+  and releases the lease, and no node runs that spec record again.
 
 The `faults` feature lets `FELIXD_FAULTS` inject crashes and dropped answers, such as
 `crash-after-append-sent=3`. Only the `felixd` integration tests enable it; a normal build

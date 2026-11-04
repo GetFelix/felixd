@@ -5,8 +5,8 @@ use felix_client::ConditionalWrite;
 use felixd_core::module::ModuleInfo;
 use felixd_core::snapshot::{self, Pending};
 use felixd_core::spec::{
-    DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, Upgrade, WorkloadSpec, WorkloadState,
-    validate_inputs,
+    DEFAULT_SNAPSHOT_EVERY, Limits, RestartIntensity, SpecRecord, Upgrade, WorkloadSpec,
+    WorkloadState, validate_inputs,
 };
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
@@ -32,6 +32,8 @@ pub struct Submission {
     pub snapshot_every: u64,
     pub snapshot_every_ms: Option<u64>,
     pub keep_snapshots: Option<u32>,
+    /// How many takeovers in a row without progress the spec allows.
+    pub restart_intensity: Option<RestartIntensity>,
     pub limits: Limits,
     pub replication_factor: u32,
     /// Replace the workload's module with `module` from this input on, and
@@ -48,6 +50,7 @@ impl Submission {
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
             snapshot_every_ms: None,
             keep_snapshots: None,
+            restart_intensity: None,
             limits: Limits::default(),
             replication_factor: DEFAULT_REPLICATION_FACTOR,
             upgrade_at: None,
@@ -79,6 +82,12 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     }
     if submission.snapshot_every_ms == Some(0) {
         bail!("snapshot_every_ms must be at least 1");
+    }
+    if submission
+        .restart_intensity
+        .is_some_and(|r| r.window_ms == 0)
+    {
+        bail!("the restart intensity window must be at least 1 ms");
     }
     let kind = StreamKind {
         replication_factor: submission.replication_factor,
@@ -119,6 +128,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         snapshot_every: submission.snapshot_every,
         snapshot_every_ms: submission.snapshot_every_ms,
         keep_snapshots: submission.keep_snapshots,
+        restart_intensity: submission.restart_intensity,
         upgrades,
         state: WorkloadState::Running,
         limits: submission.limits,

@@ -9,6 +9,7 @@ fn spec(state: WorkloadState, record: Option<u64>) -> WorkloadSpec {
         snapshot_every: 10,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state,
         limits: Default::default(),
