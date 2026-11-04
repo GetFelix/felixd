@@ -1211,11 +1211,22 @@ resumes, and a different result fails the workload as a divergence. Choose an
 input far enough ahead of the live one that the agents have the new spec by
 the time it arrives.
 
+Every node must run a build that knows the upgrade record before anyone uses
+`--upgrade-at`: an older build cannot read the snapshot stream once the record
+is on it. A later spec must keep the upgrades already recorded, so `felixd run`
+and the agents refuse one that drops or changes them once the workload has
+output. Two `felixd run`s racing on one workload are not fenced against each
+other: one that read the spec before the upgrade was recorded writes a spec
+the upgrade record does not hold back. The new module's in-memory snapshot at
+the switch is metered like any snapshot, and running out of snapshot fuel
+there fails the workload, since the switch cannot be skipped.
+
 Upgrades are an operator action. `felixd run --upgrade-at` writes the spec
 directly and does not go through admission, which rejects a request that names
 upgrades. A rollback is a new upgrade to the old module at a later input.
 There is no way yet to shadow-run the new module on live input before the
 switch (#102).
+
 ## Grants
 
 `felixd init` writes these as Felix RBAC policies for three roles per

@@ -136,6 +136,23 @@ fn only_a_new_module_or_input_conflicts_with_written_history() {
 }
 
 #[test]
+fn dropping_a_recorded_upgrade_conflicts_with_written_history() {
+    let mut old = spec();
+    old.upgrades = vec![Upgrade {
+        at: 20,
+        module: "cd".repeat(32),
+    }];
+    let mut next = old.clone();
+    next.upgrades.push(Upgrade {
+        at: 40,
+        module: "ef".repeat(32),
+    });
+    assert_eq!(old.conflicts_with_history(&next), None);
+    next.upgrades.clear();
+    assert!(old.conflicts_with_history(&next).is_some());
+}
+
+#[test]
 fn a_spec_record_round_trips_and_an_unknown_format_is_refused() {
     let record = SpecRecord::new("temp", spec());
     assert_eq!(SpecRecord::decode(&record.encode()), Ok(record.clone()));

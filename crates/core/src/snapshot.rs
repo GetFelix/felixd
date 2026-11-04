@@ -101,8 +101,7 @@ impl Pending {
     /// Whether it binds an owner running spec record `record`, which it does
     /// unless that spec was written after it.
     pub fn binds(&self, record: Option<u64>) -> bool {
-        let _ = record;
-        false
+        record.is_none_or(|r| r < self.specs_from)
     }
 }
 

@@ -736,7 +736,7 @@ pub fn judged_from<'a>(
     let ran = |spec: u64| {
         claimed
             .get(&spec)
-            .is_some_and(|s| s.conflicts_with_history(&lineage).is_none())
+            .is_some_and(|s| lineage.conflicts_with_history(s).is_none())
     };
     let applied = specs_applied(records, ran);
     // The module takes over at the offset the spec states, not where the

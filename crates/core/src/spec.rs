@@ -128,13 +128,17 @@ impl WorkloadSpec {
     /// Why `next` cannot replace this spec on streams that already hold its
     /// output or snapshots, if it cannot. Another module or inputs would not
     /// reproduce what is written, and the next owner would find the stream
-    /// diverged. The other fields may change: a running workload restarts
+    /// diverged, and so would dropping an upgrade. The other fields may change: a running workload restarts
     /// under the new spec.
     pub fn conflicts_with_history(&self, next: &WorkloadSpec) -> Option<String> {
         if self.module != next.module {
             Some(format!("it runs module {}", self.module))
         } else if self.inputs != next.inputs {
             Some(format!("it reads {}", self.inputs.join(", ")))
+        } else if !next.upgrades.starts_with(&self.upgrades) {
+            // Inputs from an upgrade on ran its module, and a snapshot past
+            // it holds that module's state.
+            Some("it drops or changes an upgrade already recorded".to_owned())
         } else {
             None
         }

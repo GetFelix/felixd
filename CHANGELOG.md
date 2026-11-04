@@ -12,7 +12,9 @@
   not declare it can restore the old one's snapshot layout. It writes an upgrade record to `.snap`
   with `publish_if` at the tail it checked before the spec, and an owner on an older spec writes no
   snapshot once it has seen one, so the old module cannot leave a snapshot past the upgrade.
-  Upgrades are an operator action and admission rejects requests that name them.
+  A later spec that drops a recorded upgrade is refused. Upgrade every node before using
+  `--upgrade-at`: older builds cannot read the upgrade record. Upgrades are an operator action and
+  admission rejects requests that name them.
 - The scale test measures failover without waiting on its own harness. It scanned every output stream
   in one pass with the whole phase as its budget, so one stuck read made `leaders_moved_secs` and
   `without_output` measure the harness. Now a scan round takes at most 10 s, each read at most 3 s,

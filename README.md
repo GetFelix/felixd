@@ -263,8 +263,9 @@ runs out is left to an operator, who can raise the limit. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new
 module or input is refused once the workload has written anything; use a new
-id for new code, or `--upgrade-at` to switch the module at a later input. `felixd run` refuses it, and so does the agent when the output
-stream's first claim names a spec, which claims written before spec records
+id for new code, or `--upgrade-at` to switch the module at a later input.
+Dropping an upgrade already recorded is refused the same way. `felixd run`
+refuses it, and so does the agent when the output stream's first claim names a spec, which claims written before spec records
 don't. Each claim names the spec it runs, so `felixd check` and
 `felixd replay --diff` judge each output under the module and limits it ran with. A workload that traps, runs
 out of fuel, returns `poison`, breaks the contract (an invalid output name, an
