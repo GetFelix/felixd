@@ -106,5 +106,9 @@ The measurements and what they showed are in [docs/design.md](docs/design.md#sca
 ## Pull requests
 
 - CI must pass before merge. Merges are squash only.
+- Record anything a user or an operator would notice as a fragment in `changelog.d/`
+  (`<name>.<section>.md`, see [changelog.d/README.md](changelog.d/README.md)). Never edit
+  `CHANGELOG.md` directly: fragments are merged into it at release time, so pull requests
+  don't conflict on the changelog.
 - No AI attribution in commits or pull request descriptions.
 - List design calls under "Review notes", and Felix gaps you hit under "Felix gaps found", with the issue each one is filed as.
