@@ -61,6 +61,12 @@ each failover, and the job gives up after `timeout_minutes`. A count can carry a
 0.7.0-preview.2; the limits allow 4 hours at most for the default counts. If the smallest count never gets all
 workloads running, the run stops there (a broken cluster or harness).
 
+`election` is `off` by default. Set it to `on` to run the brokers with `FELIX_INTERNAL_ELECTION=true`, so replicas
+elect a new leader themselves when the control plane cannot. Before any workload starts, `felix-fleet` then also
+finalizes `stream_incarnations`, `cache_incarnations`, `joint_fence` and `replica_election`, in that order, and the run
+stops if the control plane refuses one. It needs a Felix image that has replica election, such as a nightly after
+GetFelix/felix#1823; compare its failover columns with a run that has `election` off.
+
 When the run ends, its summary page shows one row per count, and the `scale-results` artifact holds
 `scale-<N>-ttl<T>.json` (for example `scale-1000-ttl10.json`) with every figure (including the lease census while
 the workloads started, and memory at each phase), plus the end of each container's log. The columns:
