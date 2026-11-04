@@ -14,6 +14,7 @@
 //! - [`module`]: how a module is identified and which snapshot layouts it
 //!   declares.
 //! - [`merge`]: the merge log of a workload with several inputs.
+//! - [`intensity`]: whether a takeover is past the spec's restart intensity.
 //! - [`resume`]: where a new owner picks a workload up.
 //! - [`replay`]: where a replay starts and stops.
 //! - [`check`]: what is wrong with an output stream, against a replay.
@@ -25,6 +26,7 @@ pub mod admission;
 pub mod check;
 pub mod class;
 pub mod grants;
+pub mod intensity;
 pub mod lease;
 pub mod merge;
 pub mod module;

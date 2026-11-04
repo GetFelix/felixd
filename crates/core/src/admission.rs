@@ -86,6 +86,9 @@ pub struct Decision {
     pub outcome: Outcome,
 }
 
+// Decisions are decoded and handled one at a time, so the spec is not worth
+// a box.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "lowercase")]
 pub enum Outcome {
@@ -314,6 +317,9 @@ fn check(
         || spec.keep_snapshots == Some(0)
     {
         return invalid("snapshot intervals and counts are at least 1");
+    }
+    if spec.restart_intensity.is_some_and(|r| r.window_ms == 0) {
+        return invalid("the restart intensity window is at least 1 ms");
     }
     if !is_module_hash(&spec.module) {
         return invalid("the module is the hex sha256 of its bytes");

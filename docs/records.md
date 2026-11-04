@@ -67,7 +67,7 @@ continues with:
 | Bytes | Field |
 |---|---|
 | 8 | the `sys.specs` offset of the spec record |
-| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel, 7 input record unreadable by this build, 8 input stream behind the workload, 9 a record the workload needs was trimmed |
+| 2 | the reason: 1 module refused, 2 module missing, 3 spec not recorded, 4 spec conflicts with the output, 5 spec stale, 6 restore out of fuel, 7 input record unreadable by this build, 8 input stream behind the workload, 9 a record the workload needs was trimmed, 10 spec not admitted, 11 restart intensity exceeded |
 | rest | detail for people, UTF-8 |
 
 A holder appends it the way it appends a failure, behind everything of earlier epochs, and then
@@ -88,6 +88,13 @@ sees the problem, and a node checks for one before it records anything else. A s
 node still reads as past the tail of `sys.specs` after 30 seconds is recorded as spec not recorded,
 so a spec-history read lagging that long stops the workload on every node until the spec is
 submitted again.
+
+Restart intensity exceeded, reason 11, is written by a holder whose claim is the takeover past the
+spec's `restart_intensity`: more than `max_takeovers` takeovers of the same spec record in a row,
+that is more than `max_takeovers` + 1 claims of it with no output, rejection or trim between them, within `window_ms` of the newest one by the records'
+append times ([design.md](design.md#system-records-and-errors) has the rules). Every node reads
+the same records and append times, so every node reaches the same verdict for a claim. A build
+that does not know reason 11 still leaves the workload alone, as for any unknown reason.
 
 A degraded record, kind 8, says that the holder of a spec record gave up on a workload that stayed
 stuck on an error, and let go of its lease. It continues with:

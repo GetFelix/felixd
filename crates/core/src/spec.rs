@@ -36,6 +36,11 @@ pub struct WorkloadSpec {
     /// keeps everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_snapshots: Option<u32>,
+    /// How many takeovers in a row without progress a spec record allows
+    /// before it is left to an operator ([`crate::intensity`]). Unset allows
+    /// any number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_intensity: Option<RestartIntensity>,
     /// Modules that replace `module` at an input offset, ascending. Input
     /// `at` and every later one run the module of the last upgrade with
     /// `at` at or below it. `module` stays the one the workload began with,
@@ -73,6 +78,17 @@ pub struct Upgrade {
     pub at: u64,
     /// Hex sha256 of the module.
     pub module: String,
+}
+
+/// The restart intensity limit: more than `max_takeovers` takeovers within
+/// `window_ms`, with no progress between them, and the workload needs an
+/// operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartIntensity {
+    pub max_takeovers: u32,
+    /// By the append times of the claim records, so every node measures the
+    /// same window. At least 1.
+    pub window_ms: u64,
 }
 
 /// What a workload may use.

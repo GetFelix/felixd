@@ -59,7 +59,7 @@ const SNAPSHOT_BUCKETS: &[f64] = &[0.005, 0.025, 0.1, 0.5, 1.0, 5.0, 30.0, 120.0
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
 /// Every operator reason, in the order its series are written.
-const REASONS: [OperatorReason; 10] = [
+const REASONS: [OperatorReason; 11] = [
     OperatorReason::ModuleRefused,
     OperatorReason::ModuleMissing,
     OperatorReason::SpecUnrecorded,
@@ -70,6 +70,7 @@ const REASONS: [OperatorReason; 10] = [
     OperatorReason::InputBehind,
     OperatorReason::HistoryTrimmed,
     OperatorReason::SpecUnadmitted,
+    OperatorReason::RestartIntensity,
 ];
 
 fn reason_label(reason: OperatorReason) -> &'static str {
@@ -84,6 +85,7 @@ fn reason_label(reason: OperatorReason) -> &'static str {
         OperatorReason::InputBehind => "input_behind",
         OperatorReason::HistoryTrimmed => "history_trimmed",
         OperatorReason::SpecUnadmitted => "spec_unadmitted",
+        OperatorReason::RestartIntensity => "restart_intensity",
     }
 }
 

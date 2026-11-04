@@ -325,6 +325,24 @@ If a workload keeps coming back as `degraded`:
    moves the problem. `felixd_degraded_total` in a node's metrics counts how
    often it gave up.
 
+A node's stuck bound stops one node retrying for ever, but a workload that
+fails on every node would still move from node to node. To stop it there, give
+the spec a restart intensity:
+
+```
+felixd run --id counter --input in --max-takeovers 5 --takeover-window-ms 600000 counter.wasm
+```
+
+Every holder counts, from the claim records on the output stream, how many
+times in a row the workload was taken over with no output, rejection or
+trim in between, within
+the last ten minutes by the records' append times. The sixth such takeover is
+recorded as `needs-operator` with the reason `restart intensity exceeded`, and
+no node runs it again until `felixd run` writes a new spec record. Drains and
+rolling restarts count too, and a workload that rarely writes an output
+counts every one of them, so set the limit above the moves those cause.
+Upgrade every node first: a build that predates the flag ignores it.
+
 The limits belong to each node. To change them:
 
 ```

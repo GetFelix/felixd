@@ -19,6 +19,8 @@
 //! - [`merge`]: appends to the merge log of a workload with several inputs.
 //! - [`input`]: what a step is given and what it produced, the same for every
 //!   caller.
+//! - [`intensity`]: counts a workload's takeovers against its restart
+//!   intensity.
 //! - [`stuck`]: when a workload failing on transient errors counts as stuck.
 //! - [`snapshots`]: reads snapshots and their chunks back.
 //! - [`retention`]: deletes history below a trim record's floors.
@@ -45,6 +47,7 @@ pub mod submit;
 
 mod faults;
 mod input;
+mod intensity;
 mod lease;
 mod merge;
 mod output;

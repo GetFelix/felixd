@@ -19,7 +19,7 @@ use felixd_agent::settings::TokenSource;
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
-use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_core::spec::{RestartIntensity, WorkloadSpec, WorkloadState};
 use felixd_core::{module, names};
 use felixd_runtime::{Limits, Runtime};
 
@@ -277,6 +277,18 @@ enum Command {
         /// --grant-trim`. Unset keeps everything.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         keep_snapshots: Option<u32>,
+        /// Leave the workload to an operator once it has been taken over more
+        /// than this many times in a row with no output in between, within
+        /// `--takeover-window-ms`. Counted from the claim records, so every
+        /// node agrees. Drains and lost leases count too, so a workload that
+        /// rarely writes needs room for them. Upgrade every node first. Unset
+        /// never stops it.
+        #[arg(long, requires = "takeover_window_ms")]
+        max_takeovers: Option<u32>,
+        /// The window for `--max-takeovers`, in milliseconds, by the append
+        /// times of the claim records.
+        #[arg(long, requires = "max_takeovers", value_parser = clap::value_parser!(u64).range(1..))]
+        takeover_window_ms: Option<u64>,
         /// Fuel given to each call into the workload. It is stored in the
         /// spec, so every node runs the workload under the same limit.
         #[arg(long, default_value_t = Limits::default().fuel_per_call)]
@@ -529,6 +541,8 @@ async fn main() -> Result<()> {
             snapshot_every,
             snapshot_every_ms,
             keep_snapshots,
+            max_takeovers,
+            takeover_window_ms,
             fuel,
             max_memory,
             snapshot_fuel,
@@ -545,6 +559,13 @@ async fn main() -> Result<()> {
                 max_memory_bytes: max_memory,
                 snapshot_fuel,
             };
+            let restart_intensity =
+                max_takeovers
+                    .zip(takeover_window_ms)
+                    .map(|(max_takeovers, window_ms)| RestartIntensity {
+                        max_takeovers,
+                        window_ms,
+                    });
             if !names::is_system(&id) && upgrade_at.is_none() {
                 let felix = Felix::connect(&settings).await?;
                 if admission::runs(&felix).await? {
@@ -556,6 +577,7 @@ async fn main() -> Result<()> {
                     spec.snapshot_every = snapshot_every;
                     spec.snapshot_every_ms = snapshot_every_ms;
                     spec.keep_snapshots = keep_snapshots;
+                    spec.restart_intensity = restart_intensity;
                     spec.limits = limits;
                     let within = Duration::from_secs(wait_secs);
                     let submitted =
@@ -573,6 +595,7 @@ async fn main() -> Result<()> {
             submission.snapshot_every = snapshot_every;
             submission.snapshot_every_ms = snapshot_every_ms;
             submission.keep_snapshots = keep_snapshots;
+            submission.restart_intensity = restart_intensity;
             submission.limits = limits;
             submission.replication_factor = replication_factor;
             submission.upgrade_at = upgrade_at;

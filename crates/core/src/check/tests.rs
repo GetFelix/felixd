@@ -547,6 +547,7 @@ fn a_refused_new_module_never_decides_what_a_check_runs() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
@@ -586,6 +587,7 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
@@ -624,6 +626,7 @@ fn a_degraded_record_before_the_first_claim_is_passed_over() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Default::default(),
@@ -973,6 +976,7 @@ fn a_check_judges_a_cut_stream_under_the_spec_its_trim_carries() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
@@ -1128,6 +1132,7 @@ fn a_divergence_record_before_the_first_claim_is_passed_over() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Default::default(),
@@ -1194,6 +1199,7 @@ fn the_latest_spec_that_ran_decides_the_upgrades() {
         snapshot_every: 1000,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        restart_intensity: None,
         upgrades,
         state: WorkloadState::Running,
         limits: Limits::default(),
