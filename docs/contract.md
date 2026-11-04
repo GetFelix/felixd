@@ -398,6 +398,7 @@ are ignored.
 |---|---|
 | 0, chunk | sha256 (32), bytes |
 | 1, manifest | input offset (8), output tail (8), chunk count (4), then per chunk its sha256 (32) and the offset (8) on `.snap` of a chunk record holding it |
+| 2, upgrade | input offset (8) of the upgrade, `sys.specs` tail (8) when it was written. Epoch 0. Not a snapshot: an owner whose spec record is below that tail writes no snapshot once it has seen one |
 
 Every record carries the writer's epoch after the kind and is appended with
 `publish_if` at the snapshot tail, so the fence and the superseded check are

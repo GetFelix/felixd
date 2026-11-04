@@ -370,6 +370,18 @@ impl fmt::Display for SnapshotSkipped {
 
 impl std::error::Error for SnapshotSkipped {}
 
+/// A snapshot write found an upgrade record its spec predates.
+#[derive(Debug)]
+struct HeldForUpgrade;
+
+impl fmt::Display for HeldForUpgrade {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an upgrade is being recorded")
+    }
+}
+
+impl std::error::Error for HeldForUpgrade {}
+
 /// Snapshots abandoned for want of fuel since this process started.
 static SNAPSHOTS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
@@ -525,6 +537,7 @@ async fn run(
         return Err(Superseded(epoch).into());
     }
     let snapshot = latest.snapshot;
+    let held_for_upgrade = latest.pending.iter().any(|p| p.binds(spec.record));
     let last_output = last_output(felix, &spec.output, output_tail).await?;
     if let Some((_, last)) = last_output.filter(|(_, last)| last.epoch > fence.epoch()) {
         tracing::info!(
@@ -623,6 +636,7 @@ async fn run(
         spec,
         snap_stream: &snap_stream,
         snap_tail,
+        held_for_upgrade,
         fence,
         workload,
         upgrades,
@@ -1002,6 +1016,10 @@ struct Steps<'a> {
     snap_stream: &'a str,
     /// The snapshot stream's next offset, as far as this owner knows.
     snap_tail: u64,
+    /// An upgrade record this owner's spec predates is on the snapshot
+    /// stream, so it writes no more snapshots: it may be past the upgrade's
+    /// input on the old module. The spec naming the upgrade restarts it.
+    held_for_upgrade: bool,
     fence: &'a Fence,
     workload: Option<Workload>,
     /// Upgrades not reached yet, the next one last.
@@ -1152,7 +1170,7 @@ impl Steps<'_> {
     }
 
     async fn snapshot(&mut self, input_offset: u64) -> Result<()> {
-        if faults::skip_snapshot() {
+        if self.held_for_upgrade || faults::skip_snapshot() {
             return Ok(());
         }
         faults::before_snapshot();
@@ -1188,7 +1206,19 @@ impl Steps<'_> {
             epoch: self.fence.epoch(),
         };
         faults::before_snapshot_write();
-        let manifest = self.write_snapshot(taken, &chunks).await?;
+        let manifest = match self.write_snapshot(taken, &chunks).await {
+            Ok(manifest) => manifest,
+            Err(error) if error.is::<HeldForUpgrade>() => {
+                tracing::info!(
+                    workload = self.snap_stream,
+                    input = input_offset,
+                    "an upgrade is being recorded; no more snapshots under this spec"
+                );
+                self.held_for_upgrade = true;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         metrics::snapshot(Some(started.elapsed()));
         if let Some(m) = &self.metrics {
             m.snapshot_size(chunks.iter().map(|c| c.len() as u64).sum());
@@ -1445,7 +1475,13 @@ impl Steps<'_> {
                         .read_range(self.snap_stream, self.snap_tail, tail)
                         .await?;
                     for found in &found {
-                        let epoch = snapshot::decode(&found.payload).map_or(0, |r| r.epoch());
+                        let decoded = snapshot::decode(&found.payload);
+                        if let Ok(snapshot::Record::Upgrade(pending)) = decoded
+                            && pending.binds(self.spec.record)
+                        {
+                            return Err(HeldForUpgrade.into());
+                        }
+                        let epoch = decoded.map_or(0, |r| r.epoch());
                         if epoch > self.fence.epoch() {
                             return Err(Superseded(epoch).into());
                         }

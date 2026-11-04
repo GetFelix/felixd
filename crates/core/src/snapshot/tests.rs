@@ -63,8 +63,8 @@ fn an_unknown_version_is_refused() {
     record[0] = 4;
     assert_eq!(decode(&record), Err(DecodeError::UnknownVersion(4)));
     let mut chunk = encode_chunk(1, &sha256(b""), b"");
-    chunk[1] = 2;
-    assert_eq!(decode(&chunk), Err(DecodeError::UnknownKind(2)));
+    chunk[1] = 3;
+    assert_eq!(decode(&chunk), Err(DecodeError::UnknownKind(3)));
 }
 
 fn manifest(epoch: u64, chunks: &[(&[u8], u64)]) -> Manifest {
@@ -222,4 +222,28 @@ fn an_input_in_a_new_interval_starts_one() {
 #[test]
 fn a_clock_that_stepped_back_starts_nothing() {
     assert!(!starts_interval(100, Some(350_000), 120_000));
+}
+
+#[test]
+fn an_upgrade_record_round_trips_and_is_no_snapshot() {
+    let pending = Pending {
+        at: 20,
+        specs_from: 7,
+    };
+    let record = encode_upgrade(&pending);
+    let decoded = decode(&record).unwrap();
+    assert_eq!(decoded, Record::Upgrade(pending));
+    assert_eq!(decoded.taken(), None);
+    assert_eq!(decoded.epoch(), 0);
+}
+
+#[test]
+fn an_upgrade_binds_only_specs_written_before_it() {
+    let pending = Pending {
+        at: 20,
+        specs_from: 7,
+    };
+    assert!(pending.binds(Some(6)));
+    assert!(pending.binds(None));
+    assert!(!pending.binds(Some(7)));
 }

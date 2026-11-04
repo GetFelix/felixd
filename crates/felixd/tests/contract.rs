@@ -228,6 +228,7 @@ async fn snapshot_layout(t: &TestFelix) -> String {
             snapshot::Record::Chunk { .. } => 'C',
             snapshot::Record::Manifest(_) => 'M',
             snapshot::Record::Whole(..) => 'W',
+            snapshot::Record::Upgrade(_) => 'U',
         })
         .collect()
 }

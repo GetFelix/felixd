@@ -1,7 +1,9 @@
 //! `felixd run`: store a module and start a workload.
 
 use anyhow::{Result, anyhow, bail};
+use felix_client::ConditionalWrite;
 use felixd_core::module::ModuleInfo;
+use felixd_core::snapshot::{self, Pending};
 use felixd_core::spec::{
     DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, Upgrade, WorkloadSpec, WorkloadState,
     validate_inputs,
@@ -10,6 +12,7 @@ use felixd_core::{module, names};
 use felixd_runtime::Runtime;
 
 use crate::admin::{self, StreamKind};
+use crate::faults;
 use crate::felix::Felix;
 use crate::module_store;
 use crate::runner::last_output;
@@ -107,7 +110,8 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let snap_stream = names::snapshot_stream(&submission.id);
     module_store::put(&felix, &submission.module).await?;
     let previous = previous_spec(&felix, &submission.id).await?;
-    let (module, upgrades) = modules_for(&felix, &submission, &hash, previous.as_ref()).await?;
+    let (module, upgrades, checked) =
+        modules_for(&felix, &submission, &hash, previous.as_ref()).await?;
     let mut spec = WorkloadSpec {
         module,
         inputs: submission.inputs,
@@ -143,6 +147,12 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
             submission.id
         );
     }
+    if let Some(checked) = &checked {
+        record_upgrade(&felix, checked).await?;
+        if faults::stop_after_upgrade_record() {
+            bail!("injected: stopped before the spec record");
+        }
+    }
     let record = SpecRecord::new(&submission.id, spec.clone());
     let ours = specs::append(&felix, &record).await?;
     spec.record = Some(ours);
@@ -168,16 +178,16 @@ async fn modules_for(
     submission: &Submission,
     hash: &str,
     previous: Option<&WorkloadSpec>,
-) -> Result<(String, Vec<Upgrade>)> {
+) -> Result<(String, Vec<Upgrade>, Option<Checked>)> {
     let id = &submission.id;
     let Some(at) = submission.upgrade_at else {
         return Ok(match previous {
             Some(previous)
                 if !previous.upgrades.is_empty() && hash == previous.module_at(u64::MAX) =>
             {
-                (previous.module.clone(), previous.upgrades.clone())
+                (previous.module.clone(), previous.upgrades.clone(), None)
             }
-            _ => (hash.to_owned(), Vec::new()),
+            _ => (hash.to_owned(), Vec::new(), None),
         });
     };
     let Some(previous) = previous else {
@@ -191,7 +201,8 @@ async fn modules_for(
     let mut stepped = last_output(felix, output, felix.tail(output).await?)
         .await?
         .map(|(_, last)| last.header.input_offset);
-    let snapshot = snapshots::latest(felix, &snapshots, felix.tail(&snapshots).await?)
+    let snap_tail = felix.tail(&snapshots).await?;
+    let snapshot = snapshots::latest(felix, &snapshots, snap_tail)
         .await
         .map_err(snapshots::ReadError::into_anyhow)?
         .snapshot
@@ -225,7 +236,43 @@ async fn modules_for(
     if let Err(why) = module::can_restore(&old, &new) {
         bail!("the new module cannot take over the state of {running}: {why}");
     }
-    Ok((previous.module.clone(), next.upgrades))
+    let checked = Checked {
+        snapshots,
+        snap_tail,
+        at,
+    };
+    Ok((previous.module.clone(), next.upgrades, Some(checked)))
+}
+
+/// An upgrade checked against the snapshot stream up to `snap_tail`.
+struct Checked {
+    snapshots: String,
+    snap_tail: u64,
+    at: u64,
+}
+
+/// Appends the upgrade record at the tail the check read, before the spec
+/// naming the upgrade. Landing there proves no snapshot was written since the
+/// check, and an owner still on the old spec writes none after it, so none
+/// can be taken past `at` by the old module. Refused, something landed
+/// in between and the check must run again.
+async fn record_upgrade(felix: &Felix, checked: &Checked) -> Result<()> {
+    let pending = Pending {
+        at: checked.at,
+        specs_from: felix.tail(names::SPECS).await?,
+    };
+    let record = snapshot::encode_upgrade(&pending);
+    match felix
+        .publish_if(&checked.snapshots, vec![record], checked.snap_tail)
+        .await?
+    {
+        ConditionalWrite::Written { .. } => Ok(()),
+        ConditionalWrite::Refused { .. } => bail!(
+            "a snapshot was written while the upgrade was checked; run it again to check \
+             input {} against it",
+            checked.at
+        ),
+    }
 }
 
 async fn module_info(felix: &Felix, hash: &str) -> Result<ModuleInfo> {

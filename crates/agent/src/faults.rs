@@ -18,6 +18,9 @@
 //!   output or input stream.
 //! - `skip-snapshots=K`: write none of the first K snapshots that are due, so
 //!   a later owner has more than `snapshot_every` inputs to replay.
+//! - `stop-after-upgrade-record=1`: `felixd run --upgrade-at` writes its
+//!   upgrade record and then fails before the spec record, so the old spec
+//!   keeps running with the record on its snapshot stream.
 //! - `crash-after-projection-sent=N`: abort once admission's projector has
 //!   sent its Nth spec record to `sys.specs`, before its answer is acted on
 //!   and before `workloads` names it. The record may have landed.
@@ -186,6 +189,11 @@ pub(crate) fn after_snapshot() {
     if fault("crash-after-snapshot") == Some(SNAPSHOTS.load(Ordering::Relaxed)) {
         crash("crash-after-snapshot");
     }
+}
+
+/// Whether `felixd run` stops between the upgrade record and the spec.
+pub(crate) fn stop_after_upgrade_record() -> bool {
+    fault("stop-after-upgrade-record").is_some()
 }
 
 /// Whether to leave out this snapshot.

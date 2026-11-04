@@ -1186,12 +1186,30 @@ as before.
 
 At the upgrade's input the owner takes a snapshot of the old module's state in
 memory, starts the new module and restores that snapshot into it. Nothing is
-written to the snapshot stream for it. A node that resumes from a snapshot
+written to the snapshot stream for the switch itself. A node that resumes from a snapshot
 loads the module that ran the snapshot's input and carries on to the upgrade
 the same way, so every node reaches the same state at the same input. If the
 new module traps while restoring, the workload fails as poison, like any trap.
 `felixd check` and `felixd replay` switch modules at the same inputs, using the
 upgrades of the latest spec that ran.
+
+The owner on the old spec keeps running until its agent sees the new one, and
+it must not leave a snapshot past the upgrade's input: a node that resumed from
+it would never run the switch. So `felixd run` writes an upgrade record to the
+snapshot stream before the spec, with `publish_if` at the tail it checked. If a
+snapshot landed after the check the write is refused and `felixd run` asks to
+be run again. An owner whose spec record comes before the upgrade record writes
+no more snapshots once it has seen it, either on the stream when it starts or
+as the record that refused its own snapshot write. The spec naming the upgrade
+is written after the record, so its owner is not held back, and neither is the
+owner of any later spec. If `felixd run` stops between the two writes, the old
+spec keeps running without snapshots until the next `felixd run`.
+
+Outputs are not held back the same way. An output the old module writes at or
+past the upgrade's input is replayed under the new module when the new spec
+resumes, and a different result fails the workload as a divergence. Choose an
+input far enough ahead of the live one that the agents have the new spec by
+the time it arrives.
 
 Upgrades are an operator action. `felixd run --upgrade-at` writes the spec
 directly and does not go through admission, which rejects a request that names

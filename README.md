@@ -213,8 +213,10 @@ felixd run --id counter --input in --upgrade-at 20 counter-changed.wasm
 Inputs from 20 on run the new module and earlier ones keep the old one, so
 `felixd check` and `felixd replay` still agree with the outputs on the stream.
 `felixd run` refuses an input the workload has already run, and a module that
-cannot restore the old one's snapshot layout. The workload keeps running; it
-restarts under the new spec like any spec change. It writes the spec itself, so
+cannot restore the old one's snapshot layout. Pick an input a little ahead of
+the live one, so the agents have the new spec before it arrives. The workload
+keeps running; it restarts under the new spec like any spec change, and the old
+spec takes no snapshot after `felixd run` starts recording the upgrade. It writes the spec itself, so
 it needs the operator's token and does not go through admission
 ([Switching to the new module](docs/design.md#switching-to-the-new-module)).
 
