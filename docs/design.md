@@ -1840,16 +1840,24 @@ Each piece of system state has one class (#81):
 |---|---|---|
 | Workload inputs, outputs, snapshots | Log record | Replay and exactly-once output depend on one order |
 | Epochs, claims, fences, grants | Log record (conditional write) | Two nodes must not both believe they hold a lease |
-| Placement assignments, node facts | Log record | The scheduler is a workload and has to replay |
-| Spec history, stream incarnations | Log record | Inputs bind to them |
+| Placement assignments, node facts in `sys.facts` | Log record | The scheduler is a workload and has to replay |
+| Spec history in `sys.specs`, stream incarnations | Log record | Inputs bind to them |
+| Requests to run, change or stop workloads in `sys.intake` | Log record | Admission decides them in order and has to replay |
 | Node presence and versions in `nodes` | TTL cache entry | Stale means absent; nothing replays from it |
 | Drain marks in `drains` | Cache entry, no TTL | Operator intent; each node reads its own and nothing replays from it |
+| Workload leases in `leases` | TTL cache entry (conditional write) | Today each workload renews its own; the target is one session lease per node |
+| Last epoch per workload in `epochs` | Cache entry, no TTL (conditional write) | An epoch must outlive the lease that used it |
+| Current specs in `workloads` | Cache entry, no TTL | The latest version of what `sys.specs` records, for nodes to read |
+| Module bytes in `modules` | Cache entry, no TTL | Content-addressed by sha256; a missing entry is fetched again |
 | Per-workload lease renewals beyond the node session | Avoid | Replaced by one session lease per node |
 | Instance pools, compiled modules, local metrics | Node-local, never agreed | Derived from the log and rebuilt after a restart |
 | Credentials | Node-local, outside the log | Secrets never enter the log |
 
 A new feature picks a row before it picks a mechanism. The default is not the
 log.
+
+A test in `crates/core/src/names/tests.rs` fails when a cache or system stream
+name has no row here.
 
 ### One machine, one failure domain
 
