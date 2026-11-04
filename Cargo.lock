@@ -749,6 +749,7 @@ dependencies = [
  "felix-client",
  "felixd-core",
  "felixd-runtime",
+ "felixd-testkit",
  "libc",
  "serde",
  "serde_json",

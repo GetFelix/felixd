@@ -14,7 +14,7 @@ use felixd_core::merge::{self, Entry};
 use felixd_core::output::{self, OutputHeader};
 use felixd_core::resume::{self, Found, LastOutput, Resume};
 use felixd_core::snapshot::{self, Manifest, SnapshotHeader, Taken};
-use felixd_core::spec::WorkloadSpec;
+use felixd_core::spec::{Upgrade, WorkloadSpec};
 use felixd_core::trim::{self, Deleted, Owned, Trim};
 use felixd_core::{MAX_WRITE_BYTES, names};
 use felixd_runtime::{Compiled, Failure, FailureKind, LoadError, Runtime, Workload, WorkloadError};
@@ -509,13 +509,11 @@ async fn run(
         merge.metrics = workload_metrics.clone();
     }
     let output_tail = log.tail();
-    let compiled = runtime.compiled(felix, &spec.module).await?;
-    let mut workload = Some(
-        runtime
-            .runtime
-            .instantiate(&compiled, spec.limits)
-            .map_err(poison)?,
-    );
+    // Every module the workload will run, so a missing one stops it now
+    // and not at the input it takes over.
+    for module in spec.modules() {
+        runtime.compiled(felix, module).await?;
+    }
 
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
@@ -546,6 +544,23 @@ async fn run(
         output_tail,
     })
     .map_err(poison)?;
+    // The snapshot was written by the module that ran its input, and the
+    // upgrades after that input are still to come.
+    let taken = snapshot
+        .as_ref()
+        .filter(|_| resume.restore)
+        .map(|s| s.taken().header.input_offset);
+    let compiled = runtime
+        .compiled(felix, spec.module_at(taken.unwrap_or(0)))
+        .await?;
+    let mut workload = Some(
+        runtime
+            .runtime
+            .instantiate(&compiled, spec.limits)
+            .map_err(poison)?,
+    );
+    let mut upgrades = spec.upgrades_after(taken).to_vec();
+    upgrades.reverse();
     match &merge {
         None => not_behind(
             &spec.inputs[0],
@@ -610,6 +625,7 @@ async fn run(
         snap_tail,
         fence,
         workload,
+        upgrades,
         resume,
         log,
         previous,
@@ -988,6 +1004,8 @@ struct Steps<'a> {
     snap_tail: u64,
     fence: &'a Fence,
     workload: Option<Workload>,
+    /// Upgrades not reached yet, the next one last.
+    upgrades: Vec<Upgrade>,
     resume: Resume,
     log: OutputLog<'a>,
     /// The last snapshot manifest this owner restored or wrote.
@@ -1038,6 +1056,7 @@ impl Steps<'_> {
     /// Runs the step at `offset`, the input's offset for a workload with one
     /// input and the merge entry's for one with several.
     async fn step(&mut self, offset: u64, input: StepInput) -> Result<()> {
+        self.reach_upgrades(offset).await?;
         let stamp = input.timestamp_micros();
         let interval = self
             .spec
@@ -1092,6 +1111,43 @@ impl Steps<'_> {
             self.snapshot(offset).await?;
             self.since_snapshot = 0;
         }
+        Ok(())
+    }
+
+    /// Hands the state to the module of the latest upgrade at or below
+    /// `offset`, if one is due, through a snapshot and a restore. Every node
+    /// does the same at the same input, so a failure is poison.
+    async fn reach_upgrades(&mut self, offset: u64) -> Result<()> {
+        let mut due = None;
+        while self.upgrades.last().is_some_and(|u| u.at <= offset) {
+            due = self.upgrades.pop();
+        }
+        let Some(upgrade) = due else {
+            return Ok(());
+        };
+        let compiled = self.modules.compiled(self.felix, &upgrade.module).await?;
+        let chunks = blocking(&self.modules.calls, &mut self.workload, Workload::snapshot)
+            .await?
+            .map_err(failed)?;
+        let mut next = Some(
+            self.modules
+                .runtime
+                .instantiate(&compiled, self.spec.limits)
+                .map_err(poison)?,
+        );
+        blocking(&self.modules.calls, &mut next, move |w| {
+            let chunks: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
+            w.restore(&chunks)
+        })
+        .await?
+        .map_err(failed)?;
+        tracing::info!(
+            workload = self.snap_stream,
+            input = offset,
+            module = upgrade.module,
+            "switched modules"
+        );
+        self.workload = next;
         Ok(())
     }
 

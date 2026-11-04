@@ -297,6 +297,14 @@ enum Command {
         /// in seconds, where admission runs.
         #[arg(long, default_value_t = 60)]
         wait_secs: u64,
+        /// Replace the module of the existing workload `--id` with this one
+        /// from this input on. Earlier inputs keep their old module, so the
+        /// outputs on the stream stay reproducible. Choose an input after
+        /// everything the workload has run; check the module first with
+        /// `felixd replay --diff --module`. Writes the spec directly, so it
+        /// needs the operator's token and does not go through admission.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        upgrade_at: Option<u64>,
         /// The workload, a WebAssembly component of at most 64 MiB. One over
         /// 8 MiB is stored in the `modules` cache as 4 MiB chunks and a
         /// manifest, and nodes join and check it when they run it.
@@ -526,6 +534,7 @@ async fn main() -> Result<()> {
             snapshot_fuel,
             replication_factor,
             wait_secs,
+            upgrade_at,
             module,
         } => {
             let bytes =
@@ -536,7 +545,7 @@ async fn main() -> Result<()> {
                 max_memory_bytes: max_memory,
                 snapshot_fuel,
             };
-            if !names::is_system(&id) {
+            if !names::is_system(&id) && upgrade_at.is_none() {
                 let felix = Felix::connect(&settings).await?;
                 if admission::runs(&felix).await? {
                     Runtime::new()
@@ -566,8 +575,12 @@ async fn main() -> Result<()> {
             submission.keep_snapshots = keep_snapshots;
             submission.limits = limits;
             submission.replication_factor = replication_factor;
+            submission.upgrade_at = upgrade_at;
             let hash = submit(&settings, submission).await?;
-            println!("workload {id} running module {hash}");
+            match upgrade_at {
+                Some(at) => println!("workload {id} runs module {hash} from input {at}"),
+                None => println!("workload {id} running module {hash}"),
+            }
             Ok(())
         }
         Command::Init {

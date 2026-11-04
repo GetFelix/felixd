@@ -775,6 +775,7 @@ pub fn running(id: &str, module: &str, inputs: Vec<String>) -> WorkloadSpec {
         snapshot_every: felixd_core::spec::DEFAULT_SNAPSHOT_EVERY,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: felixd_core::spec::Limits::default(),
         failure: None,

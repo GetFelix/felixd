@@ -54,3 +54,4 @@ mod runner;
 mod snapshots;
 mod specs;
 mod stuck;
+mod upgrade;

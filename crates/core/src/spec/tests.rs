@@ -9,6 +9,7 @@ fn spec() -> WorkloadSpec {
         snapshot_every: 50,
         snapshot_every_ms: None,
         keep_snapshots: None,
+        upgrades: Vec::new(),
         state: WorkloadState::Running,
         limits: Limits {
             fuel_per_call: 1000,
@@ -292,4 +293,65 @@ fn history_passes_over_skip_records() {
     // A record that is not a skip encodes as before.
     let plain = SpecRecord::new("temp", spec()).encode();
     assert!(!String::from_utf8(plain).unwrap().contains("skipped"));
+}
+
+fn upgraded(at: &[u64]) -> WorkloadSpec {
+    WorkloadSpec {
+        upgrades: at
+            .iter()
+            .map(|&at| Upgrade {
+                at,
+                module: format!("{at:02x}").repeat(32),
+            })
+            .collect(),
+        ..spec()
+    }
+}
+
+#[test]
+fn a_spec_without_upgrades_is_written_as_before() {
+    let json = String::from_utf8(spec().encode()).unwrap();
+    assert!(!json.contains("upgrades"), "{json}");
+    let spec = upgraded(&[10, 20]);
+    assert_eq!(WorkloadSpec::decode(&spec.encode()), Ok(spec));
+}
+
+#[test]
+fn upgrades_must_ascend_after_input_zero() {
+    for at in [&[0][..], &[5, 5], &[9, 4]] {
+        let json = upgraded(at).encode();
+        assert!(WorkloadSpec::decode(&json).is_err(), "{at:?}");
+    }
+}
+
+#[test]
+fn an_input_runs_the_module_of_the_last_upgrade_at_or_below_it() {
+    let spec = upgraded(&[10, 20]);
+    assert_eq!(spec.module_at(0), spec.module);
+    assert_eq!(spec.module_at(9), spec.module);
+    assert_eq!(spec.module_at(10), spec.upgrades[0].module);
+    assert_eq!(spec.module_at(19), spec.upgrades[0].module);
+    assert_eq!(spec.module_at(20), spec.upgrades[1].module);
+    assert_eq!(spec.upgrades_after(None).len(), 2);
+    assert_eq!(spec.upgrades_after(Some(9)).len(), 2);
+    assert_eq!(spec.upgrades_after(Some(10)).len(), 1);
+    assert_eq!(spec.upgrades_after(Some(20)).len(), 0);
+}
+
+#[test]
+fn a_new_upgrade_must_start_after_what_has_run() {
+    let previous = upgraded(&[10]);
+    assert_eq!(
+        upgraded(&[10, 20]).upgrade_conflict(&previous, Some(15)),
+        None
+    );
+    assert!(
+        upgraded(&[10, 20])
+            .upgrade_conflict(&previous, Some(20))
+            .is_some()
+    );
+    assert!(upgraded(&[]).upgrade_conflict(&previous, None).is_some());
+    assert!(upgraded(&[11]).upgrade_conflict(&previous, None).is_some());
+    // Nothing new: the same upgrades pass whatever has run since.
+    assert_eq!(previous.upgrade_conflict(&previous, Some(99)), None);
 }

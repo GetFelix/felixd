@@ -1,8 +1,10 @@
 //! `felixd run`: store a module and start a workload.
 
 use anyhow::{Result, anyhow, bail};
+use felixd_core::module::ModuleInfo;
 use felixd_core::spec::{
-    DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, WorkloadSpec, WorkloadState, validate_inputs,
+    DEFAULT_SNAPSHOT_EVERY, Limits, SpecRecord, Upgrade, WorkloadSpec, WorkloadState,
+    validate_inputs,
 };
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
@@ -10,7 +12,9 @@ use felixd_runtime::Runtime;
 use crate::admin::{self, StreamKind};
 use crate::felix::Felix;
 use crate::module_store;
+use crate::runner::last_output;
 use crate::settings::Settings;
+use crate::snapshots;
 use crate::specs;
 
 /// Replicas of felixd's caches and a workload's streams, enough to lose one
@@ -27,6 +31,9 @@ pub struct Submission {
     pub keep_snapshots: Option<u32>,
     pub limits: Limits,
     pub replication_factor: u32,
+    /// Replace the workload's module with `module` from this input on, and
+    /// keep running its earlier inputs under the old one.
+    pub upgrade_at: Option<u64>,
 }
 
 impl Submission {
@@ -40,6 +47,7 @@ impl Submission {
             keep_snapshots: None,
             limits: Limits::default(),
             replication_factor: DEFAULT_REPLICATION_FACTOR,
+            upgrade_at: None,
         }
     }
 }
@@ -98,13 +106,16 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let hash = module::hash(&submission.module);
     let snap_stream = names::snapshot_stream(&submission.id);
     module_store::put(&felix, &submission.module).await?;
+    let previous = previous_spec(&felix, &submission.id).await?;
+    let (module, upgrades) = modules_for(&felix, &submission, &hash, previous.as_ref()).await?;
     let mut spec = WorkloadSpec {
-        module: hash.clone(),
+        module,
         inputs: submission.inputs,
         output,
         snapshot_every: submission.snapshot_every,
         snapshot_every_ms: submission.snapshot_every_ms,
         keep_snapshots: submission.keep_snapshots,
+        upgrades,
         state: WorkloadState::Running,
         limits: submission.limits,
         failure: None,
@@ -112,7 +123,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     };
     // A new workload has nothing to conflict with, and its streams, just
     // created, may refuse reads until their leader has committed.
-    let written = match previous_spec(&felix, &submission.id).await? {
+    let written = match previous {
         None => None,
         Some(previous) => match specs::written_under(&felix, &submission.id).await? {
             Some(written) => Some(written),
@@ -145,6 +156,81 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         );
     }
     Ok(hash)
+}
+
+/// The module a submission starts with and the upgrades after it. An upgrade
+/// is a module that takes over at an input the workload has not run yet, and
+/// the new module must be able to restore the state of the one before it.
+/// Without `upgrade_at`, a workload with upgrades keeps them, and submitting
+/// the module it runs now is a change of limits, not of module.
+async fn modules_for(
+    felix: &Felix,
+    submission: &Submission,
+    hash: &str,
+    previous: Option<&WorkloadSpec>,
+) -> Result<(String, Vec<Upgrade>)> {
+    let id = &submission.id;
+    let Some(at) = submission.upgrade_at else {
+        return Ok(match previous {
+            Some(previous)
+                if !previous.upgrades.is_empty() && hash == previous.module_at(u64::MAX) =>
+            {
+                (previous.module.clone(), previous.upgrades.clone())
+            }
+            _ => (hash.to_owned(), Vec::new()),
+        });
+    };
+    let Some(previous) = previous else {
+        bail!("workload {id} does not exist, so there is no module to upgrade");
+    };
+    let running = previous.module_at(u64::MAX);
+    if running == hash {
+        bail!("workload {id} already runs module {hash}");
+    }
+    let (output, snapshots) = (&previous.output, names::snapshot_stream(id));
+    let mut stepped = last_output(felix, output, felix.tail(output).await?)
+        .await?
+        .map(|(_, last)| last.header.input_offset);
+    let snapshot = snapshots::latest(felix, &snapshots, felix.tail(&snapshots).await?)
+        .await
+        .map_err(snapshots::ReadError::into_anyhow)?
+        .snapshot
+        .map(|s| s.taken().header.input_offset);
+    stepped = stepped.max(snapshot);
+    let mut upgrades = previous.upgrades.clone();
+    upgrades.push(Upgrade {
+        at,
+        module: hash.to_owned(),
+    });
+    let next = WorkloadSpec {
+        upgrades,
+        ..previous.clone()
+    };
+    if at == 0 {
+        bail!("a module cannot take over at input 0; submit the workload under a new id");
+    }
+    if let Some(last) = previous.upgrades.last()
+        && at <= last.at
+    {
+        bail!(
+            "the module of input {} is already recorded; an upgrade must come after it",
+            last.at
+        );
+    }
+    if let Some(conflict) = next.upgrade_conflict(previous, stepped) {
+        bail!("workload {id}: {conflict}; choose a later input");
+    }
+    let old = module_info(felix, running).await?;
+    let new = ModuleInfo::of(&submission.module).map_err(|e| anyhow!("the new module: {e}"))?;
+    if let Err(why) = module::can_restore(&old, &new) {
+        bail!("the new module cannot take over the state of {running}: {why}");
+    }
+    Ok((previous.module.clone(), next.upgrades))
+}
+
+async fn module_info(felix: &Felix, hash: &str) -> Result<ModuleInfo> {
+    let bytes = crate::check::module_bytes(felix, hash).await?;
+    ModuleInfo::of(&bytes).map_err(|e| anyhow!("module {hash}: {e}"))
 }
 
 /// The spec the `workloads` entry projects. Not the last record on

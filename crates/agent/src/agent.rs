@@ -919,7 +919,14 @@ async fn before_claim(
         // A module missing for this long is not a stale read.
         let missing_until = tokio::time::Instant::now() + RECORD_WAIT;
         loop {
-            let Err(error) = node.modules.compiled(&node.felix, &spec.module).await else {
+            let mut missing = None;
+            for module in spec.modules() {
+                if let Err(error) = node.modules.compiled(&node.felix, module).await {
+                    missing = Some(error);
+                    break;
+                }
+            }
+            let Some(error) = missing else {
                 return Some(None);
             };
             if let Some(problem) = error.downcast_ref::<NeedsOperator>() {

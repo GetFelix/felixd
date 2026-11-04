@@ -709,6 +709,7 @@ pub fn specs_applied<'a>(
 /// before the first claim ran nothing and is passed over. A claim whose spec has another module
 /// or input than the first claim's was refused by its owner and is passed
 /// over, so a refused later spec never decides the module or the limits.
+/// Only the upgrades come from the latest spec that ran.
 pub fn judged_under<'a, R>(
     cached: &WorkloadSpec,
     claimed: &HashMap<u64, WorkloadSpec>,
@@ -737,7 +738,14 @@ pub fn judged_from<'a>(
             .get(&spec)
             .is_some_and(|s| s.conflicts_with_history(&lineage).is_none())
     };
-    let limits = specs_applied(records, ran)
+    let applied = specs_applied(records, ran);
+    // The module takes over at the offset the spec states, not where the
+    // claim lands, so the latest spec that ran decides every input's module.
+    let mut lineage = lineage;
+    if let Some(&(_, latest)) = applied.last() {
+        lineage.upgrades = claimed[&latest].upgrades.clone();
+    }
+    let limits = applied
         .into_iter()
         .map(|(from, spec)| (from, claimed[&spec].limits))
         .collect();

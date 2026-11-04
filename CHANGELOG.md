@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Module upgrades at a recorded input (#64). `felixd run --id <id> --upgrade-at <input> <module>`
+  makes the new module the workload's from that input on. The spec keeps the module the workload
+  began with and lists each upgrade as an input and a module hash, so the lineage rules that
+  compare the module are unchanged and a spec without upgrades is written as before. The owner
+  hands its state to the new module through a snapshot and a restore in memory at the upgrade's
+  input, a node that resumes does the same, and `felixd check` and `felixd replay` switch at the
+  same inputs. `felixd run` refuses an input the workload has already run, and a module that does
+  not declare it can restore the old one's snapshot layout. Upgrades are an operator action and
+  admission rejects requests that name them.
 - The scale test measures failover without waiting on its own harness. It scanned every output stream
   in one pass with the whole phase as its budget, so one stuck read made `leaders_moved_secs` and
   `without_output` measure the harness. Now a scan round takes at most 10 s, each read at most 3 s,

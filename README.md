@@ -203,6 +203,21 @@ unless `--from` says otherwise, and there is no snapshot before input 0, so
 pass a `--from` after a snapshot. [Checking an
 upgrade](docs/design.md#checking-an-upgrade) lists every case.
 
+When the diff matches, switch the workload to the new module at an input it
+has not run yet:
+
+```
+felixd run --id counter --input in --upgrade-at 20 counter-changed.wasm
+```
+
+Inputs from 20 on run the new module and earlier ones keep the old one, so
+`felixd check` and `felixd replay` still agree with the outputs on the stream.
+`felixd run` refuses an input the workload has already run, and a module that
+cannot restore the old one's snapshot layout. The workload keeps running; it
+restarts under the new spec like any spec change. It writes the spec itself, so
+it needs the operator's token and does not go through admission
+([Switching to the new module](docs/design.md#switching-to-the-new-module)).
+
 `felixd run --snapshot-every 1000 --snapshot-every-ms 60000` snapshots a
 workload every 1000 inputs and at the first input of each minute, by the
 inputs' append times on the broker, whichever comes first, so a slow input
@@ -246,7 +261,7 @@ runs out is left to an operator, who can raise the limit. They are stored in
 its spec, so every node runs it under the same ones. Running `felixd run`
 again for the same id restarts the workload under the new spec, but a new
 module or input is refused once the workload has written anything; use a new
-id for new code. `felixd run` refuses it, and so does the agent when the output
+id for new code, or `--upgrade-at` to switch the module at a later input. `felixd run` refuses it, and so does the agent when the output
 stream's first claim names a spec, which claims written before spec records
 don't. Each claim names the spec it runs, so `felixd check` and
 `felixd replay --diff` judge each output under the module and limits it ran with. A workload that traps, runs
