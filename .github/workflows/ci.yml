@@ -184,3 +184,13 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: TLA_MODULE=FelixdAdmission TLC_WORKERS=4 scripts/check_tla.sh
+
+  # Cheap: python only. Catches a misnamed or empty fragment before the release does.
+  changelog:
+    name: changelog fragments
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/changelog-assemble.py --check
+      - run: python3 .github/scripts/test_changelog_assemble.py
