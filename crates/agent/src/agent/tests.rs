@@ -93,3 +93,16 @@ fn a_stuck_bound_below_the_lease_ttl_is_refused() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn a_read_that_hangs_does_not_hold_a_claim_permit() {
+    let claims = Arc::new(Semaphore::new(1));
+    let held = claims.clone();
+    let hung = tokio::spawn(async move {
+        after_ready(&held, std::future::pending::<()>()).await;
+    });
+    tokio::task::yield_now().await;
+    let turn = tokio::time::timeout(Duration::from_secs(5), after_ready(&claims, async {})).await;
+    hung.abort();
+    assert!(turn.is_ok(), "a hung read kept the permit");
+}

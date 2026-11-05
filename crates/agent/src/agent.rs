@@ -761,11 +761,25 @@ async fn own(
                 }
             }
         }
-        // Only the writes and the reads they depend on hold a permit, so a
-        // read that hangs on one workload's stream does not block the rest.
-        let permit = tokio::select! {
-            permit = node.claim_permit() => permit,
+        // The streams are read before a permit is taken: a read can wait
+        // out READY_WITHIN on a stream that is not served yet (a failover),
+        // and a few of those must not starve every other claim. The floor
+        // is read again once the claim has won, which is fast by then.
+        let probed_tail = std::sync::Mutex::new(None);
+        let probe = written_epoch(&node.felix, &id, &spec.output, &probed_tail);
+        let ready = tokio::select! {
+            ready = after_ready(&node.claims, probe) => ready,
             _ = stop.wait_for(|stop| *stop) => return,
+        };
+        let permit = match ready {
+            (Ok(_), permit) => node.calm_claim(permit).await,
+            (Err(error), _) => {
+                tracing::warn!(workload = %id, error = %format!("{error:#}"), "could not read the output stream");
+                if !pause(&mut stop).await {
+                    return;
+                }
+                continue;
+            }
         };
         // Someone may have claimed it while this node waited.
         if lease.has_changed().unwrap_or(false) {
@@ -1149,15 +1163,10 @@ impl Node {
             && NodeInfo::decode(&found.value).is_ok_and(|info| info.takes_work())
     }
 
-    /// Waits for a turn to claim: a free permit, and renewals that are not
-    /// slow, or a renewal interval of waiting on them. A node keeps the
-    /// leases it holds before it takes on more.
-    async fn claim_permit(&self) -> SemaphorePermit<'_> {
-        let permit = self
-            .claims
-            .acquire()
-            .await
-            .expect("the claim semaphore is never closed");
+    /// Waits for renewals that are not slow, or a renewal interval of
+    /// waiting on them. A node keeps the leases it holds before it takes on
+    /// more.
+    async fn calm_claim<'a>(&self, permit: SemaphorePermit<'a>) -> SemaphorePermit<'a> {
         self.strain.calm(self.timing.renew_after()).await;
         permit
     }
@@ -1190,6 +1199,20 @@ fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Waits for `ready`, then for a free claim permit. The permit is taken
+/// last so that a wait inside `ready` never holds one.
+async fn after_ready<R>(
+    claims: &Semaphore,
+    ready: impl Future<Output = R>,
+) -> (R, SemaphorePermit<'_>) {
+    let ready = ready.await;
+    let permit = claims
+        .acquire()
+        .await
+        .expect("the claim semaphore is never closed");
+    (ready, permit)
 }
 
 /// The larger epoch of the last records on the output and snapshot streams,

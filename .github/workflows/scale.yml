@@ -64,7 +64,7 @@ jobs:
       FAILOVER_SECS: ${{ inputs.failover_secs || '300' }}
       FELIX_IMAGE_TAG: ${{ inputs.felix_image_tag }}
       ELECTION: ${{ inputs.election || 'off' }}
-      RUST_LOG: warn
+      RUST_LOG: warn,felixd_agent=info
       FELIXD_REQUIRE_FELIX: "1"
       FELIX_BROKERS: 127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300
       FELIX_AUTH_TENANT: dev

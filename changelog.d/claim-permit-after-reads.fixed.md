@@ -1,0 +1,1 @@
+- A node reads a workload's output and snapshot streams before it takes a claim permit, so a few streams that are slow to be served after a failover no longer hold up every other claim.
