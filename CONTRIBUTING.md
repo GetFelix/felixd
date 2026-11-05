@@ -67,6 +67,16 @@ finalizes `stream_incarnations`, `cache_incarnations`, `joint_fence` and `replic
 stops if the control plane refuses one. It needs a Felix image that has replica election, such as a nightly after
 GetFelix/felix#1823; compare its failover columns with a run that has `election` off.
 
+`cp_down` (needs `election` on) adds the broker kill with the control plane down. After the usual phases it pauses
+the control plane (paused, not stopped, because its catalog is in memory), waits 30 s for the brokers to notice,
+and kills the broker leading the most shards. The summary then has: **CP-down failover** (time until every
+workload answers), **CP-down leaders moved** (time until brokers had stood for election on every shard the dead
+broker led, read from their logs because the control plane cannot be asked), **CP-down restart** (the broker
+started again, control plane still paused) and **CP back** (the control plane resumed). The JSON has
+`cp_down_failover`, `cp_down_after_restart` and `cp_back`; `cp_back.elections_after` counts elections after the
+resume, which would be churn, and `cp_back.led` is the control plane's view of who leads. A column reads `no`
+when the phase did not finish within `failover_secs`. Runs without `cp_down` are unchanged.
+
 When the run ends, its summary page shows one row per count, and the `scale-results` artifact holds
 `scale-<N>-ttl<T>.json` (for example `scale-1000-ttl10.json`) with every figure (including the lease census while
 the workloads started, and memory at each phase), plus the end of each container's log. The columns:

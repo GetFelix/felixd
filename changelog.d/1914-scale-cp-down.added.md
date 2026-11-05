@@ -1,0 +1,1 @@
+- The scale workflow takes `cp_down=true` (with `election=on`): it pauses the control plane, kills the broker leading the most shards, restarts it, and resumes the control plane, reporting `cp_down_failover`, `cp_down_after_restart` and `cp_back` (GetFelix/felix#1914).
