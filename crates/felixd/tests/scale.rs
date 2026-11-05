@@ -1142,6 +1142,8 @@ broker-3  | INFO something else stream=w2.out shard=0 leader=broker-1\n";
         found,
         vec![("w1.out".into(), "0".into(), "broker-1".into())]
     );
+    let coloured = "\u{1b}[32m INFO\u{1b}[0m standing for election: x \u{1b}[3mstream\u{1b}[0m\u{1b}[2m=\u{1b}[0mw1.out \u{1b}[3mshard\u{1b}[0m\u{1b}[2m=\u{1b}[0m0 \u{1b}[3mleader\u{1b}[0m\u{1b}[2m=\u{1b}[0mbroker-1\n";
+    assert_eq!(parse_elections(coloured), found);
 }
 
 #[test]
