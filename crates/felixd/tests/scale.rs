@@ -1058,7 +1058,8 @@ async fn control_plane_down(
     // control plane, which is part of what this measures.
     let restarted_at = now_rfc3339();
     run.by_elections = None;
-    compose(&["start", broker])?;
+    // `up --no-deps`: `start` would try the paused control plane too.
+    compose(&["up", "-d", "--no-deps", broker])?;
     let restarted = Instant::now();
     run.reconnect().await;
     let (input, accepted) = publish_input(&run.felix, 3, run.phase).await?;
