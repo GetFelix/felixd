@@ -142,10 +142,14 @@ jobs:
             df -h / | tail -1
             sudo du -sh /var/lib/docker/containers/*/*-json.log 2>/dev/null | sort -rh | head -5
             docker ps -a --format '{{.Names}}  {{.Status}}' > results/containers-$n-ttl$ttl.txt
-            for b in broker-1 broker-2 broker-3; do
-              docker compose -f $cluster logs --no-color --tail 300 $b > results/log-$n-ttl$ttl-$b.txt 2>&1
+            # Whole logs, not a tail: a stuck shard is traced from the start
+            # of the run. The compose file caps each container's json log.
+            for b in broker-1 broker-2 broker-3 felix-controlplane; do
+              name=$b
+              [ $b = felix-controlplane ] && name=controlplane
+              docker compose -f $cluster logs --no-color $b 2>&1 | gzip > results/log-$n-ttl$ttl-$name.txt.gz
             done
-            docker compose -f $cluster logs --no-color felix-controlplane > results/log-$n-ttl$ttl-controlplane.txt 2>&1
+            ls -l results/log-$n-ttl$ttl-*.txt.gz
             echo "::endgroup::"
             # The smallest count not settling means a broken harness or
             # cluster, so do not spend hours on the larger ones. Phases that
@@ -179,3 +183,4 @@ jobs:
         with:
           name: scale-results
           path: results/
+          retention-days: 7
