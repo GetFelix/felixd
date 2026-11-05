@@ -99,7 +99,7 @@ async fn a_read_that_hangs_does_not_hold_a_claim_permit() {
     let claims = Arc::new(Semaphore::new(1));
     let held = claims.clone();
     let hung = tokio::spawn(async move {
-        after_ready(&held, std::future::pending::<()>()).await;
+        let _turn = after_ready(&held, std::future::pending::<()>()).await;
     });
     tokio::task::yield_now().await;
     let turn = tokio::time::timeout(Duration::from_secs(5), after_ready(&claims, async {})).await;
