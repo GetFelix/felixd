@@ -242,6 +242,24 @@ fn elections(since: &str) -> Vec<(String, String, String)> {
     parse_elections(&logs)
 }
 
+/// Drops the colour codes the brokers' log formatter writes even to a pipe.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn parse_elections(logs: &str) -> Vec<(String, String, String)> {
     let field = |line: &str, key: &str| {
         let rest = line.split(&format!("{key}=")).nth(1)?;
@@ -249,12 +267,13 @@ fn parse_elections(logs: &str) -> Vec<(String, String, String)> {
     };
     let mut found: Vec<_> = logs
         .lines()
+        .map(strip_ansi)
         .filter(|line| line.contains("standing for election"))
         .filter_map(|line| {
             Some((
-                field(line, "stream")?,
-                field(line, "shard")?,
-                field(line, "leader")?,
+                field(&line, "stream")?,
+                field(&line, "shard")?,
+                field(&line, "leader")?,
             ))
         })
         .collect();

@@ -67,7 +67,7 @@ finalizes `stream_incarnations`, `cache_incarnations`, `joint_fence` and `replic
 stops if the control plane refuses one. It needs a Felix image that has replica election, such as a nightly after
 GetFelix/felix#1823; compare its failover columns with a run that has `election` off.
 
-`cp_down` (needs `election` on) adds the broker kill with the control plane down. After the usual phases it pauses
+`cp_down` (needs `election` on) replaces the broker kill with one made while the control plane is down. After the agent failover it pauses
 the control plane (paused, not stopped, because its catalog is in memory), waits 30 s for the brokers to notice,
 and kills the broker leading the most shards. The summary then has: **CP-down failover** (time until every
 workload answers), **CP-down leaders moved** (time until brokers had stood for election on every shard the dead
