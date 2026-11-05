@@ -1,0 +1,1 @@
+- The scale workflow uploads each broker's and the control plane's whole log, gzipped, instead of the last 300 lines of each (felix #1914).
