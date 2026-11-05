@@ -218,6 +218,10 @@ capacity when one fails: the survivors must have room for its workloads, or they
 numbers differ by Felix version, so read [Scale](design.md#scale) for yours before you go
 past a few hundred.
 
+To see how a cluster with elections on behaves when a broker dies while the control plane is down, run the
+scale test with `cp_down` (`gh workflow run scale.yml -R GetFelix/felixd -f counts=200 -f election=on -f cp_down=true`).
+CONTRIBUTING.md's "Running the scale test" lists the figures.
+
 **Replication.** Use `--replication-factor 3` on `run` and `init` against three brokers. The
 default is 3; 1 is for a single broker.
 

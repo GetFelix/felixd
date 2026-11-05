@@ -28,6 +28,10 @@ on:
         description: "on makes the brokers elect leaders without the control plane; off leaves them as before"
         type: string
         default: "off"
+      cp_down:
+        description: "true runs the broker kill with the control plane paused; needs election on"
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       counts:
@@ -50,6 +54,10 @@ on:
         type: choice
         options: ["off", "on"]
         default: "off"
+      cp_down:
+        description: "Kill the broker leading the most shards while the control plane is paused (needs election on), then restart it, then resume the control plane"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,6 +72,7 @@ jobs:
       FAILOVER_SECS: ${{ inputs.failover_secs || '300' }}
       FELIX_IMAGE_TAG: ${{ inputs.felix_image_tag }}
       ELECTION: ${{ inputs.election || 'off' }}
+      CP_DOWN: ${{ inputs.cp_down && 'true' || 'false' }}
       RUST_LOG: warn
       FELIXD_REQUIRE_FELIX: "1"
       FELIX_BROKERS: 127.0.0.1:5100,127.0.0.1:5200,127.0.0.1:5300
@@ -107,6 +116,13 @@ jobs:
             *) echo "::error::election must be on or off, not $ELECTION"; exit 1 ;;
           esac
           echo "election: $ELECTION" | tee -a results/runner.txt
+          if [ "$CP_DOWN" = true ] && [ "$ELECTION" != on ]; then
+            echo "::error::cp_down needs election on"; exit 1
+          fi
+          echo "cp_down: $CP_DOWN" | tee -a results/runner.txt
+          # Three more phases, and the test waits 30 s for the brokers to notice.
+          extra=0
+          [ "$CP_DOWN" = true ] && extra=$((FAILOVER_SECS * 3 + 60))
           cluster=tests/felix/cluster.yaml
           failed=0
           first=1
@@ -123,8 +139,8 @@ jobs:
             tests/felix/credentials.sh /tmp/felix cluster
             if FELIXD_SCALE_COUNT=$n FELIXD_SCALE_OUT=$PWD/results \
               FELIXD_SCALE_LEASE_TTL_SECS=$ttl FELIXD_SCALE_TIMEOUT_SECS=$BUILD_SECS \
-              FELIXD_SCALE_FAILOVER_SECS=$FAILOVER_SECS FELIXD_CLUSTER=$PWD/$cluster \
-              timeout -k 30 $((BUILD_SECS + FAILOVER_SECS * 6 + 600)) \
+              FELIXD_SCALE_FAILOVER_SECS=$FAILOVER_SECS FELIXD_SCALE_CP_DOWN=$CP_DOWN FELIXD_CLUSTER=$PWD/$cluster \
+              timeout -k 30 $((BUILD_SECS + FAILOVER_SECS * 6 + 600 + extra)) \
               cargo test -p felixd --test scale --locked -- --nocapture \
               > results/test-$n-ttl$ttl.log 2>&1; then
               ok=1
@@ -174,8 +190,8 @@ jobs:
             echo
             echo '```'; cat results/runner.txt; echo '```'
             echo
-            echo "| Workloads | Lease TTL | Streams | Create | All running | Broker memory | Control plane memory | First output | Agent failover | Broker failover | Leaders moved |"
-            echo "|---|---|---|---|---|---|---|---|---|---|---|"
+            echo "| Workloads | Lease TTL | Streams | Create | All running | Broker memory | Control plane memory | First output | Agent failover | Broker failover | Leaders moved | CP-down failover | CP-down leaders moved | CP-down restart | CP back |"
+            echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
             cat results/scale-*.row.md 2>/dev/null
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
