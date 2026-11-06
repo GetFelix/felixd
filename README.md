@@ -744,6 +744,8 @@ runs the scale test at 1000 workloads against the same `:nightly` Felix images, 
 At that size a Felix change that slows lease renewals makes the workloads fail
 to settle, which the integration tests are too small to show. A failed scheduled run opens
 an issue labelled `felix-nightly-scale` and a green one closes it; dispatched runs report nothing.
+A dispatch with `election=on` and `cp_down=true` kills a broker while the control plane is paused, to measure
+failover without it.
 
 ## Contributing
 

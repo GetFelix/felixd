@@ -13,6 +13,9 @@
 //! of at most 10 s, each read has 3 s, and the leaders are checked every round,
 //! so a stuck read cannot stretch what the failover figures measure. It also needs what `cluster.rs` needs:
 //! `FELIXD_CLUSTER` and `FELIX_OPERATOR_TOKEN_FILE`.
+//!
+//! `FELIXD_SCALE_CP_DOWN=true` (with the brokers electing, `FELIXD_ELECTION=true`) runs the broker
+//! kill with the control plane paused instead: see `control_plane_down`.
 
 mod common;
 
@@ -130,8 +133,21 @@ impl Report {
                 .fold(None, |a: Option<f64>, b| Some(a.map_or(b, |a| a.max(b))));
             max.map_or("no".to_owned(), |mb| format!("{mb:.0} MiB"))
         };
+        // Only a control-plane-down run has these cells; the table header
+        // always has the columns.
+        let down = if get("cp_down_failover").is_some() {
+            format!(
+                " {} | {} | {} | {} |",
+                number("cp_down_failover.outputs_secs", " s"),
+                number("cp_down_failover.leaders_moved_secs", " s"),
+                number("cp_down_after_restart.outputs_secs", " s"),
+                number("cp_back.outputs_secs", " s"),
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "| {} | {}s | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {}s | {} | {} | {} | {} | {} | {} | {} | {} | {} |{}\n",
             self.n,
             get("lease_ttl_secs").map_or("no".to_owned(), |v| v.to_string()),
             get("streams.total").map_or("no".to_owned(), |v| v.to_string()),
@@ -143,6 +159,7 @@ impl Report {
             number("agent_failover.outputs_secs", " s"),
             number("broker_failover.outputs_secs", " s"),
             number("broker_failover.leaders_moved_secs", " s"),
+            down,
         )
     }
 }
@@ -194,6 +211,81 @@ fn compose(args: &[&str]) -> Result<()> {
         bail!("compose {args:?} failed");
     }
     Ok(())
+}
+
+/// The output of a compose command, whether or not it succeeded.
+fn compose_output(args: &[&str]) -> Result<String> {
+    let file = std::env::var("FELIXD_CLUSTER").context("FELIXD_CLUSTER is not set")?;
+    let words = compose_command();
+    let out = Command::new(&words[0])
+        .args(&words[1..])
+        .args(["-f", &file])
+        .args(args)
+        .output()?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr))
+}
+
+/// The shards brokers began standing for election on since `since`, as
+/// `(stream, shard, old leader)`. A broker logs it when it takes over from a
+/// leader it cannot reach, so it shows elections without the control plane.
+fn elections(since: &str) -> Vec<(String, String, String)> {
+    let logs = compose_output(&[
+        "logs",
+        "--no-color",
+        "--since",
+        since,
+        "broker-1",
+        "broker-2",
+        "broker-3",
+    ])
+    .unwrap_or_default();
+    parse_elections(&logs)
+}
+
+/// Drops the colour codes the brokers' log formatter writes even to a pipe.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_elections(logs: &str) -> Vec<(String, String, String)> {
+    let field = |line: &str, key: &str| {
+        let rest = line.split(&format!("{key}=")).nth(1)?;
+        Some(rest.split_whitespace().next()?.trim_matches('"').to_owned())
+    };
+    let mut found: Vec<_> = logs
+        .lines()
+        .map(strip_ansi)
+        .filter(|line| line.contains("standing for election"))
+        .filter_map(|line| {
+            Some((
+                field(&line, "stream")?,
+                field(&line, "shard")?,
+                field(&line, "leader")?,
+            ))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
 }
 
 /// Parses docker's `1.5GiB`, `512MiB` or `900kB` into MiB.
@@ -566,11 +658,20 @@ struct Run<'a> {
     ids: Vec<String>,
     phase: Duration,
     felix: Arc<Felix>,
+    /// With the control plane down its assignments cannot be read, so the
+    /// leaders have moved once brokers have stood for election on as many
+    /// shards as the dead broker led: that count, and when the kill was.
+    by_elections: Option<(usize, String)>,
 }
 
 impl Run<'_> {
     /// Whether no shard is led by `old` any more.
     async fn leaders_moved(&self, old: &str, deadline: Instant) -> bool {
+        if let Some((led, since)) = &self.by_elections {
+            let (since, old) = (since.clone(), old.to_owned());
+            let found = tokio::task::spawn_blocking(move || elections(&since)).await;
+            return found.is_ok_and(|found| found.iter().filter(|e| e.2 == old).count() >= *led);
+        }
         let Some(Ok(items)) = bounded(PROBE, deadline, assignments(self.t)).await else {
             return false;
         };
@@ -710,6 +811,7 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
         ids: ids.clone(),
         phase,
         felix: felix.clone(),
+        by_elections: None,
     };
     report.memory("baseline", &sample_memory(&[]));
 
@@ -860,6 +962,9 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
         .max_by_key(|(_, led)| **led)
         .context("no shard has a leader")?;
     let (broker, share) = (broker.clone(), *share);
+    if std::env::var("FELIXD_SCALE_CP_DOWN").is_ok_and(|v| v == "true") {
+        return control_plane_down(&mut run, report, &agents, &broker, share, &items).await;
+    }
     eprintln!("killing {broker}, which leads {share} shards");
     compose(&["kill", &broker])?;
     let killed = Instant::now();
@@ -879,6 +984,115 @@ async fn measure(t: &TestFelix, n: usize, report: &mut Report) -> Result<()> {
         found["after_broker_restart"] = json!(true);
         report.set("after_restart", found);
     }
+    Ok(())
+}
+
+/// The broker kill with the control plane down the whole time. The control
+/// plane is paused, not stopped: its catalog lives in memory, so a stop would
+/// come back empty and no longer be the same control plane. Phases:
+///
+/// 1. `cp_down_failover`: the broker leading the most shards is killed; the
+///    leaders must move through elections alone.
+/// 2. `cp_down_after_restart`: the broker is started again, the control plane
+///    still paused.
+/// 3. `cp_back`: the control plane resumes. `elections_after` counts new
+///    elections once it is back (churn), and `led` is its view of the leaders.
+async fn control_plane_down(
+    run: &mut Run<'_>,
+    report: &mut Report,
+    agents: &[Agent],
+    broker: &str,
+    share: usize,
+    before: &[Value],
+) -> Result<()> {
+    let t = run.t;
+    let notice = seconds_from("FELIXD_SCALE_CP_NOTICE_SECS", 30);
+    report.set("cp_down", json!({"led_before": led_by(before)}));
+    eprintln!("pausing the control plane");
+    compose(&["pause", "felix-controlplane"])?;
+    // Brokers learn it is gone from their failed syncs; log what they say.
+    tokio::time::sleep(notice).await;
+    let logs = compose_output(&[
+        "logs",
+        "--no-color",
+        "--tail",
+        "2000",
+        "broker-1",
+        "broker-2",
+        "broker-3",
+    ])
+    .unwrap_or_default();
+    let noticed = logs
+        .lines()
+        .filter(|l| {
+            let l = l.to_lowercase();
+            l.contains("control plane") || l.contains("controlplane")
+        })
+        .count();
+    eprintln!("brokers logged {noticed} lines about the control plane after {notice:?}");
+    report.set("cp_down_noticed_log_lines", json!(noticed));
+    if assignments(t).await.is_ok() {
+        report.note("the control plane still answered while paused".into());
+    }
+
+    eprintln!("killing {broker}, which leads {share} shards, control plane down");
+    let killed_at = now_rfc3339();
+    run.by_elections = Some((share, killed_at.clone()));
+    compose(&["kill", broker])?;
+    let killed = Instant::now();
+    let (input, accepted) = publish_input(&run.felix, 2, run.phase).await?;
+    let mut found = run.recovery(killed, input, None, Some(broker)).await;
+    found["killed"] = json!(broker);
+    found["led"] = json!(share);
+    found["publish_secs"] = json!(accepted);
+    found["elections"] = json!(
+        elections(&killed_at)
+            .iter()
+            .filter(|e| e.2 == broker)
+            .count()
+    );
+    report.set("cp_down_failover", found);
+    report.memory("cp_down_failover", &sample_memory(agents));
+
+    // Not waited on for readiness: a broker may not be ready without the
+    // control plane, which is part of what this measures.
+    let restarted_at = now_rfc3339();
+    run.by_elections = None;
+    // `up --no-deps`: `start` would try the paused control plane too.
+    compose(&["up", "-d", "--no-deps", broker])?;
+    let restarted = Instant::now();
+    run.reconnect().await;
+    let (input, accepted) = publish_input(&run.felix, 3, run.phase).await?;
+    let mut found = run.recovery(restarted, input, None, None).await;
+    found["after_broker_restart"] = json!(true);
+    found["publish_secs"] = json!(accepted);
+    report.set("cp_down_after_restart", found);
+    report.memory("cp_down_after_restart", &sample_memory(agents));
+
+    eprintln!("resuming the control plane");
+    compose(&["unpause", "felix-controlplane"])?;
+    let resumed_at = now_rfc3339();
+    let resumed = Instant::now();
+    run.reconnect().await;
+    let (input, accepted) = publish_input(&run.felix, 4, run.phase).await?;
+    let mut found = run.recovery(resumed, input, None, None).await;
+    found["publish_secs"] = json!(accepted);
+    found["elections_after"] = json!(elections(&resumed_at).len());
+    found["elections_since_restart"] = json!(elections(&restarted_at).len());
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(items) = assignments(t).await {
+            found["led"] = json!(led_by(&items));
+            break;
+        }
+        if Instant::now() >= until {
+            report.note("the control plane did not answer 60 s after resuming".into());
+            break;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    report.set("cp_back", found);
+    report.memory("cp_back", &sample_memory(agents));
     Ok(())
 }
 
@@ -917,6 +1131,20 @@ async fn many_workloads() {
         report.note(format!("stopped: {error:#}"));
     }
     result.unwrap();
+}
+
+#[test]
+fn election_lines_are_read() {
+    let logs = "broker-2  | INFO standing for election: the leader is unreachable stream=w1.out shard=0 generation=3 leader=broker-1\n\
+broker-3  | INFO standing for election: the leader is unreachable stream=w1.out shard=0 generation=3 leader=broker-1\n\
+broker-3  | INFO something else stream=w2.out shard=0 leader=broker-1\n";
+    let found = parse_elections(logs);
+    assert_eq!(
+        found,
+        vec![("w1.out".into(), "0".into(), "broker-1".into())]
+    );
+    let coloured = "\u{1b}[32m INFO\u{1b}[0m standing for election: x \u{1b}[3mstream\u{1b}[0m\u{1b}[2m=\u{1b}[0mw1.out \u{1b}[3mshard\u{1b}[0m\u{1b}[2m=\u{1b}[0m0 \u{1b}[3mleader\u{1b}[0m\u{1b}[2m=\u{1b}[0mbroker-1\n";
+    assert_eq!(parse_elections(coloured), found);
 }
 
 #[test]
