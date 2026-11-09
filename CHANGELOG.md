@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-preview.2 - 2026-11-09
+
+This release uses Felix 0.7.0 and needs a Felix 0.7 broker and control plane. The compose
+files pin the 0.7.0 images and felixd builds against `felix-client` 0.7.0. Upgrade every node
+before using `--upgrade-at` (see below).
+
 - Module upgrades at a recorded input (#64). `felixd run --id <id> --upgrade-at <input> <module>`
   makes the new module the workload's from that input on. The spec keeps the module the workload
   began with and lists each upgrade as an input and a module hash, so the lineage rules that
@@ -392,6 +398,20 @@
   retention passed it, now leaves the workload to an operator (reason 9,
   history trimmed) instead of retrying. `felixd replay` and `felixd check`
   say which stream and offset were trimmed.
+
+### Added
+- The scale workflow takes `cp_down=true` (with `election=on`): it pauses the control plane, kills the broker leading the most shards, restarts it, and resumes the control plane, reporting `cp_down_failover`, `cp_down_after_restart` and `cp_back` (GetFelix/felix#1914).
+- `felixd run --max-takeovers N --takeover-window-ms MS` sets a restart intensity in the spec (#99).
+  Every holder counts the takeovers in a row with no output between them from the claim records on
+  `wl.<id>.out`, so every node agrees on the count. Past the limit the workload is recorded as
+  needing an operator, reason 11 `restart intensity exceeded`, fenced by epoch, until a new spec
+  record. Unset specs encode and run as before.
+
+### Changed
+- The scale workflow uploads each broker's and the control plane's whole log, gzipped, instead of the last 300 lines of each (felix #1914).
+
+### Fixed
+- A node reads a workload's output and snapshot streams before it takes a claim permit, so a few streams that are slow to be served after a failover no longer hold up every other claim.
 
 ## 0.1.0-preview.1
 

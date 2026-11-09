@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "felixd"
-version = "0.1.0-preview.1"
+version = "0.1.0-preview.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "felixd-agent"
-version = "0.1.0-preview.1"
+version = "0.1.0-preview.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "felixd-core"
-version = "0.1.0-preview.1"
+version = "0.1.0-preview.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "felixd-runtime"
-version = "0.1.0-preview.1"
+version = "0.1.0-preview.2"
 dependencies = [
  "felixd-core",
  "felixd-testkit",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "felixd-testkit"
-version = "0.1.0-preview.1"
+version = "0.1.0-preview.2"
 dependencies = [
  "wat",
  "wit-component 0.262.0",
