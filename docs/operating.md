@@ -214,7 +214,8 @@ elsewhere in about one TTL, plus up to `--claim-delay-ms` and the replay since t
 capacity when one fails: the survivors must have room for its workloads, or they stay
 `waiting`. Keep the sum of the survivors' caps above the total.
 
-**Cluster size.** Plan for hundreds of workloads on a three-broker cluster, not thousands. The
+**Cluster size.** On Felix 0.7.2 a three-broker cluster carries about a thousand workloads,
+but a broker failure at that size leaves some without output until the broker is back. The
 numbers differ by Felix version, so read [Scale](design.md#scale) for yours before you go
 past a few hundred.
 

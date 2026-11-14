@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-11-14
+
+The first full release (#231). It uses Felix 0.7.2 and needs a Felix 0.7 broker and control plane. The
+compose files pin the 0.7.2 images and felixd builds against `felix-client` 0.7.2 (#227, #228). The code is
+0.1.0-preview.2's, on Felix 0.7.2 instead of 0.7.0.
+
+- On Felix 0.7.2 three brokers and three agents settle 1000 workloads: all running in 655 s with
+  one claim each, and a dead agent's workloads move in 29 s. On Felix 0.7.0-preview.2, 1000 did
+  not settle. A broker failure at that size is still slow. The numbers are in
+  [docs/design.md](docs/design.md#scale).
+
 ## 0.1.0-preview.2 - 2026-11-09
 
 This release uses Felix 0.7.0 and needs a Felix 0.7 broker and control plane. The compose
