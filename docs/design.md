@@ -2114,27 +2114,201 @@ scheduler only places free workloads), labels and the other node facts
 below, and replacing per-workload lease watching with assignments
 ([Upgrading felixd and scale](#upgrading-felixd-and-scale)).
 
-Rules for the scheduler and the records it writes (#100):
+### Placement rules
 
-- **Keyed per workload.** Assignments and leases are per workload, never one
-  versioned record per node. Per-node sequence numbers made Omega's
-  schedulers conflict two to three times as often.
-- **Incremental by default.** An assignment batch applies per workload.
-  All-or-nothing placement is an opt-in for a group that needs it.
-- **One placement authority per workload at a time:** the scheduler, or first
-  claim when its assignment is missing or stale.
-- **Reconsideration is a recorded tick input**, like time in the workload
-  contract, so the scheduler stays a replayable fold over recorded events.
-- **Status names what it acts on.** Agent and workload status records carry the
-  spec version and assignment offset they act on, so `ps` can show "running
-  spec 7, assignment 912" and a lagging node is visible.
-- **One writer kind per system stream**, enforced by grants. Readers keep
-  refusing unknown versions. `sys.specs` is written only by admission
-  ([Submitting work](#submitting-work)).
+Proposed in #100, not built. These rules fix what the scheduler and the agents
+may assume about each other before rebalancing, groups and moving a running
+workload are built on them. One thing does not change: the lease and the
+`publish_if` fence decide who owns a workload. Placement only decides who
+tries first, so every rule below can be wrong in a running cluster and cost
+time, never output.
+
+#### Keyed per workload
+
+An assignment is one output record keyed by the workload id, as `assign` is
+today ([records.md](records.md#node-facts-and-assignments)). There is no
+per-node record or per-node version to bump, so placing two workloads on one
+node never conflicts. Omega's schedulers, which shared one versioned record
+per machine, conflicted two to three times as often as with per-task
+records. The lease is per workload already (`leases/<id>`).
+
+What Felix provides: a single-shard stream keeps a total order of keyed
+records ([Pub/Sub](https://docs.getfelix.dev/features/pubsub/)), and the
+`leases` cache gives each workload its own conditional write
+([Cache, conditional writes](https://docs.getfelix.dev/features/cache/)).
+felixd adds the key, the fold from the latest `table`, and nothing else.
+
+#### Incremental by default, a group all or nothing
+
+Each `assign` record stands alone: a scheduler that stops halfway through a
+batch has placed a prefix of it, and every placed workload is valid on its
+own. That is the default because most workloads do not care where their
+neighbours run.
+
+A group is opted into in the spec (`group: "<name>"`, every member naming the
+same group). The scheduler places a group with one `group` record that names
+every member and its node, or not at all: it writes one only when every
+member fits, and it moves any member by writing the whole group again. One
+record lands whole or not at all, so no reader can see half a group, and no
+cross-key or cross-shard transaction is needed. A `publish_if` batch can land
+in part on a leader change
+([felix#1630](https://github.com/GetFelix/felix/issues/1630)); a single
+record cannot. A group is bounded
+by the record size, 8 MiB, far more members than a group needs.
+
+All or nothing is about the decision, not the start. Each member is still
+claimed through its own lease, and when the scheduler is not healthy members
+fall back to first claim one by one, so a group can run split. A workload
+whose output is wrong unless its peers run beside it is not something
+placement can promise; it would need a barrier in the workload contract, and
+none is planned.
+
+#### One placement authority per workload
+
+For a given workload at a given moment exactly one of two authorities
+applies: the scheduler, through the assignment in force, or first claim, when
+there is none or it is stale ([the agent rules above](#placement) list when).
+The agent decides which by its own reading, so two nodes can disagree for a
+moment. That is allowed, since the lease picks one owner either way, but it
+must be visible after the fact. So the claim record names the authority it
+followed:
+
+- `placed`: `assigned`, with `assignment`, the `wl.scheduler.out` offset of the
+  record that put the workload on this node, and `scheduler_epoch`, the epoch
+  of the scheduler holder that wrote it; or `first-claim` with the reason
+  (`no-scheduler`, `unassigned`, `assignee-unavailable`, `bound`, `grace`,
+  `unreadable`).
+
+A claim names one authority, so no claim was placed by two. The fields are
+optional and older builds read the claim as before.
+
+Handing over. The scheduler's authority is its lease: a new scheduler holder
+takes the next epoch, resumes, and its first output lands only after its
+claim record, so the old holder's later assignments are refused
+([Exactly-once output](#exactly-once-output)). Its replay produces the same
+assignments for the same inputs, so the hand-over adds no new placement.
+Authority over one workload passes from the scheduler to first claim only
+through the agent rules (scheduler unhealthy, assignee unavailable, bound
+passed), and back when the scheduler writes a newer assignment for it. The
+scheduler learns of a first-claim placement from the holder's fact and counts
+it as load; it never moves a workload off a node that still takes work, so
+the two do not fight.
+
+#### Reconsideration is a recorded input
+
+The scheduler reconsiders placement, today the timed table and later
+rebalancing, only on recorded input, never on a timer of its own. A
+reconsideration tick is the first input whose append time crosses a multiple
+of the period (ten minutes today). Every node appends a fact at least every
+`--facts-every-ms`, so the input time keeps moving while any node is alive,
+and a replay crosses the same boundaries at the same records.
+
+A separate tick stream was considered and rejected: it would be one more
+writer kind, and one more broker clock that can disagree with `sys.facts`. If
+no node appends a fact, there is nowhere to place anything and nothing to
+reconsider.
+
+#### Status names what it acts on
+
+Every status record names the spec record and the assignment it acts on, so
+`felixd ps` can show "running spec 7, assignment 912" and a node that lags is
+visible instead of wrong:
+
+| Record | Adds |
+|---|---|
+| Claim record on `wl.<id>.out` | `placed`, `assignment`, `scheduler_epoch` (above). The spec record is there already. |
+| Fact on `sys.facts` | `assignments`, the `wl.scheduler.out` offset this node has read up to, and `held_at`, each held workload's spec record and claim epoch |
+| Entry in `nodes` | `assignments`, as in the fact |
+
+All three are optional fields in the current formats, defaulting to "not
+known", as `draining` was added to facts. `held_at`
+makes a full fact larger, so the agent's cap on `--max-workloads` drops to
+what still fits in one record. `ps` shows a node whose
+`assignments` is below the latest assignment that names it as lagging, and a
+workload whose claim names an older spec record than the one in force as
+running a stale spec.
+
+A stale status is a status, not a command. The scheduler counts a node's load
+from its last fact and its own assignments, each counted once, so a fact from
+before a claim or a release can only over-count load until the next fact
+(within half a second of the change). That delays new work on that node and
+never puts two owners anywhere.
+
+#### One writer kind per system stream
+
+Each system stream and cache has one kind of writer, and the grants say so
+([Grants](#grants)):
+
+| Stream or cache | Writer kind | Enforced by |
+|---|---|---|
+| `sys.intake` | Submitter | Grant: submitter publishes, nodes and admission do not |
+| `sys.specs` | Admission | Grant: admission is the only role that publishes. The operator's bootstrap (`felixd init`, `run` of a system workload without admission) is the one exception |
+| `sys.facts` | Node | Grant on the exact name; each node writes only its own facts by convention |
+| `wl.scheduler.out` | Node holding the `scheduler` lease | The epoch fence only; see below |
+| `leases`, `epochs`, `nodes` | Node | Grant |
+| `drains` | Operator | Grant |
+| `workloads` | Admission, nodes marking a workload failed, and `felixd init` for admission's own spec | Grant, for three kinds |
+
+Readers keep refusing a format they do not know, so a writer of another kind
+or build that gets past a grant still cannot be misread.
+
+Two rows do not meet the rule yet:
+
+- `wl.scheduler.out`. Its writer kind is the scheduler holder, but Felix
+  grants allow only and name a stream or a whole namespace
+  ([Security](https://docs.getfelix.dev/features/security/)), and every node
+  needs publish on the namespace's `wl.*` streams, so every node may publish
+  there. The fence stops a deposed holder; nothing in the broker stops a node
+  that never held the lease. felixd issue #229 (`felix-gap`) asks Felix for a
+  grant that excludes a stream or is bound to a lease holder. Per-lease tokens
+  (#74) would close it from felixd's side.
+- `workloads`. Nodes write `state: failed` beside admission's specs. Proposed:
+  the failure stays where it is recorded, on `wl.<id>.out`, `ps` reads it
+  there, and only admission writes `workloads`, under a new format so an older
+  node that would still write `failed` is refused. That is a separate change.
+
+#### Failure cases
+
+- **The scheduler's holder crashes mid-batch.** The `assign` records that
+  landed are a prefix and each stands alone. The next holder replays,
+  produces the same records, compares them with what landed and writes the
+  rest. A `group` record landed whole or not at all. Agents meanwhile treat
+  the scheduler as unhealthy after W and use first claim.
+- **Two schedulers after a partition.** Only one holds the lease at a time.
+  A holder cut off from the broker cannot write; one that can still reach the
+  broker after losing its lease is refused at the tail behind the new
+  holder's claim. Agents read only records that landed, so they never follow
+  a refused assignment.
+- **A node follows the scheduler while another uses first claim**, because
+  their reads or clocks differ. Both claims go through the lease; the loser
+  backs off. The winning claim names its authority, and the scheduler sees
+  the holder in its next fact and counts it.
+- **An assignment to a node that died.** Other nodes wait at most W after
+  they first read its unchanged `nodes` entry, then use first claim. The
+  scheduler reassigns the workload once its facts show the node gone.
+- **A stale status.** A fact or `nodes` entry that predates a claim, a
+  release or a spec change shows as lagging in `ps` by its offsets, and only
+  over-counts load in the scheduler.
+- **A group member's assignee cannot claim.** The member falls back to first
+  claim after the bound, and the scheduler writes the whole group again from
+  the facts that follow.
+
+#### What Felix provides and what felixd adds
+
+| Need | Felix | felixd |
+|---|---|---|
+| One owner per workload | Conditional cache writes on `leases`, `publish_if` on the output ([Cache](https://docs.getfelix.dev/features/cache/)) | Epochs, the claim record, the fence |
+| A total order of assignments | A single-shard stream | The scheduler as a fenced, replayed workload |
+| An atomic group | One record | The `group` record |
+| A recorded clock | Broker append times stored with each record | Ticks from `sys.facts` append times |
+| One writer kind | Allow-only grants by stream or namespace ([Security](https://docs.getfelix.dev/features/security/)) | The role table above; the scheduler row waits on #229 |
 
 The scheduler reads a recorded stream of node facts (discovered, measured and
 operator-asserted, with asserted winning), not the `nodes` cache, so its view
 replays. See [Lessons from Barrelfish](#lessons-from-barrelfish).
+
+The TLA model these rules need is sketched in
+[formal.md](formal.md#placement-proposed).
 
 ## Effects
 

@@ -493,6 +493,69 @@ record. A two-stage model would be two copies of this one with the first's outpu
 second, and would check nothing the one-stage model does not. `tests/pipeline.rs` tests the
 composition.
 
+## Placement (proposed)
+
+Not written yet. This is what the model for the [placement
+rules](design.md#placement-rules) (#100) needs, so the rules can be checked before they
+are built.
+
+Why a model of its own. `Felixd.tla` leaves placement out because assignments only narrow
+which node tries first, so they remove behaviours and the safety invariants carry over
+([Not modelled](#not-modelled)). That argument still holds for the workload's own streams:
+the new claim fields add no write to `wl.<id>.out`. What it does not cover is placement's own
+promises: that a group is never seen in part, that a claim names exactly one authority that
+was in force when the node read it, that a deposed scheduler's assignment is never followed,
+and that a free workload is still claimed when agents disagree about the scheduler. Those need
+`specs/FelixdPlacement.tla`, checked by a `tla-placement` job like the others.
+
+State, kept small:
+
+- `sched`: the `scheduler` workload's lease holder and epoch, reusing `Felixd.tla`'s claim and
+  fence as given (one action `SchedTakeover` that bumps the epoch, with the old holder kept as a
+  deposed writer).
+- `out`: `wl.scheduler.out` as a sequence of `assign(w, n, e)` and `group(G, map, e)` records,
+  `e` the writer's epoch.
+- `facts`: per node, its last fact's `assignments` offset and holdings, with an abstract append
+  time.
+- `view[n]`: each node's read position on `out` and its own judgement of scheduler health,
+  chosen nondeterministically, so every disagreement between nodes is explored.
+- `lease[w]` and `claims[w]`: the lease and the claim records, each claim carrying `placed`,
+  `assignment` and `scheduler_epoch`.
+
+Actions: `Assign` and `AssignGroup` (a `publish_if` at the tail, refused behind a later
+scheduler claim), `SchedCrash` and `SchedTakeover`, `Tick` (an input whose append time crosses
+a period), `Read` (a node advances `view`), `ClaimAssigned` and `ClaimFirst` (guarded by the
+agent rules, with the bound and the grace as a counter of a node's steps since it first saw the
+workload free), `Fact`, and `Crash` and `Expire` for nodes. Two workloads, one group of two,
+two nodes and one scheduler takeover should be enough to reach every case in the failure list.
+
+Invariants:
+
+| Invariant | Says |
+|---|---|
+| `AssignmentsFenced` | No record from a scheduler epoch lands after a claim of a later one. |
+| `GroupWhole` | Every prefix of `out` that a node can read holds each group's members all at one record or none. |
+| `OneAuthority` | Each claim names one authority, and an `assigned` claim's `assignment` is the latest record for that workload within the claimer's `view`, written by an epoch that had not been deposed when it landed. |
+| `StatusMonotone` | A node's `assignments` offset on its facts never decreases, and is never past the tail of `out`. |
+| `ReplaySame` | The assignments are a function of the recorded inputs and ticks: re-folding `facts`, specs and ticks from the scheduler's snapshot gives the records on `out`. |
+| `OneOwner` | At most one node holds each workload's lease, whatever the assignments say (a check that placement adds no ownership path). |
+
+Liveness, under weak fairness of node steps and expiry: `FreeIsClaimed` holds with groups and
+with nodes that disagree about the scheduler, because the bound fires on a node's own steps.
+
+Twins, each expected to fail:
+
+- `FelixdPlacementNoFence`: `Assign` without the tail condition. Expected: `AssignmentsFenced`.
+- `FelixdPlacementSplitGroup`: a group written as one `assign` per member. Expected: `GroupWhole`
+  after a `SchedCrash` between members.
+- `FelixdPlacementWallClock`: `Tick` driven by a free variable instead of input append times.
+  Expected: `ReplaySame`.
+- `FelixdPlacementNoBound`: `ClaimFirst` disabled while any assignment exists. Expected:
+  `FreeIsClaimed`, with the assignee crashed.
+
+Left out on purpose: the `workloads` writer change and the grant rows, which are access
+control rather than protocol, and the size of facts.
+
 ## Not modelled
 
 - Lost answers to cache calls, and the renewal read-back (`renew` in `crates/agent/src/lease.rs`).
@@ -527,7 +590,8 @@ composition.
   only for at most `--assignment-bound-ms` from when it first saw the workload free, whatever the
   assignment does meanwhile, then claims as before, so a free workload is still claimed. The
   scheduler itself is a workload with two inputs, which `Felixd.tla` and `FelixdMerge.tla` already
-  cover.
+  cover. The placement rules' own promises (#100) need a model of their own, sketched in
+  [Placement (proposed)](#placement-proposed).
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
 

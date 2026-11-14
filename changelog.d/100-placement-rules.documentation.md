@@ -1,0 +1,1 @@
+- Placement rules proposed in `docs/design.md` (per-workload keys, one authority per workload named on the claim, all-or-nothing groups as one record, ticks from recorded input, status naming spec and assignment, one writer kind per system stream) with a sketch of their TLA model in `docs/formal.md` (#100).
