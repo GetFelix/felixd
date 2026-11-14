@@ -502,59 +502,74 @@ are built.
 Why a model of its own. `Felixd.tla` leaves placement out because assignments only narrow
 which node tries first, so they remove behaviours and the safety invariants carry over
 ([Not modelled](#not-modelled)). That argument still holds for the workload's own streams:
-the new claim fields add no write to `wl.<id>.out`. What it does not cover is placement's own
-promises: that a group is never seen in part, that a claim names exactly one authority that
-was in force when the node read it, that a deposed scheduler's assignment is never followed,
-and that a free workload is still claimed when agents disagree about the scheduler. Those need
-`specs/FelixdPlacement.tla`, checked by a `tla-placement` job like the others.
+the placement record goes on `wl.<id>.placed` and adds no write to `wl.<id>.out`. What it does
+not cover is placement's own promises: that a group is never seen in part and its members are
+held until it lands or the bound passes, that a claim names the authority the claimer's own view
+supported, and that a free workload is still claimed when agents disagree about the scheduler.
+Those need `specs/FelixdPlacement.tla`, checked by a `tla-placement` job like the others.
+
+The fence is taken as given from `Felixd.tla`: `Assign` and `AssignGroup` land only at the tail
+behind the writer's own claim, so a deposed scheduler's record never lands after a later claim.
+The model does not check that again.
 
 State, kept small:
 
-- `sched`: the `scheduler` workload's lease holder and epoch, reusing `Felixd.tla`'s claim and
-  fence as given (one action `SchedTakeover` that bumps the epoch, with the old holder kept as a
-  deposed writer).
-- `out`: `wl.scheduler.out` as a sequence of `assign(w, n, e)` and `group(G, map, e)` records,
-  `e` the writer's epoch.
-- `facts`: per node, its last fact's `assignments` offset and holdings, with an abstract append
-  time.
-- `view[n]`: each node's read position on `out` and its own judgement of scheduler health,
-  chosen nondeterministically, so every disagreement between nodes is explored.
-- `lease[w]` and `claims[w]`: the lease and the claim records, each claim carrying `placed`,
-  `assignment` and `scheduler_epoch`.
+- `sched`: the `scheduler` workload's lease holder and epoch, with `SchedTakeover` bumping the
+  epoch.
+- `out`: `wl.scheduler.out` as a sequence of `assign(w, n, e)`, `group(G, map, e)` and
+  `table(map, e)` records, `e` the writer's epoch.
+- `facts`: per node, its last fact's `assignments` offset, holdings and incarnation, with an
+  abstract append time.
+- `view[n]`: each node's read position on `out`, its incarnation `inc[n]` (bumped by `Crash`),
+  and its own judgement of scheduler health and of each assignee, chosen nondeterministically,
+  so every disagreement between nodes is explored.
+- `lease[w]`, `claims[w]` and `placed[w]`: the lease, the claim records, and the placement
+  records, each carrying the claim epoch, `placed`, `assignment`, `scheduler_epoch`, the reason,
+  and a copy of the claimer's view when it claimed (a history variable for the checks below).
 
-Actions: `Assign` and `AssignGroup` (a `publish_if` at the tail, refused behind a later
-scheduler claim), `SchedCrash` and `SchedTakeover`, `Tick` (an input whose append time crosses
-a period), `Read` (a node advances `view`), `ClaimAssigned` and `ClaimFirst` (guarded by the
-agent rules, with the bound and the grace as a counter of a node's steps since it first saw the
-workload free), `Fact`, and `Crash` and `Expire` for nodes. Two workloads, one group of two,
+Actions: `Assign`, `AssignGroup` and `Table`, `SchedCrash` and `SchedTakeover`, `Tick` (a fact
+whose append time crosses a period, against the largest seen so far), `Read` (a node advances
+`view`), `ClaimAssigned` and `ClaimFirst` (guarded by the agent rules and the reason order, with
+the bound, the grace and the group bound as counters of a node's steps since it first saw the
+workload free), `Fact`, and `Crash` and `Expire` for nodes. Two workloads forming one group,
 two nodes and one scheduler takeover should be enough to reach every case in the failure list.
 
 Invariants:
 
 | Invariant | Says |
 |---|---|
-| `AssignmentsFenced` | No record from a scheduler epoch lands after a claim of a later one. |
 | `GroupWhole` | Every prefix of `out` that a node can read holds each group's members all at one record or none. |
-| `OneAuthority` | Each claim names one authority, and an `assigned` claim's `assignment` is the latest record for that workload within the claimer's `view`, written by an epoch that had not been deposed when it landed. |
-| `StatusMonotone` | A node's `assignments` offset on its facts never decreases, and is never past the tail of `out`. |
+| `GroupHeld` | A group member is claimed only on a `group` record in the claimer's view that places it there, or with reason `group-bound` after the bound. |
+| `OneAuthority` | An `assigned` placement's `assignment` was, in the claimer's view when it claimed, the latest record for that workload and named the claimer, and the claimer then judged the scheduler healthy. This is about the agent's decision; the fence says nothing about which landed record an agent follows. |
+| `FirstClaimTrue` | A `first-claim` placement's reason held in the claimer's view when it claimed, and no reason earlier in the order did. |
+| `StatusMonotone` | Within one incarnation of a node, the `assignments` offset on its facts never decreases, and is never past the tail of `out`. |
 | `ReplaySame` | The assignments are a function of the recorded inputs and ticks: re-folding `facts`, specs and ticks from the scheduler's snapshot gives the records on `out`. |
 | `OneOwner` | At most one node holds each workload's lease, whatever the assignments say (a check that placement adds no ownership path). |
 
 Liveness, under weak fairness of node steps and expiry: `FreeIsClaimed` holds with groups and
-with nodes that disagree about the scheduler, because the bound fires on a node's own steps.
+with nodes that disagree about the scheduler, because both bounds fire on a node's own steps.
 
 Twins, each expected to fail:
 
-- `FelixdPlacementNoFence`: `Assign` without the tail condition. Expected: `AssignmentsFenced`.
 - `FelixdPlacementSplitGroup`: a group written as one `assign` per member. Expected: `GroupWhole`
   after a `SchedCrash` between members.
-- `FelixdPlacementWallClock`: `Tick` driven by a free variable instead of input append times.
+- `FelixdPlacementNoHold`: `ClaimFirst` allowed on a group member before the group bound.
+  Expected: `GroupHeld`.
+- `FelixdPlacementFirstInView`: `ClaimAssigned` follows the first record for the workload in the
+  claimer's view rather than the latest. Expected: `OneAuthority`, after a reassignment.
+- `FelixdPlacementWrongReason`: `ClaimFirst` records `bound` without checking the earlier
+  reasons. Expected: `FirstClaimTrue`, with the scheduler unhealthy.
+- `FelixdPlacementResetRead`: a failed read sends `view` back to the latest table within one
+  incarnation. Expected: `StatusMonotone`.
+- `FelixdPlacementWallClock`: `Tick` driven by a free variable instead of fact append times.
   Expected: `ReplaySame`.
+- `FelixdPlacementSkipLease`: `ClaimAssigned` writes the lease without the conditional write,
+  since the node was assigned. Expected: `OneOwner`.
 - `FelixdPlacementNoBound`: `ClaimFirst` disabled while any assignment exists. Expected:
   `FreeIsClaimed`, with the assignee crashed.
 
-Left out on purpose: the `workloads` writer change and the grant rows, which are access
-control rather than protocol, and the size of facts.
+Left out on purpose: the `workloads` writer change, the grant rows and the any-node writer to
+`wl.scheduler.out`, which are access control rather than protocol, and the size of facts.
 
 ## Not modelled
 

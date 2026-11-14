@@ -2145,23 +2145,42 @@ batch has placed a prefix of it, and every placed workload is valid on its
 own. That is the default because most workloads do not care where their
 neighbours run.
 
-A group is opted into in the spec (`group: "<name>"`, every member naming the
-same group). The scheduler places a group with one `group` record that names
-every member and its node, or not at all: it writes one only when every
-member fits, and it moves any member by writing the whole group again. One
-record lands whole or not at all, so no reader can see half a group, and no
-cross-key or cross-shard transaction is needed. A `publish_if` batch can land
-in part on a leader change
+A group is declared in the spec: `group: {name, members}`, where `members`
+lists every member's workload id and each member's spec carries the same
+list. The scheduler places a group with one `group` record that names every
+member and its node, or not at all: it writes one only when every member
+fits. One record lands whole or not at all, so no reader can see half a
+group, and no cross-key or cross-shard transaction is needed. A `publish_if`
+batch can land in part on a leader change
 ([felix#1630](https://github.com/GetFelix/felix/issues/1630)); a single
-record cannot. A group is bounded
-by the record size, 8 MiB, far more members than a group needs.
+record cannot. A group is bounded by the record size, 8 MiB, far more members
+than a group needs.
 
-All or nothing is about the decision, not the start. Each member is still
-claimed through its own lease, and when the scheduler is not healthy members
-fall back to first claim one by one, so a group can run split. A workload
-whose output is wrong unless its peers run beside it is not something
-placement can promise; it would need a barrier in the workload contract, and
-none is planned.
+A group is a barrier on the start. A node does not first-claim a free member
+until a `group` record in its view places the whole group, and then claims
+only the member placed on it. It holds the member for at most
+`--group-bound-ms` (60 s) from when it first saw it free, whatever the
+scheduler's health. Past the bound it claims by first claim with reason
+`group-bound`, so a group that never fits still runs, split. The bound is
+longer than `--assignment-bound-ms` so that a scheduler hand-over (at most W
+plus a takeover) fits inside it.
+
+A split group stays split. Its members' placement records name
+`group-bound`, and `felixd ps` shows the group as `split` with each member's
+node. When the scheduler later finds room it writes nothing for the group
+while any member runs: it would have to move running work to join it, and
+that is not built. It counts the members as load like any first-claim
+placement. A member that stops is held again under a new bound; the
+scheduler writes a `group` record only when no member runs, so the group
+joins up once every member has stopped and been freed.
+
+Mixed versions. An agent from before groups skips records it cannot decode
+(`Followed::fold` in `crates/agent/src/assignments.rs`), so it ignores
+`group` records, sees each member as unassigned and claims it after the
+grace. Such a node starts a group split at once and writes no placement
+record, so `ps` shows its members as `placement unknown` and the group as
+`split` if they run on more than one node. Run groups only once every node
+has the new build.
 
 #### One placement authority per workload
 
@@ -2170,38 +2189,94 @@ applies: the scheduler, through the assignment in force, or first claim, when
 there is none or it is stale ([the agent rules above](#placement) list when).
 The agent decides which by its own reading, so two nodes can disagree for a
 moment. That is allowed, since the lease picks one owner either way, but it
-must be visible after the fact. So the claim record names the authority it
-followed:
+must be visible after the fact.
 
-- `placed`: `assigned`, with `assignment`, the `wl.scheduler.out` offset of the
-  record that put the workload on this node, and `scheduler_epoch`, the epoch
-  of the scheduler holder that wrote it; or `first-claim` with the reason
-  (`no-scheduler`, `unassigned`, `assignee-unavailable`, `bound`, `grace`,
-  `unreadable`).
+The claim record stays as it is: its binary format is frozen, and an older
+node that met a new kind of record on `wl.<id>.out` would fail the workload
+as poison ([System records and errors](#system-records-and-errors)). So the authority goes in
+a placement record on a stream of its own, `wl.<id>.placed`, which the new
+holder appends right after its claim record lands. Nodes already publish on
+the namespace's `wl.*` streams, so no grant changes, and no older build reads
+the stream. The record carries the claim's epoch, which ties it to its claim,
+and:
 
-A claim names one authority, so no claim was placed by two. The fields are
-optional and older builds read the claim as before.
+- `placed`: `assigned`, with `assignment` and `scheduler_epoch`; or
+  `first-claim` with one reason.
+- `assignment`: the `wl.scheduler.out` offset of the latest record in the
+  claimer's view that put the workload on this node. That is the `assign` or
+  `group` record when the agent read it, or the `table` it started from when
+  that is newer. Once `wl.scheduler.out` is trimmed below it (#19) the offset
+  still names the record but nothing can read it; `ps` shows it as
+  `trimmed`.
+- `scheduler_epoch`: the epoch of the scheduler holder that wrote that record.
+
+The reasons, in the order the agent checks them; the first that holds is
+recorded:
+
+1. `scheduler`: the workload is the scheduler itself, which is never
+   assigned, so its holder always claims by first claim.
+2. `group-bound`: a group member held past `--group-bound-ms`.
+3. `no-scheduler`: the scheduler is not healthy.
+4. `unreadable`: `wl.scheduler.out` or the assignee's `nodes` entry could not
+   be read.
+5. `unassigned`: the scheduler read the spec record and left it unassigned.
+6. `assignee-unavailable`: the assignee is down, silent, full, draining or
+   blocked.
+7. `grace`: the scheduler had not read the spec record within the grace.
+8. `bound`: the assignee looked able but did not claim within the bound.
+
+A placement record names one authority, so no claim was placed by two.
+`felixd check` reads `wl.<id>.placed` beside `.out`: a placement record must
+name the epoch of a claim on `.out`, and one that does not is reported. A
+claim with no placement record (an older holder, or a crash between the two
+appends) is `placement unknown`, not an error, since placement never decides
+output. `.placed` is trimmed with the head trim of `.out`, to the oldest
+claim kept.
 
 Handing over. The scheduler's authority is its lease: a new scheduler holder
 takes the next epoch, resumes, and its first output lands only after its
 claim record, so the old holder's later assignments are refused
 ([Exactly-once output](#exactly-once-output)). Its replay produces the same
 assignments for the same inputs, so the hand-over adds no new placement.
+While the old holder's lease goes unrenewed, agents count the scheduler as
+unhealthy after W and use first claim; once the new holder renews, the
+records that landed stay in force, each workload's latest one in the agent's
+view, until the new holder writes a newer one.
+
+A hand-over that is also an upgrade of the scheduler's build is the same
+until the new build's fold differs. If it replays the landed records
+differently, the new holder fails the scheduler as `replayed output differs`
+([System records and errors](#system-records-and-errors)); agents then see no healthy
+scheduler and use first claim for every workload until an operator acts.
+Placement is slower, never wrong. A build that changes the fold, as the tick
+rule below does, must switch at a recorded input, as a module upgrade does
+([Switching to the new module](#switching-to-the-new-module)).
+
 Authority over one workload passes from the scheduler to first claim only
-through the agent rules (scheduler unhealthy, assignee unavailable, bound
-passed), and back when the scheduler writes a newer assignment for it. The
-scheduler learns of a first-claim placement from the holder's fact and counts
-it as load; it never moves a workload off a node that still takes work, so
-the two do not fight.
+through the agent rules, and back when the scheduler writes a newer
+assignment for it. The scheduler learns of a first-claim placement from the
+holder's fact and counts it as load; it never moves a workload off a node
+that still takes work, so the two do not fight.
 
 #### Reconsideration is a recorded input
 
 The scheduler reconsiders placement, today the timed table and later
-rebalancing, only on recorded input, never on a timer of its own. A
-reconsideration tick is the first input whose append time crosses a multiple
-of the period (ten minutes today). Every node appends a fact at least every
-`--facts-every-ms`, so the input time keeps moving while any node is alive,
+rebalancing, only on recorded input, never on a timer of its own. A tick is
+the first `sys.facts` record whose append time crosses a multiple of the
+period (ten minutes): with `m` the largest fact append time seen before it,
+a fact at `t` is a tick when `floor(t / period) > floor(m / period)`. The
+first fact of a replay is a tick. `m` only grows, so a broker clock that
+steps back does not fire a second tick. Every node appends a fact at least
+every `--facts-every-ms`, so the time keeps moving while any node is alive,
 and a replay crosses the same boundaries at the same records.
+
+This changes the timed table built today
+(`crates/core/src/schedule.rs`, `step`): there a table is due on any input,
+`sys.specs` included, once the largest append time of either stream is ten
+minutes past the last table, and the first input writes one. Under the rule
+`sys.specs` records never tick, and ticks fall on fixed boundaries instead
+of ten minutes after the last table. The code change comes in the
+implementation PR, behind a recorded switch as above.
 
 A separate tick stream was considered and rejected: it would be one more
 writer kind, and one more broker clock that can disagree with `sys.facts`. If
@@ -2216,17 +2291,24 @@ visible instead of wrong:
 
 | Record | Adds |
 |---|---|
-| Claim record on `wl.<id>.out` | `placed`, `assignment`, `scheduler_epoch` (above). The spec record is there already. |
+| Placement record on `wl.<id>.placed` | `placed`, `assignment`, `scheduler_epoch` (above). The spec record is on the claim already. |
 | Fact on `sys.facts` | `assignments`, the `wl.scheduler.out` offset this node has read up to, and `held_at`, each held workload's spec record and claim epoch |
 | Entry in `nodes` | `assignments`, as in the fact |
 
-All three are optional fields in the current formats, defaulting to "not
-known", as `draining` was added to facts. `held_at`
-makes a full fact larger, so the agent's cap on `--max-workloads` drops to
-what still fits in one record. `ps` shows a node whose
-`assignments` is below the latest assignment that names it as lagging, and a
-workload whose claim names an older spec record than the one in force as
-running a stale spec.
+The fact and `nodes` fields are optional in the current formats, defaulting
+to "not known", as `draining` was added to facts. `held_at` makes a full fact
+larger, so the agent's cap on `--max-workloads` drops to what still fits in
+one record. A fact's `assignments` never decreases within one agent process;
+after a restart the agent reads again from the latest table and may report a
+lower offset.
+
+Reading an assignment does not trigger a fact, which would add a fact per
+assignment change. So `ps` bounds lag by time instead: a node is lagging
+when a fact it appended at least one second after an assignment naming it
+landed still reports `assignments` below that assignment. Until such a fact
+arrives, within `--facts-every-ms` (30 s) or at its next claim or release,
+`ps` shows the assignment as `not yet reported`. A workload whose claim names
+an older spec record than the one in force shows as running a stale spec.
 
 A stale status is a status, not a command. The scheduler counts a node's load
 from its last fact and its own assignments, each counted once, so a fact from
@@ -2262,6 +2344,11 @@ Two rows do not meet the rule yet:
   that never held the lease. felixd issue #229 (`felix-gap`) asks Felix for a
   grant that excludes a stream or is bound to a lease holder. Per-lease tokens
   (#74) would close it from felixd's side.
+  This gap is accepted until #229 or #74 lands. A node that writes there
+  without the lease writes at whatever epoch it likes; its record is refused
+  behind any later scheduler claim, and before that agents would follow it.
+  It can only steer who tries first, never make two owners, and every node is
+  already trusted with the namespace's workloads.
 - `workloads`. Nodes write `state: failed` beside admission's specs. Proposed:
   the failure stays where it is recorded, on `wl.<id>.out`, `ps` reads it
   there, and only admission writes `workloads`, under a new format so an older
@@ -2281,7 +2368,7 @@ Two rows do not meet the rule yet:
   a refused assignment.
 - **A node follows the scheduler while another uses first claim**, because
   their reads or clocks differ. Both claims go through the lease; the loser
-  backs off. The winning claim names its authority, and the scheduler sees
+  backs off. The winner's placement record names its authority, and the scheduler sees
   the holder in its next fact and counts it.
 - **An assignment to a node that died.** Other nodes wait at most W after
   they first read its unchanged `nodes` entry, then use first claim. The
@@ -2289,17 +2376,21 @@ Two rows do not meet the rule yet:
 - **A stale status.** A fact or `nodes` entry that predates a claim, a
   release or a spec change shows as lagging in `ps` by its offsets, and only
   over-counts load in the scheduler.
-- **A group member's assignee cannot claim.** The member falls back to first
-  claim after the bound, and the scheduler writes the whole group again from
-  the facts that follow.
+- **A group member's assignee cannot claim.** Its node is placed by the
+  `group` record, so other nodes hold the member until `--group-bound-ms`,
+  then claim it by first claim with reason `group-bound`. The group runs
+  split and stays split until every member has stopped.
+- **A group that never fits.** No `group` record is written; every member is
+  held for the group bound and then starts split.
 
 #### What Felix provides and what felixd adds
 
 | Need | Felix | felixd |
 |---|---|---|
 | One owner per workload | Conditional cache writes on `leases`, `publish_if` on the output ([Cache](https://docs.getfelix.dev/features/cache/)) | Epochs, the claim record, the fence |
+| Who placed a claim | A stream per workload | The placement record on `wl.<id>.placed` |
 | A total order of assignments | A single-shard stream | The scheduler as a fenced, replayed workload |
-| An atomic group | One record | The `group` record |
+| An atomic group | One record | The `group` record, and holding members until it lands or the group bound passes |
 | A recorded clock | Broker append times stored with each record | Ticks from `sys.facts` append times |
 | One writer kind | Allow-only grants by stream or namespace ([Security](https://docs.getfelix.dev/features/security/)) | The role table above; the scheduler row waits on #229 |
 
