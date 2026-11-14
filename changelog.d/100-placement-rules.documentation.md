@@ -1,0 +1,1 @@
+- Placement rules proposed in `docs/design.md` (per-workload keys, one authority per workload named in a placement record on `wl.<id>.placed`, groups placed as one record and held until they fit or a bound passes, ticks from `sys.facts` append times, status naming spec and assignment, one writer kind per system stream) with a sketch of their TLA model in `docs/formal.md` (#100).
