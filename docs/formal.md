@@ -521,27 +521,34 @@ State, kept small:
 - `facts`: per node, its last fact's `assignments` offset, holdings and incarnation, with an
   abstract append time.
 - `view[n]`: each node's read position on `out`, its incarnation `inc[n]` (bumped by `Crash`),
-  and its own judgement of scheduler health and of each assignee, chosen nondeterministically,
-  so every disagreement between nodes is explored.
+  its own judgement of scheduler health and of each assignee, chosen nondeterministically, so
+  every disagreement between nodes is explored, and per workload its step counters for the grace,
+  the bound and the group bound, each counting the node's steps since it first saw the workload
+  free (for a group member, free with the group complete).
 - `lease[w]`, `claims[w]` and `placed[w]`: the lease, the claim records, and the placement
   records, each carrying the claim epoch, `placed`, `assignment`, `scheduler_epoch`, the reason,
-  and a copy of the claimer's view when it claimed (a history variable for the checks below).
+  and a copy of the claimer's `view[n]` when it claimed, counters included (a history variable
+  for the checks below).
 
 Actions: `Assign`, `AssignGroup` and `Table`, `SchedCrash` and `SchedTakeover`, `Tick` (a fact
 whose append time crosses a period, against the largest seen so far), `Read` (a node advances
 `view`), `ClaimAssigned` and `ClaimFirst` (guarded by the agent rules and the reason order, with
-the bound, the grace and the group bound as counters of a node's steps since it first saw the
-workload free), `Fact`, and `Crash` and `Expire` for nodes. Two workloads forming one group,
-two nodes and one scheduler takeover should be enough to reach every case in the failure list.
+the bound, the grace and the group bound read from the counters in `view[n]`), `Fact`, and
+`Crash` and `Expire` for nodes. Three workloads, two forming one group and one ungrouped, two
+nodes and one scheduler takeover should be enough to reach every case in the failure list. The
+ungrouped workload is what reaches `Assign`, the grace, the bound and the reasons other than
+`group-bound`, since a group member is only ever placed by `AssignGroup` or claimed past the
+group bound.
 
 Invariants:
 
 | Invariant | Says |
 |---|---|
 | `GroupWhole` | Every prefix of `out` that a node can read holds each group's members all at one record or none. |
-| `GroupHeld` | A group member is claimed only on a `group` record in the claimer's view that places it there, or with reason `group-bound` after the bound. |
+| `GroupHeld` | A group member is claimed only on a `group` record in the claimer's view that places it there, or with reason `group-bound` when the group-bound counter in the copied view had passed the bound. |
+| `SplitStays` | A split group stays split while any member runs: a member is claimed only while free, and the scheduler writes a `group` record for a group with a running member, in its view, only if the record keeps every running member on its node. |
 | `OneAuthority` | An `assigned` placement's `assignment` was, in the claimer's view when it claimed, the latest record for that workload and named the claimer, and the claimer then judged the scheduler healthy. This is about the agent's decision; the fence says nothing about which landed record an agent follows. |
-| `FirstClaimTrue` | A `first-claim` placement's reason held in the claimer's view when it claimed, and no reason earlier in the order did. |
+| `FirstClaimTrue` | A `first-claim` placement's reason held in the claimer's copied view, counters included, when it claimed, and no reason earlier in the order did. |
 | `StatusMonotone` | Within one incarnation of a node, the `assignments` offset on its facts never decreases, and is never past the tail of `out`. |
 | `ReplaySame` | The assignments are a function of the recorded inputs and ticks: re-folding `facts`, specs and ticks from the scheduler's snapshot gives the records on `out`. |
 | `OneOwner` | At most one node holds each workload's lease, whatever the assignments say (a check that placement adds no ownership path). |
@@ -554,11 +561,11 @@ Twins, each expected to fail:
 - `FelixdPlacementSplitGroup`: a group written as one `assign` per member. Expected: `GroupWhole`
   after a `SchedCrash` between members.
 - `FelixdPlacementNoHold`: `ClaimFirst` allowed on a group member before the group bound.
-  Expected: `GroupHeld`.
+  Expected: `GroupHeld`, on a `group-bound` claim whose copied counter is below the bound.
 - `FelixdPlacementFirstInView`: `ClaimAssigned` follows the first record for the workload in the
   claimer's view rather than the latest. Expected: `OneAuthority`, after a reassignment.
 - `FelixdPlacementWrongReason`: `ClaimFirst` records `bound` without checking the earlier
-  reasons. Expected: `FirstClaimTrue`, with the scheduler unhealthy.
+  reasons. Expected: `FirstClaimTrue`, on the ungrouped workload with the scheduler unhealthy.
 - `FelixdPlacementResetRead`: a failed read sends `view` back to the latest table within one
   incarnation. Expected: `StatusMonotone`.
 - `FelixdPlacementWallClock`: `Tick` driven by a free variable instead of fact append times.
@@ -566,7 +573,9 @@ Twins, each expected to fail:
 - `FelixdPlacementSkipLease`: `ClaimAssigned` writes the lease without the conditional write,
   since the node was assigned. Expected: `OneOwner`.
 - `FelixdPlacementNoBound`: `ClaimFirst` disabled while any assignment exists. Expected:
-  `FreeIsClaimed`, with the assignee crashed.
+  `FreeIsClaimed`, on the ungrouped workload with its assignee crashed.
+- `FelixdPlacementMoveRunning`: `AssignGroup` may move a running member. Expected:
+  `SplitStays`.
 
 Left out on purpose: the `workloads` writer change, the grant rows and the any-node writer to
 `wl.scheduler.out`, which are access control rather than protocol, and the size of facts.

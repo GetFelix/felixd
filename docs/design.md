@@ -340,6 +340,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 8 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
+| `wl.<id>.placed` | stream, 1 shard, `Quorum` (proposed, [Placement rules](#placement-rules)) | | placement records, one per claim | the lease holder |
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
@@ -1792,7 +1793,10 @@ What the numbers say:
   about 1.5 to 7 streams a second, falling as the cluster fills (the saturated
   runner may play a part). At that rate the 20,000 streams of 10,000
   workloads take several hours. See
-  [felix#1761](https://github.com/GetFelix/felix/issues/1761).
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761). The proposed
+  `wl.<id>.placed` ([Placement rules](#placement-rules)) makes it three
+  streams per workload, so creating them takes half as long again: 30,000
+  streams for 10,000 workloads.
 - **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
   first output, against 6.9 s on 0.6.2.
 - **At 1000 workloads, 0.7.0-preview.2 often does not settle.** A run that
@@ -2159,20 +2163,35 @@ than a group needs.
 A group is a barrier on the start. A node does not first-claim a free member
 until a `group` record in its view places the whole group, and then claims
 only the member placed on it. It holds the member for at most
-`--group-bound-ms` (60 s) from when it first saw it free, whatever the
-scheduler's health. Past the bound it claims by first claim with reason
-`group-bound`, so a group that never fits still runs, split. The bound is
-longer than `--assignment-bound-ms` so that a scheduler hand-over (at most W
-plus a takeover) fits inside it.
+`--group-bound-ms` (180 s), whatever the scheduler's health. The bound starts
+when the node first sees the member free with the group complete, that is
+with every listed member admitted, so a group admitted slowly does not use up
+its bound before the scheduler can place it. Past the bound the node claims
+by first claim with reason `group-bound`, so a group that never fits still
+runs, split.
 
-A split group stays split. Its members' placement records name
-`group-bound`, and `felixd ps` shows the group as `split` with each member's
-node. When the scheduler later finds room it writes nothing for the group
-while any member runs: it would have to move running work to join it, and
-that is not built. It counts the members as load like any first-claim
-placement. A member that stops is held again under a new bound; the
-scheduler writes a `group` record only when no member runs, so the group
-joins up once every member has stopped and been freed.
+The default is longer than the scheduler's view of a dead node (90 s, see
+[Placement](#placement)) plus a placement round, so that when a member's node
+dies the scheduler can see it and place the member again before the bound
+passes. The cost is plain: a node death in a group stops that member for up
+to the bound, and if no `group` record has placed it again by then, the group
+runs split from then on.
+
+A group is split when its members are not all on the nodes of one `group`
+record. While members run the scheduler writes a `group` record for the group
+only if it keeps every running member on its node, which is how a member
+freed by a node death is placed again. No assignment moves a running member,
+so a split group stays split. Its `group-bound` members' placement records
+say so, and `felixd ps` shows the group as `split` with each member's node.
+The scheduler counts the members as load like any first-claim placement, and
+writes a `group` record for a split group again only once no member runs, so
+it joins up once every member has stopped and been freed.
+
+A race the agents handle the same way: a member is claimed `group-bound`, and
+then a `group` record lands. The other members are claimed as `assigned` to
+that record, on the nodes it names, and the claimed member stays where it is.
+`ps` shows the group as `split` unless the result is on the nodes of one
+record.
 
 Mixed versions. An agent from before groups skips records it cannot decode
 (`Followed::fold` in `crates/agent/src/assignments.rs`), so it ignores
@@ -2195,10 +2214,21 @@ The claim record stays as it is: its binary format is frozen, and an older
 node that met a new kind of record on `wl.<id>.out` would fail the workload
 as poison ([System records and errors](#system-records-and-errors)). So the authority goes in
 a placement record on a stream of its own, `wl.<id>.placed`, which the new
-holder appends right after its claim record lands. Nodes already publish on
-the namespace's `wl.*` streams, so no grant changes, and no older build reads
-the stream. The record carries the claim's epoch, which ties it to its claim,
-and:
+holder appends right after its claim record lands. Admission creates the
+stream with the workload's other streams (and `felixd run` does, without
+admission). Nodes already publish on the namespace's `wl.*` streams, so no
+grant changes, and no older build reads the stream.
+
+The holder does not wait on the append before it steps: placement never
+decides output. It retries the append until it lands or the holder loses the
+lease, so a slow broker delays the record rather than losing it. A workload
+admitted before the upgrade has no `.placed` stream; its holder writes no
+placement record and `ps` shows `placement unknown`. The append is a plain
+publish, not fenced: like the any-node writer to `wl.scheduler.out` below, a
+node can write there without the lease, and `felixd check` catches a record
+whose epoch names no claim.
+
+The record carries the claim's epoch, which ties it to its claim, and:
 
 - `placed`: `assigned`, with `assignment` and `scheduler_epoch`; or
   `first-claim` with one reason.
@@ -2249,8 +2279,10 @@ differently, the new holder fails the scheduler as `replayed output differs`
 ([System records and errors](#system-records-and-errors)); agents then see no healthy
 scheduler and use first claim for every workload until an operator acts.
 Placement is slower, never wrong. A build that changes the fold, as the tick
-rule below does, must switch at a recorded input, as a module upgrade does
-([Switching to the new module](#switching-to-the-new-module)).
+rule below does, must switch with `--upgrade-at` at an offset on the
+scheduler's merge log, as a module upgrade does ([Switching to the new
+module](#switching-to-the-new-module)). The timed table and the scheduler's
+mixed-version rule are under [Placement](#placement).
 
 Authority over one workload passes from the scheduler to first claim only
 through the agent rules, and back when the scheduler writes a newer
@@ -2264,8 +2296,10 @@ The scheduler reconsiders placement, today the timed table and later
 rebalancing, only on recorded input, never on a timer of its own. A tick is
 the first `sys.facts` record whose append time crosses a multiple of the
 period (ten minutes): with `m` the largest fact append time seen before it,
-a fact at `t` is a tick when `floor(t / period) > floor(m / period)`. The
-first fact of a replay is a tick. `m` only grows, so a broker clock that
+a fact at `t` is a tick when `floor(t / period) > floor(m / period)`, or when
+no fact has been seen yet (`m` absent). `m` is scheduler state carried in its
+snapshot, so a replay resumed from a snapshot ticks where the original run
+did. `m` only grows, so a broker clock that
 steps back does not fire a second tick. Every node appends a fact at least
 every `--facts-every-ms`, so the time keeps moving while any node is alive,
 and a replay crosses the same boundaries at the same records.
@@ -2276,7 +2310,7 @@ This changes the timed table built today
 minutes past the last table, and the first input writes one. Under the rule
 `sys.specs` records never tick, and ticks fall on fixed boundaries instead
 of ten minutes after the last table. The code change comes in the
-implementation PR, behind a recorded switch as above.
+implementation PR, switched with `--upgrade-at` on the merge log as above.
 
 A separate tick stream was considered and rejected: it would be one more
 writer kind, and one more broker clock that can disagree with `sys.facts`. If
@@ -2377,9 +2411,11 @@ Two rows do not meet the rule yet:
   release or a spec change shows as lagging in `ps` by its offsets, and only
   over-counts load in the scheduler.
 - **A group member's assignee cannot claim.** Its node is placed by the
-  `group` record, so other nodes hold the member until `--group-bound-ms`,
-  then claim it by first claim with reason `group-bound`. The group runs
-  split and stays split until every member has stopped.
+  `group` record, so other nodes hold the member until `--group-bound-ms`.
+  If the scheduler sees the node gone in time it writes a new `group` record
+  that keeps the running members in place; otherwise the member is claimed
+  by first claim with reason `group-bound`, and the group runs split until
+  every member has stopped.
 - **A group that never fits.** No `group` record is written; every member is
   held for the group bound and then starts split.
 
