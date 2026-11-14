@@ -5,7 +5,8 @@
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
-> **Status:** milestone 3 done. Agents hold a lease per workload, spread
+> **Status:** 0.1.0, the first full release, on Felix 0.7.2. Milestones
+> 0 to 3 are done and most of 4 and 5. Agents hold a lease per workload, spread
 > workloads across nodes, and take a dead node's workloads over within one
 > lease TTL. A new owner fences the output stream with a claim record, so a
 > node frozen past its lease writes no output when it wakes, and each output
@@ -699,7 +700,7 @@ and `felixd check` follow that log, so the order is the same everywhere.
 | 1 | Leases and failover | Kill a node and its workloads continue elsewhere | Done |
 | 2 | Exactly-once output | A frozen node that comes back cannot write | Done |
 | 3 | Replay | Rebuild any workload at any offset or time | Done |
-| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check, deleting history (snapshots, the merge log, outputs and inputs, below every reader's floor), and a scale test done. A cluster carries hundreds of workloads, not thousands: [Scale](docs/design.md#scale) |
+| 4 | Pipelines and operations | Chained workloads, several inputs, drain, status, metrics | Pipelines, several inputs, `ps`, `drain`, metrics, the upgrade check, deleting history (snapshots, the merge log, outputs and inputs, below every reader's floor), and a scale test done. A cluster on Felix 0.7.2 carries about a thousand workloads; a broker failure at that size is slow: [Scale](docs/design.md#scale) |
 | 5 | Self-hosting | Anyone can run a cluster from the docs | Operator docs done |
 
 ## Crates

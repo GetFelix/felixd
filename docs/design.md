@@ -1714,8 +1714,8 @@ oldest kept snapshot's output tail, where a cut of the head would leave it.
 - **A stream per workload.** Conditional publish is per shard, so every
   workload needs its own single-shard output and snapshot streams, created
   through the control plane. That's fine for hundreds of workloads. 1000
-  settled on Felix 0.6.2 but not on 0.7.0-preview.2, and 10000 was not
-  reached in 20 minutes on either: see [Scale](#scale).
+  settled on Felix 0.6.2 and 0.7.2 but not on 0.7.0-preview.2, and 10000 was
+  not reached in 20 minutes: see [Scale](#scale).
 - **Module size.** Wasm modules can be tens of megabytes, more than one frame
   to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
@@ -1761,6 +1761,12 @@ On Felix 0.7.0-preview.2:
 | 1000 | 2010 | 578 to 1046 s | never; 1 to 15 running at 1200 s | not measured | 370 to 377 MiB | 104 to 107 MiB | not measured |
 | 10000 | 1840 reached | 901 submitted in 1200 s | 890 running | not measured | 358 MiB | 107 MiB | not measured |
 
+On Felix 0.7.2 (one run):
+
+| Workloads | Streams | Create | All running | First output | Peak broker memory | Peak agent memory | Agent failover |
+|---|---|---|---|---|---|---|---|
+| 1000 | 2010 | 649 s | 655 s | 8.3 s | 460 MiB | 184 MiB | 29 s |
+
 A range is the lowest and highest of the runs for that count. One of the two
 1000-workload runs on 0.7.0-preview.2 had a submit fail with a lost
 connection (w895), which is part of its 1046 s.
@@ -1795,6 +1801,12 @@ What the numbers say:
   [felix#1761](https://github.com/GetFelix/felix/issues/1761).
 - **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
   first output, against 6.9 s on 0.6.2.
+- **1000 workloads settle on 0.7.2.** The run claimed exactly 1000 times
+  and had all running at 655 s, slower than 0.6.2's 435 to 489 s because
+  creating the streams was slower (3.1 a second). An agent's 344 workloads
+  moved in 29 s. The claim spiral below did not happen; since
+  [#210](https://github.com/GetFelix/felixd/pull/210) agents degrade under
+  load instead of churning leases.
 - **At 1000 workloads, 0.7.0-preview.2 often does not settle.** A run that
   does not settle claims about 13,000 to 23,000 times in the 20 minute window,
   against about 1,100 over the 7 to 8 minutes 0.6.2 needed to get all running,
@@ -1820,10 +1832,13 @@ What the numbers say:
   [felix#1009](https://github.com/GetFelix/felix/issues/1009) is the likely
   place to look. With the broker started again, outputs resumed within 40 s
   at 500 workloads or fewer; at 1000 on 0.6.2, hundreds of workloads still
-  had none after 300 s.
+  had none after 300 s. On 0.7.2 at 1000 the dead broker's 670 leaders
+  moved in 27 s, but 208 workloads still had no output at 300 s. With the
+  broker started again, all had output within 14 s.
 
-So plan for hundreds of workloads per cluster on these releases, not
-thousands, and keep long-lived workloads fewer and bigger where you can. The
+So plan for up to about a thousand workloads per cluster on Felix 0.7.2,
+fewer if a broker failure must heal without restarting the broker, and not
+tens of thousands, and keep long-lived workloads fewer and bigger where you can. The
 measurements are the evidence behind the "A stream per workload" risk above.
 
 ## Determinism
