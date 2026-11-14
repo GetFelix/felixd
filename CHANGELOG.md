@@ -4,8 +4,8 @@
 
 ## 0.1.0 - 2026-11-14
 
-The first full release. It uses Felix 0.7.2 and needs a Felix 0.7 broker and control plane. The
-compose files pin the 0.7.2 images and felixd builds against `felix-client` 0.7.2. The code is
+The first full release (#231). It uses Felix 0.7.2 and needs a Felix 0.7 broker and control plane. The
+compose files pin the 0.7.2 images and felixd builds against `felix-client` 0.7.2 (#227, #228). The code is
 0.1.0-preview.2's, on Felix 0.7.2 instead of 0.7.0.
 
 - On Felix 0.7.2 three brokers and three agents settle 1000 workloads: all running in 655 s with

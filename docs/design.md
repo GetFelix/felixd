@@ -1715,7 +1715,7 @@ oldest kept snapshot's output tail, where a cut of the head would leave it.
   workload needs its own single-shard output and snapshot streams, created
   through the control plane. That's fine for hundreds of workloads. 1000
   settled on Felix 0.6.2 and 0.7.2 but not on 0.7.0-preview.2, and 10000 was
-  not reached in 20 minutes: see [Scale](#scale).
+  not reached in 20 minutes on 0.6.2 or 0.7.0-preview.2 (0.7.2 was run at 1000 only): see [Scale](#scale).
 - **Module size.** Wasm modules can be tens of megabytes, more than one frame
   to Felix holds. Measured, and answered by chunking: see [Modules](#modules).
 - **Batch atomicity.** A `publish_if` batch can land in part on a `Quorum`
@@ -1790,7 +1790,8 @@ What the numbers say:
   500, 0.29 to 0.37 at 1000; the broker's reading minus its idle baseline,
   divided by the count), and about 0.7 at 100 where the fixed cost weighs
   more. Peaks are higher, as the table shows. An agent used 67 to 107 MiB
-  while running and up to 200 MiB in a failover. This was only measured up to
+  while running on 0.6.2 and 0.7.0-preview.2, 110 to 111 MiB on 0.7.2, and up to
+  200 MiB in a failover on 0.6.2. This was only measured up to
   1000 workloads.
 - **Creating streams is slow.** The control plane placed 6.4 to 7.2 streams a
   second at 100 workloads on 0.6.2, 4.7 to 5.4 at 1000 and 2.0 at 10000. On
@@ -1818,7 +1819,7 @@ What the numbers say:
   that, so no felixd change decides it. 500 workloads settle on both. See
   [felix#1760](https://github.com/GetFelix/felix/issues/1760).
 - **A node failure takes longer with more workloads.** An agent's workloads
-  moved within 30 s up to 500 workloads and took 85 to 143 s at 1000,
+  moved within 30 s up to 500 workloads and took 85 to 143 s at 1000 on 0.6.2 (29 s on 0.7.2),
   probably because the survivors claim and restore hundreds at once. A 30 s
   TTL at 1000 workloads left 119 without output after the first input.
 - **A broker failure is slow.** The harness kills a broker (they lead equal

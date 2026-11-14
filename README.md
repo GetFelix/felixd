@@ -601,8 +601,8 @@ here to an operating system.
 
 felixd fits work that keeps state, reacts to a stream of events, and must not
 lose or repeat results when a machine fails. These are the cases we are
-designing for. Failover, exactly-once output, replay and pipelines work today; operations
-are still planned.
+designing for. Failover, exactly-once output, replay, pipelines and operations (`ps`,
+`drain`, metrics) work today.
 
 - **Stateful stream processing without a separate cluster.** Running totals,
   sessions, fraud scores over a window, deduplication. Today that usually
@@ -646,7 +646,7 @@ services, programs that need the network or files directly (that comes with
 effects, step 4 in the design), or heavy compute where replaying from a
 snapshot would take too long.
 
-## What you will be able to do
+## What you can do
 
 - Start felixd on a few machines pointed at one Felix cluster
 - Submit a Wasm workload and the stream it reads from
