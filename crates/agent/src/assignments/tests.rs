@@ -45,6 +45,7 @@ fn placed(node: &str, offset: u64) -> Placed {
     Placed {
         node: node.into(),
         offset,
+        epoch: 1,
     }
 }
 

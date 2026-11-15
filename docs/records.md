@@ -423,13 +423,40 @@ stepped, and `kind`:
 - `assign`, keyed by the workload id, with `workload` and `node`, the node it should run on.
   `node` is left out once the workload no longer runs.
 - `table`, with no key, with `assignments`, an object from workload id to node. It replaces every
-  assignment before it. The first step writes one, and another follows every ten minutes of input
-  time.
+  assignment before it. One is written at each tick: the first `sys.facts` record, and then the
+  first one whose append time crosses a multiple of ten minutes past the largest fact time seen.
+  Spec records never tick.
 - `progress`, with no key: a spec record that changed no assignment.
 
 A reader starts at the latest table and folds what follows; the last word on a workload is in
 force, and its offset is what `felixd ps` shows after the node. A running workload with no
 assignment whose spec record is below `specs` was left unassigned on purpose, for want of room.
+
+## Placement records
+
+`wl.<id>.placed`, one shard, holds at least one record per claim, appended by the holder right after its
+claim lands on `wl.<id>.out`. Each is `{"format": 1, "value": ...}` with `epoch`, the claim's
+epoch, and `placed`:
+
+- `assigned`, with `assignment`, the `wl.scheduler.out` offset of the latest record in the
+  claimer's view that put the workload on this node (an `assign`, or the `table` it started
+  from), and `scheduler_epoch`, the epoch of the scheduler holder that wrote it.
+- `first-claim`, with `reason`: `scheduler`, `no-scheduler`, `unreadable`, `unassigned`,
+  `assignee-unavailable`, `grace` or `bound` ([Placement rules](design.md#one-placement-authority-per-workload)).
+
+```json
+{"format": 1, "value": {"epoch": 7, "placed": "assigned", "assignment": 912, "scheduler_epoch": 3}}
+{"format": 1, "value": {"epoch": 8, "placed": "first-claim", "reason": "assignee-unavailable"}}
+```
+
+The record is the holder's view when it decided to claim. A claim taken only to record that the
+workload needs an operator gets none. The append is a plain publish, retried until it lands or the
+lease is lost, so a lost acknowledgement followed by a retry leaves two records for one epoch;
+`felixd check` and `felixd ps` accept that. A claim with no record
+is `unknown` in `ps`; a record whose epoch names no claim on `.out` is a `felixd check` finding.
+A reader refuses another format, but ignores a reason or a kind of `placed` it does not know, so a
+newer build can add them under format 1: `ps` shows such a record plainly and `check` does not
+report it.
 
 ## Caches
 

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::Result;
 use felixd_core::lease::Lease;
 use felixd_core::node::{self, Drain, NodeInfo};
+use felixd_core::placement::{Authority, PlacementRecord};
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::status::{self, Found, State};
 use felixd_core::{merge, names, output};
@@ -20,6 +21,10 @@ use crate::snapshots;
 /// How many records back from the tail `ps` looks for the divergence record
 /// a failure follows.
 const DIVERGENCE_LOOK: u64 = 8;
+/// How many records back from the tail of `wl.<id>.placed` `ps` looks for
+/// the holder's placement record. A node writing records without claims
+/// could push it further back; `felixd check` reports those.
+const PLACED_LOOK: u64 = 8;
 
 /// What `felixd ps` shows.
 #[derive(Debug)]
@@ -41,6 +46,9 @@ pub struct Workload {
     pub holder_draining: bool,
     /// The scheduler's assignment in force, while a scheduler runs.
     pub assigned: Option<Placed>,
+    /// Who placed the holder's claim, while a scheduler runs and the
+    /// workload is held.
+    pub placed: Option<PlacedBy>,
     /// The output stream's next offset.
     pub outputs: u64,
     /// The epoch of the last record on the output stream.
@@ -56,6 +64,16 @@ pub struct Workload {
     pub steps: Option<Position>,
     /// Why some of the above could not be read.
     pub unread: Option<String>,
+}
+
+/// What `wl.<id>.placed` says about the holder's claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlacedBy {
+    Recorded(Authority),
+    /// No placement record for the claim: an older holder, a workload
+    /// admitted before placement records, a crash between the claim and the
+    /// record, or one still being retried.
+    Unknown,
 }
 
 /// How far a workload is along a stream.
@@ -129,6 +147,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             id,
             state: None,
             assigned,
+            placed: None,
             holder,
             holder_draining,
             outputs: 0,
@@ -142,6 +161,16 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             Ok(spec) => {
                 if let Err(error) = read_streams(&felix, &spec, &mut workload).await {
                     workload.unread = Some(format!("{error:#}"));
+                }
+                let epoch = workload.holder.as_ref().map_or(0, |l| l.epoch);
+                if scheduled && epoch > 0 {
+                    match placement(&felix, &workload.id, epoch).await {
+                        Ok(placed) => workload.placed = Some(placed),
+                        Err(error) if workload.unread.is_none() => {
+                            workload.unread = Some(format!("{error:#}"));
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
             Err(error) => workload.unread = Some(format!("the spec does not decode: {error}")),
@@ -182,6 +211,29 @@ fn node_entry<'a>(nodes: &'a mut BTreeMap<String, Node>, id: &str) -> &'a mut No
         mark: None,
         leases: 0,
     })
+}
+
+/// The placement record of the claim at `epoch`. It is near the tail: one
+/// record per claim, and a claim after it would have a later epoch.
+async fn placement(felix: &Felix, id: &str, epoch: u64) -> Result<PlacedBy> {
+    let stream = names::placed_stream(id);
+    let Some(tail) = felix.read_tail_if_exists(&stream).await? else {
+        return Ok(PlacedBy::Unknown);
+    };
+    let (recent, _) = felix
+        .read_back(&stream, tail.saturating_sub(PLACED_LOOK), tail)
+        .await?;
+    Ok(placed_by(recent.iter().map(|r| &r.payload[..]), epoch))
+}
+
+/// The newest record for `epoch` among `records`, oldest first. A retried
+/// append can leave two for one epoch.
+fn placed_by<'a>(records: impl DoubleEndedIterator<Item = &'a [u8]>, epoch: u64) -> PlacedBy {
+    records
+        .rev()
+        .filter_map(|r| PlacementRecord::decode(r).ok())
+        .find(|p| p.epoch == epoch)
+        .map_or(PlacedBy::Unknown, |p| PlacedBy::Recorded(p.authority))
 }
 
 /// Reads the state and positions from the workload's streams into
@@ -254,3 +306,6 @@ async fn read_streams(felix: &Felix, spec: &WorkloadSpec, workload: &mut Workloa
     });
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

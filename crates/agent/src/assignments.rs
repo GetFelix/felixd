@@ -26,12 +26,13 @@ const WITHIN: Duration = Duration::from_secs(10);
 /// How many offsets a reader looks back at once for the latest table.
 const BACK_WINDOW: u64 = 256;
 
-/// The node a workload is assigned to, and the scheduler output offset that
-/// says so.
+/// The node a workload is assigned to, the scheduler output offset that
+/// says so, and the epoch of the scheduler holder that wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placed {
     pub node: String,
     pub offset: u64,
+    pub epoch: u64,
 }
 
 /// What a reader has folded from the scheduler's output so far.
@@ -51,7 +52,7 @@ impl Followed {
     /// Folds the record at `offset`. Records that are not the scheduler's
     /// outputs, such as claims, are passed over.
     pub(crate) fn fold(&mut self, offset: u64, record: &[u8]) {
-        let Some(found) = decode(record) else {
+        let Some((epoch, found)) = decode(record) else {
             return;
         };
         self.specs = self.specs.max(found.specs);
@@ -60,7 +61,14 @@ impl Followed {
                 workload,
                 node: Some(node),
             } => {
-                self.table.insert(workload, Placed { node, offset });
+                self.table.insert(
+                    workload,
+                    Placed {
+                        node,
+                        offset,
+                        epoch,
+                    },
+                );
             }
             Change::Assign {
                 workload,
@@ -71,7 +79,14 @@ impl Followed {
             Change::Table { assignments } => {
                 self.table = assignments
                     .into_iter()
-                    .map(|(workload, node)| (workload, Placed { node, offset }))
+                    .map(|(workload, node)| {
+                        let placed = Placed {
+                            node,
+                            offset,
+                            epoch,
+                        };
+                        (workload, placed)
+                    })
                     .collect();
             }
             Change::Progress => {}
@@ -79,15 +94,16 @@ impl Followed {
     }
 }
 
-fn decode(record: &[u8]) -> Option<Record> {
-    let Ok(output::Record::Output(_, addressed)) = output::decode(record) else {
+/// A scheduler output and the epoch of the holder that wrote it.
+fn decode(record: &[u8]) -> Option<(u64, Record)> {
+    let Ok(output::Record::Output(written, addressed)) = output::decode(record) else {
         return None;
     };
-    Record::decode(addressed.payload).ok()
+    Some((written.epoch, Record::decode(addressed.payload).ok()?))
 }
 
 fn is_table(record: &StreamRecord) -> bool {
-    decode(&record.payload).is_some_and(|r| matches!(r.change, Change::Table { .. }))
+    decode(&record.payload).is_some_and(|(_, r)| matches!(r.change, Change::Table { .. }))
 }
 
 /// Where a reader gets the scheduler's output. The agent reads Felix; the

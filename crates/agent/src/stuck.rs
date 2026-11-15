@@ -7,10 +7,11 @@
 //! detection").
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 /// What the attempts of one holder have got done. An attempt made progress
@@ -22,9 +23,31 @@ pub(crate) struct Progress {
     made: AtomicU64,
     /// One past the furthest input offset stepped as new work.
     furthest: AtomicU64,
+    /// Whether the holder's claim record is on the output stream.
+    claimed: AtomicBool,
+    claimed_notify: Notify,
 }
 
 impl Progress {
+    /// Notes that the holder's claim record is on the output stream.
+    pub(crate) fn claim_landed(&self) {
+        self.claimed.store(true, Ordering::SeqCst);
+        self.claimed_notify.notify_waiters();
+    }
+
+    /// Waits until the holder's claim record is on the output stream.
+    pub(crate) async fn claim_on_stream(&self) {
+        loop {
+            let notified = self.claimed_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.claimed.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Notes a finished step at `offset`. `new` is whether the output stream
     /// did not already cover it, and `wrote` whether it appended records.
     pub(crate) fn stepped(&self, offset: u64, new: bool, wrote: bool) {

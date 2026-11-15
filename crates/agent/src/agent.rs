@@ -20,7 +20,10 @@ use felixd_core::class::{ErrorClass, Failure, OperatorReason};
 use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
 use felixd_core::output::Abi;
-use felixd_core::placement::{Assigned, AssignedTo, FirstClaimWins, Placement, Scheduled, Turn};
+use felixd_core::placement::{
+    Assigned, AssignedTo, Assignee, Authority, FirstClaimWins, Placement, PlacementRecord,
+    Scheduled, Turn,
+};
 use felixd_core::schedule::NodeFact;
 use felixd_core::spec::{WorkloadSpec, WorkloadState};
 use felixd_core::{names, output, snapshot, status};
@@ -37,6 +40,7 @@ use crate::felix::Felix;
 use crate::lease::{self, Confirmer, Fence, Held, Losses, Strain};
 use crate::metrics::{self, Claim, Handoff};
 use crate::output::{self as output_log, Recorded, record_failure};
+use crate::placement;
 use crate::runner::{
     Divergence, LostLease, ModuleMissing, Modules, NeedsOperator, Outcome, run_workload,
 };
@@ -718,12 +722,12 @@ async fn own(
                 _ = stop.wait_for(|stop| *stop) => return,
             }
         }
-        if !node
+        let Some(authority) = node
             .wait_for_chance(&id, spec.record, &mut lease, &mut stop)
             .await
-        {
+        else {
             return;
-        }
+        };
         match recorded_needs_operator(&node.felix, &spec).await {
             Ok(Some(reason)) => {
                 tracing::error!(workload = %id, %reason, "the output stream records that the workload needs an operator, not running it");
@@ -829,6 +833,7 @@ async fn own(
                     spec: &spec,
                     claim_from,
                     pending: pending.as_ref(),
+                    authority,
                 };
                 let projecting = (id == names::ADMISSION)
                     .then(|| node.projector.clone())
@@ -1030,16 +1035,46 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// How a [`wait_or_change`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Paused {
+    Elapsed,
+    /// The lease or the assignments changed: someone may have claimed the
+    /// workload, or an assignment landed that changes who should.
+    Changed,
+    Stop,
+}
+
+async fn wait_or_change(
+    delay: Duration,
+    lease: &mut watch::Receiver<Seen>,
+    assignments: &mut watch::Receiver<u64>,
+    stop: &mut watch::Receiver<bool>,
+) -> Paused {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Paused::Elapsed,
+        _ = lease.changed() => Paused::Changed,
+        _ = assignments.changed() => Paused::Changed,
+        _ = stop.wait_for(|stop| *stop) => Paused::Stop,
+    }
+}
+
+/// The placement record for a claim won at `epoch` under `authority`.
+fn placement_record(epoch: u64, authority: Authority) -> PlacementRecord {
+    PlacementRecord { epoch, authority }
+}
+
 impl Node {
     /// Waits until the lease looks free, this node has room and the placement
-    /// policy lets it claim. `false` means stop.
+    /// policy lets it claim, and returns the authority it claims under.
+    /// `None` means stop.
     async fn wait_for_chance(
         &self,
         id: &str,
         record: Option<u64>,
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
-    ) -> bool {
+    ) -> Option<Authority> {
         let mut draining = self.draining.subscribe();
         let mut assignments = self.assignments.changes();
         // When this node first saw the workload free, whatever its
@@ -1050,7 +1085,7 @@ impl Node {
             if *draining.borrow_and_update() {
                 tokio::select! {
                     _ = draining.wait_for(|draining| !*draining) => continue,
-                    _ = stop.wait_for(|stop| *stop) => return false,
+                    _ = stop.wait_for(|stop| *stop) => return None,
                 }
             }
             let wait = match *lease.borrow_and_update() {
@@ -1064,7 +1099,7 @@ impl Node {
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     _ = lease.changed() => continue,
-                    _ = stop.wait_for(|stop| *stop) => return false,
+                    _ = stop.wait_for(|stop| *stop) => return None,
                 }
             }
             if let Some(freed) = freed_unless(&self.room, || {
@@ -1073,7 +1108,7 @@ impl Node {
                 tokio::select! {
                     () = freed => {}
                     () = tokio::time::sleep(self.timing.ttl) => {}
-                    _ = stop.wait_for(|stop| *stop) => return false,
+                    _ = stop.wait_for(|stop| *stop) => return None,
                 }
                 continue;
             }
@@ -1081,18 +1116,26 @@ impl Node {
             let since = *free_since.get_or_insert_with(tokio::time::Instant::now);
             let assigned = self.assigned(id, record, since).await;
             match self.placement.turn(id, &assigned, self.random()) {
-                Turn::Claim(delay) => tokio::select! {
-                    () = tokio::time::sleep(delay) => return true,
-                    // Someone may have claimed it meanwhile.
-                    _ = lease.changed() => {}
-                    _ = stop.wait_for(|stop| *stop) => return false,
-                },
-                Turn::Defer(left) => tokio::select! {
-                    () = tokio::time::sleep(left.min(CHECK_ASSIGNEE_EVERY)) => {}
-                    _ = lease.changed() => {}
-                    _ = assignments.changed() => {}
-                    _ = stop.wait_for(|stop| *stop) => return false,
-                },
+                Turn::Claim(delay, authority) => {
+                    match wait_or_change(delay, lease, &mut assignments, stop).await {
+                        Paused::Elapsed => return Some(authority),
+                        Paused::Changed => {}
+                        Paused::Stop => return None,
+                    }
+                }
+                Turn::Defer(left) => {
+                    match wait_or_change(
+                        left.min(CHECK_ASSIGNEE_EVERY),
+                        lease,
+                        &mut assignments,
+                        stop,
+                    )
+                    .await
+                    {
+                        Paused::Stop => return None,
+                        Paused::Elapsed | Paused::Changed => {}
+                    }
+                }
             }
         }
     }
@@ -1114,9 +1157,12 @@ impl Node {
             None => AssignedTo::Nobody {
                 decided: record.is_none_or(|record| specs > record),
             },
-            Some(p) if p.node == self.node_id => AssignedTo::ThisNode,
+            Some(p) if p.node == self.node_id => AssignedTo::ThisNode {
+                assignment: p.offset,
+                scheduler_epoch: p.epoch,
+            },
             Some(p) => AssignedTo::Elsewhere {
-                coming: self.takes_work(&p.node).await,
+                assignee: self.assignee(&p.node).await,
             },
         };
         Assigned {
@@ -1131,10 +1177,9 @@ impl Node {
     /// expiry, so freshness comes from its version: a node rewrites its
     /// entry every renewal interval, and one whose version has not changed
     /// for [`LeaseTiming::renewed_within`] since this node first read it
-    /// counts as gone, well before its entry expires. No entry, one this
-    /// build cannot read, or a read that fails all count as no, so nothing
-    /// waits on a node that may not come.
-    async fn takes_work(&self, node: &str) -> bool {
+    /// counts as gone, well before its entry expires. Anything but
+    /// [`Assignee::Coming`] means nothing waits on a node that may not come.
+    async fn assignee(&self, node: &str) -> Assignee {
         let read = self.felix.cache_get_versioned(names::NODES, node);
         let found = tokio::time::timeout(CHECK_ASSIGNEE_EVERY, read).await;
         let now = tokio::time::Instant::now();
@@ -1143,11 +1188,11 @@ impl Node {
         let forget = self.timing.ttl * 10;
         entries.retain(|_, e| now.duration_since(e.read) <= forget);
         let Ok(Ok(found)) = found else {
-            return false;
+            return Assignee::Unreadable;
         };
         let Some(found) = found else {
             entries.remove(node);
-            return false;
+            return Assignee::Unavailable;
         };
         let entry = entries.entry(node.to_owned()).or_insert(Entry {
             version: found.version,
@@ -1159,8 +1204,14 @@ impl Node {
             entry.since = now;
         }
         entry.read = now;
-        now.duration_since(entry.since) <= self.timing.renewed_within()
-            && NodeInfo::decode(&found.value).is_ok_and(|info| info.takes_work())
+        if now.duration_since(entry.since) > self.timing.renewed_within() {
+            return Assignee::Unavailable;
+        }
+        match NodeInfo::decode(&found.value) {
+            Ok(info) if info.takes_work() => Assignee::Coming,
+            Ok(_) => Assignee::Unavailable,
+            Err(_) => Assignee::Unreadable,
+        }
     }
 
     /// Waits for renewals that are not slow, or a renewal interval of
@@ -1275,6 +1326,7 @@ async fn run_held(
         spec,
         claim_from,
         pending,
+        authority,
     } = run;
     let (deadline, fence) = held.fence();
     let (confirmer, mut asks) = Confirmer::new();
@@ -1297,6 +1349,14 @@ async fn run_held(
         AbortOnDrop(tokio::spawn(sample_tails(node.clone(), w.clone())))
     });
     let progress = Progress::default();
+    // Beside the work, never before it: placement decides no output.
+    let placing = placement::record(
+        &node.felix,
+        id,
+        placement_record(epoch, authority),
+        &fence,
+        &progress,
+    );
     let work = async {
         if let Some(problem) = pending {
             return record_needs_operator(node, id, spec, problem, &fence, &confirmer).await;
@@ -1420,6 +1480,7 @@ async fn run_held(
             return Ended::Lost;
         }
         ended = work => ended,
+        never = placing => match never {},
         _ = stop.wait_for(|stop| *stop) => Ended::Stopped,
         _ = draining.wait_for(|draining| *draining) => Ended::Drained,
     };
@@ -1475,6 +1536,8 @@ struct Run<'a> {
     spec: &'a WorkloadSpec,
     claim_from: Option<u64>,
     pending: Option<&'a NeedsOperator>,
+    /// Who placed the claim, recorded on `wl.<id>.placed` once it lands.
+    authority: Authority,
 }
 
 /// Records that the spec record `spec` comes from needs an operator, as a

@@ -1,7 +1,8 @@
-use felixd_agent::ps::{Node, Position, Report, Workload};
+use felixd_agent::ps::{Node, PlacedBy, Position, Report, Workload};
 use felixd_core::class::{ErrorClass, Failure};
 use felixd_core::lease::Lease;
 use felixd_core::node::{Drain, NodeInfo};
+use felixd_core::placement::{Authority, Reason};
 use felixd_core::status::{Degraded, Diverged, Parked, State};
 
 use super::render;
@@ -13,6 +14,7 @@ fn workload(id: &str, state: State, holder: Option<Lease>) -> Workload {
         holder,
         holder_draining: false,
         assigned: None,
+        placed: None,
         outputs: 0,
         last_epoch: None,
         divergence: None,
@@ -236,25 +238,47 @@ fn with_a_scheduler_each_workload_shows_its_assignment() {
     placed.assigned = Some(felixd_agent::assignments::Placed {
         node: "n-2".into(),
         offset: 912,
+        epoch: 4,
     });
+    placed.placed = Some(PlacedBy::Recorded(Authority::Assigned {
+        assignment: 912,
+        scheduler_epoch: 4,
+    }));
+    let mut first = workload("fc", State::Running, Some(Lease::held("n-2", 2)));
+    first.placed = Some(PlacedBy::Recorded(Authority::FirstClaim {
+        reason: Reason::Grace,
+    }));
+    let mut old = workload("old", State::Running, Some(Lease::held("n-2", 5)));
+    old.placed = Some(PlacedBy::Unknown);
     let unplaced = workload("new", State::Waiting, None);
     let report = Report {
-        workloads: vec![placed, unplaced],
+        workloads: vec![placed, first, old, unplaced],
         nodes: vec![node("n-2", true, false, 1)],
         scheduled: true,
     };
     let printed = render(&report);
     let lines: Vec<Vec<&str>> = printed
         .lines()
-        .take(3)
+        .take(5)
         .map(|l| l.split_whitespace().collect())
         .collect();
     assert_eq!(
-        lines[0][..5],
-        ["WORKLOAD", "STATE", "HOLDER", "ASSIGNED", "EPOCH"]
+        lines[0][..6],
+        ["WORKLOAD", "STATE", "HOLDER", "ASSIGNED", "PLACED", "EPOCH"]
     );
-    assert_eq!(lines[1][..5], ["wl", "running", "n-2", "n-2@912", "3"]);
-    assert_eq!(lines[2][..4], ["new", "waiting", "-", "-"]);
+    assert_eq!(
+        lines[1][..6],
+        ["wl", "running", "n-2", "n-2@912", "assigned@912", "3"]
+    );
+    assert_eq!(
+        lines[2][..6],
+        ["fc", "running", "n-2", "-", "first-claim:grace", "2"]
+    );
+    assert_eq!(
+        lines[3][..6],
+        ["old", "running", "n-2", "-", "unknown", "5"]
+    );
+    assert_eq!(lines[4][..5], ["new", "waiting", "-", "-", "-"]);
 }
 
 const EXPECTED: &str = "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed";
@@ -325,4 +349,19 @@ fn a_workload_with_no_divergence_prints_no_line_for_one() {
         scheduled: false,
     };
     assert!(!render(&report).contains("diverged"));
+}
+
+#[test]
+fn a_placement_from_a_newer_build_is_printed_plainly() {
+    use felixd_agent::ps::PlacedBy;
+    assert_eq!(
+        super::placed_word(Some(&PlacedBy::Recorded(Authority::FirstClaim {
+            reason: Reason::Other("group-bound".to_owned())
+        }))),
+        "first-claim:group-bound"
+    );
+    assert_eq!(
+        super::placed_word(Some(&PlacedBy::Recorded(Authority::Unknown))),
+        "newer-build"
+    );
 }

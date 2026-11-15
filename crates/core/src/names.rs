@@ -127,6 +127,12 @@ pub fn merge_stream(id: &str) -> String {
     format!("wl.{id}.merge")
 }
 
+/// The stream a workload's holders record who placed each claim on
+/// ([`crate::placement::PlacementRecord`]).
+pub fn placed_stream(id: &str) -> String {
+    format!("wl.{id}.placed")
+}
+
 /// The stream a workload writes its snapshots to.
 pub fn snapshot_stream(id: &str) -> String {
     format!("wl.{id}.snap")

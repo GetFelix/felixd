@@ -51,6 +51,7 @@ mod intensity;
 mod lease;
 mod merge;
 mod output;
+mod placement;
 mod readers;
 mod retention;
 mod runner;

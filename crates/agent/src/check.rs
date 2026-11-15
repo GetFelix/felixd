@@ -122,6 +122,13 @@ async fn check_one(
     // it names is on its input when that is read.
     let snap_stream = names::snapshot_stream(id);
     let snap_tail = felix.tail(&snap_stream).await?;
+    // Before the output: a placement record lands after its claim, so every
+    // claim one names is on the output read next.
+    let placed_stream = names::placed_stream(id);
+    let placements = match felix.read_tail_if_exists(&placed_stream).await? {
+        Some(tail) => read_held(felix, &placed_stream, tail).await?.records,
+        None => Vec::new(),
+    };
     let output_tail = felix.tail(&cached.output).await?;
     let held = read_held(felix, &cached.output, output_tail).await?;
     // The last trim names the snapshot a check may start from. A snapshot is
@@ -245,6 +252,15 @@ async fn check_one(
         .map(|r| (r.offset, r.payload.as_ref()))
         .collect();
     findings.extend(check::check_snapshots(&snapshots, &on_stream, output_tail));
+    let placements: Vec<(u64, &[u8])> = placements
+        .iter()
+        .map(|r| (r.offset, r.payload.as_ref()))
+        .collect();
+    findings.extend(check::check_placements(
+        &placements,
+        records.iter().map(|r| r.payload.as_ref()),
+        cut,
+    ));
     Ok(Report {
         workload: id.to_owned(),
         output: spec.output.clone(),

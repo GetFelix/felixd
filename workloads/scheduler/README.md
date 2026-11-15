@@ -13,8 +13,9 @@ writes.
   log. Its clock is the append time of the inputs it has stepped, so a replay assigns the same way.
 - **Output:** under the name `out`, each saying how far it has read `sys.specs`: an assignment
   (keyed by workload) each time where a workload should run changes, a progress record for a spec
-  record that changed nothing, and the whole table on its first step and every ten minutes of
-  input time. Formats are in [docs/records.md](../../docs/records.md#node-facts-and-assignments).
+  record that changed nothing, and the whole table at each tick: its first `sys.facts` record,
+  then the first fact past each ten-minute boundary of fact append time (spec records never
+  tick). Formats are in [docs/records.md](../../docs/records.md#node-facts-and-assignments).
 - **Policy:** a node takes work while its last fact is within three of its own intervals of the
   latest `sys.facts` time and says it is neither draining nor blocked. A running workload with no
   assignment, or one assigned to a node that no longer takes work, goes to the node with the lowest

@@ -1226,3 +1226,133 @@ fn the_latest_spec_that_ran_decides_the_upgrades() {
     assert_eq!(lineage.module_at(9), "aa");
     assert_eq!(lineage.module_at(10), "bb");
 }
+
+fn placed(epoch: u64) -> Vec<u8> {
+    use crate::placement::{Authority, Reason};
+    PlacementRecord {
+        epoch,
+        authority: Authority::FirstClaim {
+            reason: Reason::NoScheduler,
+        },
+    }
+    .encode()
+}
+
+fn placements(records: &[Vec<u8>]) -> Vec<(u64, &[u8])> {
+    records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i as u64, r.as_slice()))
+        .collect()
+}
+
+#[test]
+fn a_placement_record_for_each_claim_is_clean() {
+    let output = [output::encode_claim(1, "a"), output::encode_claim(2, "b")];
+    let placed = [placed(1), placed(2)];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings, vec![]);
+}
+
+#[test]
+fn a_claim_with_no_placement_record_is_not_a_finding() {
+    let output = [output::encode_claim(1, "a"), output::encode_claim(2, "b")];
+    let placed = [placed(2)];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings, vec![]);
+}
+
+#[test]
+fn a_placement_record_whose_epoch_names_no_claim_is_found() {
+    let output = [output::encode_claim(1, "a"), output::encode_claim(3, "b")];
+    let placed = [placed(1), placed(2), b"nope".to_vec(), placed(3)];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings.len(), 2);
+    assert_eq!(
+        findings[0],
+        Finding::PlacementUnclaimed {
+            offset: 1,
+            epoch: 2
+        }
+    );
+    assert!(matches!(
+        findings[1],
+        Finding::UndecodablePlacement { offset: 2, .. }
+    ));
+}
+
+#[test]
+fn a_deleted_head_that_took_the_only_claim_is_not_a_finding() {
+    // One holder at epoch 5 for long enough that its claim was deleted.
+    let output = [record(10, 0, 5, b"x"), record(11, 0, 5, b"y")];
+    let placed = [placed(5), placed(6)];
+    let cut = check_placements(&placements(&placed), output.iter().map(Vec::as_slice), true);
+    assert_eq!(
+        cut,
+        vec![Finding::PlacementUnclaimed {
+            offset: 1,
+            epoch: 6
+        }]
+    );
+}
+
+#[test]
+fn placement_records_below_a_deleted_head_are_passed_over() {
+    let output = [output::encode_claim(5, "a")];
+    let placed = [placed(2), placed(5), placed(6)];
+    let cut = check_placements(&placements(&placed), output.iter().map(Vec::as_slice), true);
+    assert_eq!(
+        cut,
+        vec![Finding::PlacementUnclaimed {
+            offset: 2,
+            epoch: 6
+        }]
+    );
+    let whole = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(whole.len(), 2);
+}
+
+#[test]
+fn two_placement_records_for_one_epoch_are_clean() {
+    // A retried append after a lost acknowledgement leaves both.
+    let output = [output::encode_claim(1, "a")];
+    let placed = [placed(1), placed(1)];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings, vec![]);
+}
+
+#[test]
+fn a_placement_record_from_a_newer_build_is_clean() {
+    let output = [output::encode_claim(1, "a"), output::encode_claim(2, "b")];
+    let placed = [
+        br#"{"format": 1, "value": {"epoch": 1, "placed": "first-claim", "reason": "group-bound"}}"#
+            .to_vec(),
+        br#"{"format": 1, "value": {"epoch": 2, "placed": "group", "members": ["a"]}}"#.to_vec(),
+    ];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings, vec![]);
+}

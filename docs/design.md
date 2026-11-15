@@ -340,7 +340,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 8 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
-| `wl.<id>.placed` | stream, 1 shard, `Quorum` (proposed, [Placement rules](#placement-rules)) | | placement records, one per claim | the lease holder |
+| `wl.<id>.placed` | stream, 1 shard, `Quorum` ([Placement rules](#one-placement-authority-per-workload)) | | placement records, at least one per claim ([records.md](records.md#placement-records)) | the lease holder |
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
@@ -1242,7 +1242,7 @@ reaches none of them.
 
 | Principal | May |
 |---|---|
-| Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
+| Node | Read every stream of the namespace and of `<namespace>.sys`, and every cache; publish to every stream of the namespace (`wl.*.out`, `wl.*.snap`, `wl.*.merge`, `wl.*.placed`, and inputs too) and to `sys.facts`; write `leases`, `epochs`, `nodes`, and `workloads` to mark a workload failed. No control plane rights, and nothing else in `<namespace>.sys` |
 | Admission | Read `wl.admission.out`, `sys.specs` and `modules`; publish to `sys.specs`, the only role that may; read and write `workloads`; `stream.manage` over the namespace's streams, to create an accepted workload's streams (it can also delete or patch them, see below), and none in `<namespace>.sys`. A node holds it with `--admission-token-file` and its control plane token |
 | Submitter (`felixd run`) | Put on `modules`; publish to `sys.intake`; read `wl.admission.out`, `sys.specs` and `workloads`. Nothing else. Admission records the requester but the shipped policy has no ownership rule, so any submitter can change or stop any workload that is not a system workload (`admission`, `scheduler`), whoever submitted it; a policy that lists requesters limits who may ask at all |
 | Operator (`felixd init`) | Create both namespaces, the caches and system streams, and the roles' policies (`rbac.view`, `rbac.policy.manage`); write admission's own spec directly. With `--grant-trim`, also the node's `stream.trim` on the namespace and `sys.facts` (below). The one direct write left. Not written by `init` |
@@ -1732,7 +1732,7 @@ Anything Felix doesn't do yet that felixd needs gets an issue labelled
 
 ## Scale
 
-Every workload is two single-shard streams, so N workloads are 2N streams with
+Every workload is three single-shard streams (output, snapshot and placement), so N workloads are 3N streams with
 three replicas each, plus one lease renewal per workload every TTL/3. The
 `Scale` workflow measures what that costs: it starts three Felix brokers, a
 control plane and three agents on a 4 vCPU, 16 GB GitHub runner, creates N
@@ -1800,10 +1800,9 @@ What the numbers say:
   about 1.5 to 7 streams a second, falling as the cluster fills (the saturated
   runner may play a part). At that rate the 20,000 streams of 10,000
   workloads take several hours. See
-  [felix#1761](https://github.com/GetFelix/felix/issues/1761). The proposed
-  `wl.<id>.placed` ([Placement rules](#placement-rules)) makes it three
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761). `wl.<id>.placed` ([Placement rules](#placement-rules)) makes it three
   streams per workload, so creating them takes half as long again: 30,000
-  streams for 10,000 workloads.
+  streams for 10,000 workloads. SCALE_PLACED
 - **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
   first output, against 6.9 s on 0.6.2.
 - **1000 workloads settle on 0.7.2.** The run claimed exactly 1000 times
@@ -2056,8 +2055,9 @@ never whether output is correct. A scheduler outside felixd is not planned.
 - **Output.** An assignment per change, keyed by workload. Each output also
   says how far the scheduler has read `sys.specs`, and a spec record that
   changes nothing still gets a progress record, so a node can tell "not yet
-  assigned" from "left unassigned". The whole table is written again on the
-  first step and then every ten minutes of input time. A takeover is not an
+  assigned" from "left unassigned". The whole table is written again at
+  each tick ([Reconsideration is a recorded input](#reconsideration-is-a-recorded-input)):
+  the first fact, then the first fact past each ten-minute boundary. A takeover is not an
   input, so a table written on takeover would not replay; the timed table is
   the deterministic way to the same end. Readers start from the latest table,
   so `wl.scheduler.out` can be trimmed below it (#19).
@@ -2136,7 +2136,13 @@ below, and replacing per-workload lease watching with assignments
 
 ### Placement rules
 
-Proposed in #100, not built. These rules fix what the scheduler and the agents
+Part built (#100). Built: the placement record on `wl.<id>.placed`, its
+check in `felixd check` and the PLACED column of `ps`, and ticks from
+`sys.facts`. Not built yet: groups and `--group-bound-ms` (the reason
+`group-bound` with them), the status fields (`assignments`, `held_at`) and
+lag in `ps`, `ps` showing an assignment offset that was trimmed as
+`trimmed`, the `.placed` head trim, the `workloads` writer change, and the
+TLA model. These rules fix what the scheduler and the agents
 may assume about each other before rebalancing, groups and moving a running
 workload are built on them. One thing does not change: the lease and the
 `publish_if` fence decide who owns a workload. Placement only decides who
@@ -2213,7 +2219,7 @@ Mixed versions. An agent from before groups skips records it cannot decode
 (`Followed::fold` in `crates/agent/src/assignments.rs`), so it ignores
 `group` records, sees each member as unassigned and claims it after the
 grace. Such a node starts a group split at once and writes no placement
-record, so `ps` shows its members as `placement unknown` and the group as
+record, so `ps` shows its members as `unknown` and the group as
 `split` if they run on more than one node. Run groups only once every node
 has the new build.
 
@@ -2239,7 +2245,7 @@ The holder does not wait on the append before it steps: placement never
 decides output. It retries the append until it lands or the holder loses the
 lease, so a slow broker delays the record rather than losing it. A workload
 admitted before the upgrade has no `.placed` stream; its holder writes no
-placement record and `ps` shows `placement unknown`. The append is a plain
+placement record and `ps` shows `unknown`. The append is a plain
 publish, not fenced: like the any-node writer to `wl.scheduler.out` below, a
 node can write there without the lease, and `felixd check` catches a record
 whose epoch names no claim.
@@ -2252,8 +2258,7 @@ The record carries the claim's epoch, which ties it to its claim, and:
   claimer's view that put the workload on this node. That is the `assign` or
   `group` record when the agent read it, or the `table` it started from when
   that is newer. Once `wl.scheduler.out` is trimmed below it (#19) the offset
-  still names the record but nothing can read it; `ps` shows it as
-  `trimmed`.
+  still names the record but nothing can read it.
 - `scheduler_epoch`: the epoch of the scheduler holder that wrote that record.
 
 The reasons, in the order the agent checks them; the first that holds is
@@ -2263,8 +2268,9 @@ recorded:
    assigned, so its holder always claims by first claim.
 2. `group-bound`: a group member held past `--group-bound-ms`.
 3. `no-scheduler`: the scheduler is not healthy.
-4. `unreadable`: `wl.scheduler.out` or the assignee's `nodes` entry could not
-   be read.
+4. `unreadable`: the assignee's `nodes` entry could not be read, or is in a
+   format this build does not know. A failed read of `wl.scheduler.out` is
+   not a reason of its own: the node keeps the assignments it has read.
 5. `unassigned`: the scheduler read the spec record and left it unassigned.
 6. `assignee-unavailable`: the assignee is down, silent, full, draining or
    blocked.
@@ -2275,7 +2281,7 @@ A placement record names one authority, so no claim was placed by two.
 `felixd check` reads `wl.<id>.placed` beside `.out`: a placement record must
 name the epoch of a claim on `.out`, and one that does not is reported. A
 claim with no placement record (an older holder, or a crash between the two
-appends) is `placement unknown`, not an error, since placement never decides
+appends) is `unknown` in `ps`, not an error, since placement never decides
 output. `.placed` is trimmed with the head trim of `.out`, to the oldest
 claim kept.
 
@@ -2325,8 +2331,11 @@ This changes the timed table built today
 `sys.specs` included, once the largest append time of either stream is ten
 minutes past the last table, and the first input writes one. Under the rule
 `sys.specs` records never tick, and ticks fall on fixed boundaries instead
-of ten minutes after the last table. The code change comes in the
-implementation PR, switched with `--upgrade-at` on the merge log as above.
+of ten minutes after the last table. The rule is in the scheduler module,
+so a cluster switches to it by submitting the new `scheduler.wasm` with
+`felixd run --id scheduler --upgrade-at <offset>` on its merge log; replay
+below that offset runs the old module. A snapshot from the old module
+restores, and its next fact ticks once.
 
 A separate tick stream was considered and rejected: it would be one more
 writer kind, and one more broker clock that can disagree with `sys.facts`. If

@@ -28,8 +28,9 @@ pub const SILENT_INTERVALS: u64 = 3;
 /// How many of its own fact intervals a node may stay silent before the
 /// scheduler forgets it.
 pub const FORGET_INTERVALS: u64 = 30;
-/// How often, in input time, the scheduler writes its whole table again, so
-/// a reader can start from the latest table and older output can be trimmed.
+/// The tick period: the scheduler writes its whole table again at the first
+/// `sys.facts` record past each multiple of it, so a reader can start from
+/// the latest table and older output can be trimmed.
 pub const TABLE_EVERY_MICROS: u64 = 10 * 60 * 1_000_000;
 
 /// A record on `sys.facts`: what a node says about itself. Agents append one
@@ -167,15 +168,15 @@ pub enum Refused {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Scheduler {
-    /// The latest append time stepped from either input.
-    now_micros: u64,
     /// The latest append time stepped from `sys.facts`. Silence is measured
-    /// on it alone, so all of it is timed by the one shard's leader.
+    /// on it alone, so all of it is timed by the one shard's leader. It is
+    /// also the tick clock ([`Scheduler::ticks`]).
     facts_micros: u64,
+    /// Whether any fact has been stepped, so the first one ticks. A snapshot
+    /// from a build before ticks restores as `false` and ticks once more.
+    facts_seen: bool,
     /// The next `sys.specs` offset not stepped.
     specs: u64,
-    /// When the last table was written, by `now_micros`.
-    table_micros: Option<u64>,
     nodes: BTreeMap<String, Heard>,
     /// Workloads whose last spec record says `running`.
     wanted: BTreeSet<String>,
@@ -212,9 +213,9 @@ impl Scheduler {
     ) -> Result<Vec<Record>, Refused> {
         // Before the clock moves: time passing alone can make a node silent.
         let before = self.takers();
-        self.now_micros = self.now_micros.max(timestamp_micros);
         let mut wanted_changed = false;
         let mut spec_step = false;
+        let mut tick = false;
         match stream {
             names::SPECS => {
                 self.specs = self.specs.max(offset.saturating_add(1));
@@ -232,6 +233,8 @@ impl Scheduler {
             }
             names::FACTS => {
                 let fact = NodeFact::decode(payload).map_err(Refused::Fact)?;
+                tick = self.ticks(timestamp_micros);
+                self.facts_seen = true;
                 self.facts_micros = self.facts_micros.max(timestamp_micros);
                 let heard = Heard {
                     at_micros: timestamp_micros,
@@ -254,12 +257,8 @@ impl Scheduler {
         };
         let specs = self.specs;
         let record = |change| Record { specs, change };
-        let table_due = self
-            .table_micros
-            .is_none_or(|at| self.now_micros.saturating_sub(at) >= TABLE_EVERY_MICROS);
-        if table_due {
+        if tick {
             // The table holds every change of this step too.
-            self.table_micros = Some(self.now_micros);
             let assignments = self.assigned.clone();
             return Ok(vec![record(Change::Table { assignments })]);
         }
@@ -270,6 +269,15 @@ impl Scheduler {
             .into_iter()
             .map(|(workload, node)| record(Change::Assign { workload, node }))
             .collect())
+    }
+
+    /// Whether a fact appended at `at_micros` is a tick: the first fact, or
+    /// one past a multiple of [`TABLE_EVERY_MICROS`] that the largest fact
+    /// time so far is not. That time only grows, so a broker clock that
+    /// steps back does not tick twice, and it is in the snapshot, so a
+    /// replay ticks at the same records. `sys.specs` never ticks.
+    fn ticks(&self, at_micros: u64) -> bool {
+        !self.facts_seen || at_micros / TABLE_EVERY_MICROS > self.facts_micros / TABLE_EVERY_MICROS
     }
 
     /// The node each workload is assigned to.

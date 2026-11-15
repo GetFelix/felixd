@@ -7,12 +7,13 @@
 //! output. Claims and failures hold no output, so only their epochs are
 //! checked.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use crate::merge;
 use crate::names;
 use crate::output::{self, OutputHeader, Record};
+use crate::placement::PlacementRecord;
 use crate::snapshot::{self, SnapshotHeader};
 use crate::spec::{Limits, WorkloadSpec};
 
@@ -215,6 +216,54 @@ pub enum Finding {
         missing: usize,
         first: u64,
     },
+    /// A record on `wl.<id>.placed` that is not a placement record. `offset`
+    /// is on that stream, as for every placement finding.
+    UndecodablePlacement { offset: u64, error: String },
+    /// A placement record whose epoch names no claim on the output stream:
+    /// a node wrote it without having claimed.
+    PlacementUnclaimed { offset: u64, epoch: u64 },
+}
+
+/// Checks the placement records on `wl.<id>.placed`, as `(offset, record)`,
+/// against the records of the output stream: each must name the epoch of a
+/// claim there. `cut` says Felix has deleted the head of the output stream,
+/// so a placement record at or below the epoch of the oldest record kept is
+/// passed over: its claim may be among those deleted. A claim with no
+/// placement record is not a finding: placement never decides output.
+pub fn check_placements<'a>(
+    placements: &[(u64, &[u8])],
+    output: impl IntoIterator<Item = &'a [u8]>,
+    cut: bool,
+) -> Vec<Finding> {
+    let mut oldest_kept = None;
+    let mut claims = BTreeSet::new();
+    for record in output {
+        let Ok(decoded) = output::decode(record) else {
+            continue;
+        };
+        oldest_kept.get_or_insert(decoded.epoch());
+        if let Record::Claim { epoch, .. } = decoded {
+            claims.insert(epoch);
+        }
+    }
+    let deleted_up_to = oldest_kept.filter(|_| cut);
+    let mut findings = Vec::new();
+    for &(offset, record) in placements {
+        match PlacementRecord::decode(record) {
+            Ok(placed)
+                if deleted_up_to.is_some_and(|e| placed.epoch <= e)
+                    || claims.contains(&placed.epoch) => {}
+            Ok(placed) => findings.push(Finding::PlacementUnclaimed {
+                offset,
+                epoch: placed.epoch,
+            }),
+            Err(error) => findings.push(Finding::UndecodablePlacement {
+                offset,
+                error: error.to_string(),
+            }),
+        }
+    }
+    findings
 }
 
 /// Checks the records on an output stream, as `(offset, record)` in offset
@@ -637,6 +686,13 @@ impl fmt::Display for Finding {
             } => write!(
                 f,
                 "merge log behind: {missing} records of {input} not merged, from offset {first}"
+            ),
+            Finding::UndecodablePlacement { offset, error } => {
+                write!(f, "placement record at {offset} does not decode: {error}")
+            }
+            Finding::PlacementUnclaimed { offset, epoch } => write!(
+                f,
+                "placement record at {offset} names epoch {epoch}, which has no claim on the output stream"
             ),
         }
     }
