@@ -1802,7 +1802,10 @@ What the numbers say:
   workloads take several hours. See
   [felix#1761](https://github.com/GetFelix/felix/issues/1761). `wl.<id>.placed` ([Placement rules](#placement-rules)) makes it three
   streams per workload, so creating them takes half as long again: 30,000
-  streams for 10,000 workloads. SCALE_PLACED
+  streams for 10,000 workloads. A 1000-workload run with placement records
+  created its 3010 streams in 388.5 s (7.7 a second) and had all running at
+  393.4 s, faster than the 0.7.2 run's 655 s at 3.1 a second, so the third
+  stream per workload cost nothing measurable on the nightly images.
 - **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
   first output, against 6.9 s on 0.6.2.
 - **1000 workloads settle on 0.7.2.** The run claimed exactly 1000 times

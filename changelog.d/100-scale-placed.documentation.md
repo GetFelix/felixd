@@ -1,0 +1,1 @@
+- Scale 1000 result with placement records in `docs/design.md`: 3010 streams created in 388.5 s, all running at 393.4 s.
