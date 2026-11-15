@@ -2,13 +2,15 @@
 
 use std::fmt::Write;
 
-use felixd_agent::ps::Report;
+use felixd_agent::ps::{Placement, Report};
+use felixd_core::placement::Authority;
 use felixd_core::status::State;
 
 /// The report as two tables, workloads then nodes, each followed by the
 /// details that do not fit in a column. While a scheduler runs, the
 /// workloads table has an ASSIGNED column: the node the scheduler assigned
-/// and the offset of that assignment on its output stream.
+/// and the offset of that assignment on its output stream, and a PLACED
+/// column: who placed the holder's claim.
 pub(crate) fn render(report: &Report) -> String {
     let mut out = String::new();
     let mut header = row(&[
@@ -18,7 +20,8 @@ pub(crate) fn render(report: &Report) -> String {
     let mut leading = 5;
     if report.scheduled {
         header.insert(3, "ASSIGNED".to_owned());
-        leading += 1;
+        header.insert(4, "PLACED".to_owned());
+        leading += 2;
     }
     let mut rows = vec![header];
     let mut details = Vec::new();
@@ -57,6 +60,7 @@ pub(crate) fn render(report: &Report) -> String {
                 None => "-".to_owned(),
             };
             cells.insert(3, assigned);
+            cells.insert(4, placed_word(w.placed.as_ref()));
         }
         cells.extend(first);
         rows.push(cells);
@@ -130,6 +134,21 @@ pub(crate) fn render(report: &Report) -> String {
         );
     }
     out
+}
+
+/// `assigned@<offset>`, `first-claim:<reason>`, `unknown` for a claim with
+/// no placement record, or `-` when nothing holds the workload.
+fn placed_word(placed: Option<&Placement>) -> String {
+    match placed {
+        Some(Placement::Recorded(Authority::Assigned { assignment, .. })) => {
+            format!("assigned@{assignment}")
+        }
+        Some(Placement::Recorded(Authority::FirstClaim { reason })) => {
+            format!("first-claim:{}", reason.name())
+        }
+        Some(Placement::Unknown) => "unknown".to_owned(),
+        None => "-".to_owned(),
+    }
 }
 
 fn state_word(state: Option<&State>) -> &'static str {

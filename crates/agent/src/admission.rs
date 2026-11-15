@@ -563,6 +563,7 @@ impl Projector {
             let kind = StreamKind { replication_factor };
             admin::ensure_stream(settings, &spec.output, kind).await?;
             admin::ensure_stream(settings, &names::snapshot_stream(&id), kind).await?;
+            admin::ensure_stream(settings, &names::placed_stream(&id), kind).await?;
             if spec.merged() {
                 admin::ensure_stream(settings, &names::merge_stream(&id), kind).await?;
             }

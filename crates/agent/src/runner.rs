@@ -500,6 +500,7 @@ async fn run(
         claim_from,
     )
     .await?;
+    progress.claim_landed();
     // A new owner carries on from the last trim on the stream, so its floors
     // never go below an earlier owner's, whatever `keep_snapshots` says now.
     let last_trim = match spec.keep_snapshots.is_some() || faults::enforce_trim_floors() {

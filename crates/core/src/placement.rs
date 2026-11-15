@@ -9,10 +9,18 @@
 //! at most a short grace, both from when it first saw the workload free.
 //! Otherwise it is first claim wins at once. Either way the claim goes through the lease, so placement decides
 //! where work runs, never whether output is correct.
+//!
+//! Every claim has one authority, [`Authority`], which the holder records on
+//! `wl.<id>.placed` ([`PlacementRecord`]) right after its claim lands.
 
 use std::time::Duration;
 
-use crate::names;
+use serde::{Deserialize, Serialize};
+
+use crate::{DecodeError, codec, names};
+
+/// The placement record format this build writes and reads.
+const PLACEMENT_FORMAT: u32 = 1;
 
 pub trait Placement: Send + Sync {
     /// Whether a node holding `held` workloads may claim another.
@@ -48,23 +56,34 @@ impl Assigned {
 pub enum AssignedTo {
     /// No assignment. `decided` is whether the scheduler has read past the
     /// workload's spec record, so it left it unassigned on purpose.
-    Nobody {
-        decided: bool,
+    Nobody { decided: bool },
+    /// This node, by the `wl.scheduler.out` record at `assignment`, written
+    /// by the scheduler holder at `scheduler_epoch`.
+    ThisNode {
+        assignment: u64,
+        scheduler_epoch: u64,
     },
-    ThisNode,
-    /// Another node. `coming` is whether its `nodes` entry, rewritten lately,
-    /// says it can take the workload: it has room, is not draining and can
-    /// claim.
-    Elsewhere {
-        coming: bool,
-    },
+    /// Another node, and what its `nodes` entry says.
+    Elsewhere { assignee: Assignee },
+}
+
+/// What a node reads of another node's `nodes` entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Assignee {
+    /// Rewritten lately, and it can take the workload: it has room, is not
+    /// draining and can claim.
+    Coming,
+    /// No entry, a stale one, or one that says it takes no work.
+    Unavailable,
+    /// The read failed, or the entry is in a format this build cannot read.
+    Unreadable,
 }
 
 /// What a node does about a free workload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Turn {
-    /// Claim it after this long.
-    Claim(Duration),
+    /// Claim it after this long, under this authority.
+    Claim(Duration, Authority),
     /// Leave it to its assignee, and decide again after this long, or sooner
     /// if the lease or the assignment changes.
     Defer(Duration),
@@ -103,8 +122,19 @@ impl Placement for FirstClaimWins {
         held < self.max_workloads
     }
 
-    fn turn(&self, _workload: &str, _assigned: &Assigned, random: f64) -> Turn {
-        Turn::Claim(self.claim_delay(random))
+    fn turn(&self, workload: &str, _assigned: &Assigned, random: f64) -> Turn {
+        let reason = if workload == names::SCHEDULER {
+            Reason::Scheduler
+        } else {
+            Reason::NoScheduler
+        };
+        self.first_claim(reason, random)
+    }
+}
+
+impl FirstClaimWins {
+    fn first_claim(&self, reason: Reason, random: f64) -> Turn {
+        Turn::Claim(self.claim_delay(random), Authority::FirstClaim { reason })
     }
 }
 
@@ -135,20 +165,135 @@ impl Placement for Scheduled {
         self.fallback.has_room(held)
     }
 
+    /// The reasons for a first claim are checked in the order of
+    /// [`Reason`]'s variants, and the first that holds is the one recorded.
     fn turn(&self, workload: &str, assigned: &Assigned, random: f64) -> Turn {
-        if !assigned.scheduler || workload == names::SCHEDULER {
-            return self.fallback.turn(workload, assigned, random);
+        let first = |reason| self.fallback.first_claim(reason, random);
+        if workload == names::SCHEDULER {
+            return first(Reason::Scheduler);
+        }
+        if !assigned.scheduler {
+            return first(Reason::NoScheduler);
         }
         match assigned.to {
-            AssignedTo::ThisNode => Turn::Claim(Duration::ZERO),
-            AssignedTo::Elsewhere { coming: true } if assigned.waited < self.bound => {
-                Turn::Defer(self.bound - assigned.waited)
-            }
+            AssignedTo::ThisNode {
+                assignment,
+                scheduler_epoch,
+            } => Turn::Claim(
+                Duration::ZERO,
+                Authority::Assigned {
+                    assignment,
+                    scheduler_epoch,
+                },
+            ),
+            AssignedTo::Elsewhere {
+                assignee: Assignee::Unreadable,
+            } => first(Reason::Unreadable),
+            AssignedTo::Nobody { decided: true } => first(Reason::Unassigned),
+            AssignedTo::Elsewhere {
+                assignee: Assignee::Unavailable,
+            } => first(Reason::AssigneeUnavailable),
             AssignedTo::Nobody { decided: false } if assigned.waited < self.grace => {
                 Turn::Defer(self.grace - assigned.waited)
             }
-            _ => self.fallback.turn(workload, assigned, random),
+            AssignedTo::Nobody { decided: false } => first(Reason::Grace),
+            AssignedTo::Elsewhere {
+                assignee: Assignee::Coming,
+            } if assigned.waited < self.bound => Turn::Defer(self.bound - assigned.waited),
+            AssignedTo::Elsewhere {
+                assignee: Assignee::Coming,
+            } => first(Reason::Bound),
         }
+    }
+}
+
+/// Who placed a claim: the scheduler's assignment in force, or first claim
+/// wins. One claim has exactly one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "placed", rename_all = "kebab-case")]
+pub enum Authority {
+    /// The scheduler put the workload on the claiming node. `assignment` is
+    /// the `wl.scheduler.out` offset of the latest record in the claimer's
+    /// view that did (an `assign`, or the `table` it read from), and
+    /// `scheduler_epoch` the epoch of the scheduler holder that wrote it.
+    Assigned {
+        assignment: u64,
+        scheduler_epoch: u64,
+    },
+    /// First claim wins, for `reason`.
+    FirstClaim { reason: Reason },
+}
+
+/// Why a claim was first claim wins. The order of the variants is the order
+/// the agent checks them in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reason {
+    /// The workload is the scheduler, which is never assigned.
+    Scheduler,
+    /// The scheduler does not run, or its holder has not renewed lately.
+    NoScheduler,
+    /// The assignee's `nodes` entry could not be read.
+    Unreadable,
+    /// The scheduler read the spec record and left the workload unassigned.
+    Unassigned,
+    /// The assignee is down, silent, full, draining or blocked.
+    AssigneeUnavailable,
+    /// The scheduler had not read the spec record within the grace.
+    Grace,
+    /// The assignee looked able but did not claim within the bound.
+    Bound,
+}
+
+impl Reason {
+    /// The name in records and in `felixd ps`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Reason::Scheduler => "scheduler",
+            Reason::NoScheduler => "no-scheduler",
+            Reason::Unreadable => "unreadable",
+            Reason::Unassigned => "unassigned",
+            Reason::AssigneeUnavailable => "assignee-unavailable",
+            Reason::Grace => "grace",
+            Reason::Bound => "bound",
+        }
+    }
+}
+
+impl std::fmt::Display for Authority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Authority::Assigned {
+                assignment,
+                scheduler_epoch,
+            } => write!(
+                f,
+                "assigned (assignment {assignment}, scheduler epoch {scheduler_epoch})"
+            ),
+            Authority::FirstClaim { reason } => write!(f, "first-claim ({})", reason.name()),
+        }
+    }
+}
+
+/// A record on `wl.<id>.placed`: the authority the claim at `epoch` on
+/// `wl.<id>.out` was placed by. The claim record's format is frozen, and an
+/// older node would fail the workload on a new kind of record there, so the
+/// authority lives on a stream of its own that no older build reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementRecord {
+    /// The epoch of the claim it belongs to.
+    pub epoch: u64,
+    #[serde(flatten)]
+    pub authority: Authority,
+}
+
+impl PlacementRecord {
+    pub fn encode(&self) -> Vec<u8> {
+        codec::encode_json(PLACEMENT_FORMAT, self)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<PlacementRecord, DecodeError> {
+        codec::decode_json(PLACEMENT_FORMAT, bytes)
     }
 }
 

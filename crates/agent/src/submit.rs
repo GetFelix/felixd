@@ -110,6 +110,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
     let output = names::output_stream(&submission.id);
     admin::ensure_stream(settings, &output, kind).await?;
     admin::ensure_stream(settings, &names::snapshot_stream(&submission.id), kind).await?;
+    admin::ensure_stream(settings, &names::placed_stream(&submission.id), kind).await?;
     if submission.inputs.len() > 1 {
         admin::ensure_stream(settings, &names::merge_stream(&submission.id), kind).await?;
     }

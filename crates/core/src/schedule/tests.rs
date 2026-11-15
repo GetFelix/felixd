@@ -369,3 +369,129 @@ fn a_skip_record_assigns_nothing() {
     let out = f.s.step(names::SPECS, 0, 1, &skip.encode()).unwrap();
     assert_eq!(out, vec![f.progress()]);
 }
+
+fn table(specs: u64, assignments: &[(&str, &str)]) -> Record {
+    Record {
+        specs,
+        change: Change::Table {
+            assignments: assignments
+                .iter()
+                .map(|(w, n)| (w.to_string(), n.to_string()))
+                .collect(),
+        },
+    }
+}
+
+#[test]
+fn a_spec_record_never_ticks() {
+    let mut s = Scheduler::default();
+    let out = s
+        .step(
+            names::SPECS,
+            0,
+            0,
+            &spec_record("w", WorkloadState::Running),
+        )
+        .unwrap();
+    assert_eq!(
+        out,
+        vec![Record {
+            specs: 1,
+            change: Change::Progress
+        }]
+    );
+    // The first fact is the first tick.
+    let out = s.step(names::FACTS, 0, 1, &fact("a").encode()).unwrap();
+    assert_eq!(out, vec![table(1, &[("w", "a")])]);
+    let mut f = Feed::hearing(&["a"]);
+    // A spec record past a boundary does not tick; the next fact does.
+    assert_eq!(
+        f.run(TABLE_EVERY_MICROS + 1, "w"),
+        vec![f.assign("w", Some("a"))]
+    );
+    assert_eq!(
+        f.fact(TABLE_EVERY_MICROS + 2, fact("a")),
+        vec![table(1, &[("w", "a")])]
+    );
+}
+
+#[test]
+fn ticks_fall_on_fixed_boundaries() {
+    let mut f = Feed::hearing(&[]);
+    let half = TABLE_EVERY_MICROS / 2;
+    assert_eq!(f.fact(half, fact("a")), vec![table(0, &[])]);
+    // Not ten minutes after that table: at the next multiple of the period.
+    assert_eq!(f.fact(TABLE_EVERY_MICROS - 1, fact("a")), vec![]);
+    assert_eq!(f.fact(TABLE_EVERY_MICROS, fact("a")), vec![table(0, &[])]);
+    assert_eq!(f.fact(TABLE_EVERY_MICROS + half, fact("a")), vec![]);
+    // Crossing several boundaries at once is one tick.
+    assert_eq!(
+        f.fact(5 * TABLE_EVERY_MICROS, fact("a")),
+        vec![table(0, &[])]
+    );
+    assert_eq!(f.fact(5 * TABLE_EVERY_MICROS + 1, fact("a")), vec![]);
+}
+
+#[test]
+fn a_clock_stepping_back_does_not_tick_again() {
+    let mut f = Feed::hearing(&["a"]);
+    assert_eq!(f.fact(TABLE_EVERY_MICROS, fact("a")), vec![table(0, &[])]);
+    // A leader change on sys.facts to a broker whose clock is behind.
+    assert_eq!(f.fact(TABLE_EVERY_MICROS - SECOND, fact("a")), vec![]);
+    // Back past the boundary it already ticked at: still no second tick.
+    assert_eq!(f.fact(TABLE_EVERY_MICROS + SECOND, fact("a")), vec![]);
+    assert_eq!(
+        f.fact(2 * TABLE_EVERY_MICROS, fact("a")),
+        vec![table(0, &[])]
+    );
+}
+
+#[test]
+fn a_replay_from_a_snapshot_ticks_where_the_original_did() {
+    let times = [
+        0,
+        TABLE_EVERY_MICROS - SECOND,
+        TABLE_EVERY_MICROS + SECOND,
+        TABLE_EVERY_MICROS,
+        2 * TABLE_EVERY_MICROS - 1,
+        2 * TABLE_EVERY_MICROS + 3,
+        3 * TABLE_EVERY_MICROS,
+    ];
+    let outputs = |s: &mut Scheduler, from: usize| -> Vec<Vec<Record>> {
+        times[from..]
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| {
+                s.step(names::FACTS, (from + i) as u64, at, &fact("a").encode())
+                    .unwrap()
+            })
+            .collect()
+    };
+    let mut original = Scheduler::default();
+    let all = outputs(&mut original, 0);
+    for cut in 1..times.len() {
+        let mut first = Scheduler::default();
+        for (i, &at) in times[..cut].iter().enumerate() {
+            first
+                .step(names::FACTS, i as u64, at, &fact("a").encode())
+                .unwrap();
+        }
+        let mut restored = Scheduler::decode(&first.encode()).unwrap();
+        assert_eq!(outputs(&mut restored, cut), all[cut..], "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_snapshot_from_before_ticks_restores_and_ticks_at_its_next_fact() {
+    // A state as the build before ticks wrote it.
+    let old = br#"{"now_micros":5,"facts_micros":5,"specs":0,"table_micros":5,"nodes":{},"wanted":[],"assigned":{}}"#;
+    let mut s = Scheduler::decode(old).unwrap();
+    assert_eq!(
+        s.step(names::FACTS, 0, 6, &fact("a").encode()).unwrap(),
+        vec![table(0, &[])]
+    );
+    assert_eq!(
+        s.step(names::FACTS, 1, 7, &fact("a").encode()).unwrap(),
+        vec![]
+    );
+}

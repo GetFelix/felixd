@@ -2,8 +2,9 @@
 //! claim what is assigned to them through the lease, its assignments carry
 //! on after its own node dies, nothing waits on an assignee that cannot take
 //! the work or on a scheduler with no holder, an assignee that does nothing
-//! is passed over after the bound, a replay assigns the same way, and with
-//! `keep_snapshots` its holder deletes the node facts it no longer reads.
+//! is passed over after the bound, a replay assigns the same way, each claim
+//! records who placed it on `wl.<id>.placed`, and with `keep_snapshots` its
+//! holder deletes the node facts it no longer reads.
 //!
 //! Needs a Felix broker; see `common`.
 
@@ -21,7 +22,8 @@ use felixd_agent::felix::Felix;
 use felixd_core::names;
 use felixd_core::node::NodeInfo;
 use felixd_core::output;
-use felixd_core::schedule::{NodeFact, SILENT_INTERVALS};
+use felixd_core::placement::{Authority, PlacementRecord, Reason};
+use felixd_core::schedule::{self, Change, NodeFact, SILENT_INTERVALS};
 use felixd_core::spec::{SpecRecord, WorkloadState};
 use felixd_core::trim::Trim;
 
@@ -266,6 +268,108 @@ async fn assignments_carry_on_after_the_scheduler_s_node_dies() {
     }
     let (ok, report) = t.check(&["--id", names::SCHEDULER]);
     assert!(ok, "felixd check found problems:\n{report}");
+}
+
+/// The placement record of `id`'s claim at `epoch`, once it lands.
+async fn placement_of(t: &TestFelix, id: &str, epoch: u64) -> Authority {
+    let stream = names::placed_stream(id);
+    eventually(
+        &format!("a placement record for {id} at {epoch}"),
+        SOON,
+        || async {
+            t.read_all(&stream)
+                .await
+                .iter()
+                .filter_map(|(_, r)| PlacementRecord::decode(r).ok())
+                .find(|p| p.epoch == epoch)
+                .map(|p| p.authority)
+        },
+    )
+    .await
+}
+
+async fn epoch_of(t: &TestFelix, id: &str) -> u64 {
+    t.lease(id).await.expect("a lease").0.epoch
+}
+
+#[tokio::test]
+async fn each_claim_records_who_placed_it_and_check_finds_a_record_without_a_claim() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let bound = Duration::from_secs(300);
+    let nodes = ["s9-a", "s9-b"];
+    let mut agents: HashMap<&str, Agent> =
+        nodes.iter().map(|&n| (n, start(&t, n, bound))).collect();
+    scheduler_on(&t, &nodes).await;
+    let scheduler_epoch = epoch_of(&t, names::SCHEDULER).await;
+    assert_eq!(
+        placement_of(&t, names::SCHEDULER, scheduler_epoch).await,
+        Authority::FirstClaim {
+            reason: Reason::Scheduler
+        }
+    );
+
+    assert!(run_counter(&t, "placed").await.success());
+    let owner = held_by_assignee(&t, "placed").await;
+    let first = epoch_of(&t, "placed").await;
+    let Authority::Assigned {
+        assignment,
+        scheduler_epoch: by,
+    } = placement_of(&t, "placed", first).await
+    else {
+        panic!("the assignee's claim is not recorded as assigned");
+    };
+    assert_eq!(by, scheduler_epoch);
+    assert_eq!(
+        assignment_at(&t, assignment, "placed").await.as_deref(),
+        Some(owner.as_str()),
+        "the placement record names no record that put the workload on {owner}"
+    );
+
+    // A crash: the next holder records its own claim.
+    eprintln!("killing {owner}, which holds the workload");
+    agents.get_mut(owner.as_str()).unwrap().kill();
+    let next = eventually("another node to claim the workload", SOON, || async {
+        let (lease, _) = t.lease("placed").await?;
+        (lease.epoch > first && lease.owner != owner).then_some(lease.epoch)
+    })
+    .await;
+    placement_of(&t, "placed", next).await;
+    let (ok, report) = t.check(&["--id", "placed"]);
+    assert!(ok, "felixd check found problems:\n{report}");
+
+    // A record no claim stands behind, as a node without the lease could write.
+    let rogue = PlacementRecord {
+        epoch: next + 100,
+        authority: Authority::FirstClaim {
+            reason: Reason::NoScheduler,
+        },
+    };
+    t.felix
+        .publish(&names::placed_stream("placed"), rogue.encode())
+        .await
+        .unwrap();
+    let (ok, report) = t.check(&["--id", "placed"]);
+    assert!(!ok, "felixd check passed a placement record with no claim");
+    assert!(
+        report.contains(&format!("names epoch {}", next + 100)),
+        "{report}"
+    );
+}
+
+/// The node the scheduler output at `offset` puts `id` on.
+async fn assignment_at(t: &TestFelix, offset: u64, id: &str) -> Option<String> {
+    let records = t.read_all(&names::output_stream(names::SCHEDULER)).await;
+    let (_, record) = records.iter().find(|(at, _)| *at == offset)?;
+    let output::Record::Output(_, addressed) = output::decode(record).ok()? else {
+        return None;
+    };
+    match schedule::Record::decode(addressed.payload).ok()?.change {
+        Change::Assign { workload, node } if workload == id => node,
+        Change::Table { mut assignments } => assignments.remove(id),
+        _ => None,
+    }
 }
 
 #[tokio::test]
