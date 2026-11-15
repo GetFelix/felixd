@@ -80,7 +80,7 @@ pub enum Assignee {
 }
 
 /// What a node does about a free workload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Turn {
     /// Claim it after this long, under this authority.
     Claim(Duration, Authority),
@@ -209,7 +209,7 @@ impl Placement for Scheduled {
 
 /// Who placed a claim: the scheduler's assignment in force, or first claim
 /// wins. One claim has exactly one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "placed", rename_all = "kebab-case")]
 pub enum Authority {
     /// The scheduler put the workload on the claiming node. `assignment` is
@@ -222,12 +222,14 @@ pub enum Authority {
     },
     /// First claim wins, for `reason`.
     FirstClaim { reason: Reason },
+    /// A kind of authority a newer build wrote. Never produced by this build.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Why a claim was first claim wins. The order of the variants is the order
 /// the agent checks them in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reason {
     /// The workload is the scheduler, which is never assigned.
     Scheduler,
@@ -243,11 +245,14 @@ pub enum Reason {
     Grace,
     /// The assignee looked able but did not claim within the bound.
     Bound,
+    /// A reason a newer build wrote, kept as written. Never produced by this
+    /// build.
+    Other(String),
 }
 
 impl Reason {
     /// The name in records and in `felixd ps`.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Reason::Scheduler => "scheduler",
             Reason::NoScheduler => "no-scheduler",
@@ -256,7 +261,30 @@ impl Reason {
             Reason::AssigneeUnavailable => "assignee-unavailable",
             Reason::Grace => "grace",
             Reason::Bound => "bound",
+            Reason::Other(name) => name,
         }
+    }
+}
+
+impl Serialize for Reason {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Reason {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        Ok(match name.as_str() {
+            "scheduler" => Reason::Scheduler,
+            "no-scheduler" => Reason::NoScheduler,
+            "unreadable" => Reason::Unreadable,
+            "unassigned" => Reason::Unassigned,
+            "assignee-unavailable" => Reason::AssigneeUnavailable,
+            "grace" => Reason::Grace,
+            "bound" => Reason::Bound,
+            _ => Reason::Other(name),
+        })
     }
 }
 
@@ -271,6 +299,7 @@ impl std::fmt::Display for Authority {
                 "assigned (assignment {assignment}, scheduler epoch {scheduler_epoch})"
             ),
             Authority::FirstClaim { reason } => write!(f, "first-claim ({})", reason.name()),
+            Authority::Unknown => write!(f, "unknown (written by a newer build)"),
         }
     }
 }
@@ -279,7 +308,7 @@ impl std::fmt::Display for Authority {
 /// `wl.<id>.out` was placed by. The claim record's format is frozen, and an
 /// older node would fail the workload on a new kind of record there, so the
 /// authority lives on a stream of its own that no older build reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementRecord {
     /// The epoch of the claim it belongs to.
     pub epoch: u64,

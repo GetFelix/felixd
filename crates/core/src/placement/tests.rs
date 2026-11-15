@@ -211,9 +211,30 @@ fn a_placement_record_of_another_format_is_refused() {
     let bytes =
         br#"{"format": 2, "value": {"epoch": 1, "placed": "first-claim", "reason": "grace"}}"#;
     assert!(PlacementRecord::decode(bytes).is_err());
-    let unknown =
-        br#"{"format": 1, "value": {"epoch": 1, "placed": "first-claim", "reason": "luck"}}"#;
-    assert!(PlacementRecord::decode(unknown).is_err());
+}
+
+#[test]
+fn a_reason_from_a_newer_build_decodes_and_is_kept() {
+    let bytes =
+        br#"{"format": 1, "value": {"epoch": 4, "placed": "first-claim", "reason": "group-bound"}}"#;
+    let record = PlacementRecord::decode(bytes).unwrap();
+    assert_eq!(record.epoch, 4);
+    assert_eq!(
+        record.authority,
+        Authority::FirstClaim {
+            reason: Reason::Other("group-bound".to_owned())
+        }
+    );
+    let again = PlacementRecord::decode(&record.encode()).unwrap();
+    assert_eq!(again, record);
+}
+
+#[test]
+fn an_authority_from_a_newer_build_decodes_as_unknown() {
+    let bytes = br#"{"format": 1, "value": {"epoch": 4, "placed": "group", "members": ["a"]}}"#;
+    let record = PlacementRecord::decode(bytes).unwrap();
+    assert_eq!(record.epoch, 4);
+    assert_eq!(record.authority, Authority::Unknown);
 }
 
 #[test]
@@ -228,7 +249,7 @@ fn reason_names_match_the_record() {
         Reason::Bound,
     ] {
         assert_eq!(
-            serde_json::to_value(reason).unwrap(),
+            serde_json::to_value(&reason).unwrap(),
             serde_json::json!(reason.name())
         );
     }

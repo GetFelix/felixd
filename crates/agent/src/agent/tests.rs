@@ -106,3 +106,79 @@ async fn a_read_that_hangs_does_not_hold_a_claim_permit() {
     hung.abort();
     assert!(turn.is_ok(), "a hung read kept the permit");
 }
+
+fn watches() -> (
+    watch::Sender<Seen>,
+    watch::Receiver<Seen>,
+    watch::Sender<u64>,
+    watch::Sender<bool>,
+) {
+    let (lease_tx, lease) = watch::channel(Seen::Free);
+    let (assignments_tx, _) = watch::channel(0u64);
+    let (stop_tx, _) = watch::channel(false);
+    (lease_tx, lease, assignments_tx, stop_tx)
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_assignment_that_lands_ends_the_wait_early() {
+    let (_lease_tx, mut lease, assignments_tx, stop_tx) = watches();
+    let mut assignments = assignments_tx.subscribe();
+    let mut stop = stop_tx.subscribe();
+    let landed = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        assignments_tx.send_modify(|n| *n += 1);
+        assignments_tx
+    });
+    let paused = wait_or_change(
+        Duration::from_secs(3600),
+        &mut lease,
+        &mut assignments,
+        &mut stop,
+    )
+    .await;
+    assert_eq!(paused, Paused::Changed);
+    let _ = landed.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_with_no_change_runs_its_delay_and_stop_ends_it() {
+    let (_lease_tx, mut lease, assignments_tx, stop_tx) = watches();
+    let mut assignments = assignments_tx.subscribe();
+    let mut stop = stop_tx.subscribe();
+    let paused = wait_or_change(
+        Duration::from_secs(5),
+        &mut lease,
+        &mut assignments,
+        &mut stop,
+    )
+    .await;
+    assert_eq!(paused, Paused::Elapsed);
+    stop_tx.send_replace(true);
+    let paused = wait_or_change(
+        Duration::from_secs(3600),
+        &mut lease,
+        &mut assignments,
+        &mut stop,
+    )
+    .await;
+    assert_eq!(paused, Paused::Stop);
+}
+
+#[test]
+fn the_placement_record_names_the_epoch_the_holder_took() {
+    let record = placement_record(
+        7,
+        Authority::Assigned {
+            assignment: 912,
+            scheduler_epoch: 3,
+        },
+    );
+    assert_eq!(record.epoch, 7);
+    assert_eq!(
+        record.authority,
+        Authority::Assigned {
+            assignment: 912,
+            scheduler_epoch: 3
+        }
+    );
+}

@@ -350,3 +350,18 @@ fn a_workload_with_no_divergence_prints_no_line_for_one() {
     };
     assert!(!render(&report).contains("diverged"));
 }
+
+#[test]
+fn a_placement_from_a_newer_build_is_printed_plainly() {
+    use felixd_agent::ps::PlacedBy;
+    assert_eq!(
+        super::placed_word(Some(&PlacedBy::Recorded(Authority::FirstClaim {
+            reason: Reason::Other("group-bound".to_owned())
+        }))),
+        "first-claim:group-bound"
+    );
+    assert_eq!(
+        super::placed_word(Some(&PlacedBy::Recorded(Authority::Unknown))),
+        "newer-build"
+    );
+}

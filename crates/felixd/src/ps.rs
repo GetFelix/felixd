@@ -137,7 +137,8 @@ pub(crate) fn render(report: &Report) -> String {
 }
 
 /// `assigned@<offset>`, `first-claim:<reason>`, `unknown` for a claim with
-/// no placement record, or `-` when nothing holds the workload.
+/// no placement record, `newer-build` for an authority this build does not
+/// know, or `-` when nothing holds the workload.
 fn placed_word(placed: Option<&PlacedBy>) -> String {
     match placed {
         Some(PlacedBy::Recorded(Authority::Assigned { assignment, .. })) => {
@@ -146,6 +147,7 @@ fn placed_word(placed: Option<&PlacedBy>) -> String {
         Some(PlacedBy::Recorded(Authority::FirstClaim { reason })) => {
             format!("first-claim:{}", reason.name())
         }
+        Some(PlacedBy::Recorded(Authority::Unknown)) => "newer-build".to_owned(),
         Some(PlacedBy::Unknown) => "unknown".to_owned(),
         None => "-".to_owned(),
     }

@@ -434,7 +434,7 @@ assignment whose spec record is below `specs` was left unassigned on purpose, fo
 
 ## Placement records
 
-`wl.<id>.placed`, one shard, holds one record per claim, appended by the holder right after its
+`wl.<id>.placed`, one shard, holds at least one record per claim, appended by the holder right after its
 claim lands on `wl.<id>.out`. Each is `{"format": 1, "value": ...}` with `epoch`, the claim's
 epoch, and `placed`:
 
@@ -451,9 +451,12 @@ epoch, and `placed`:
 
 The record is the holder's view when it decided to claim. A claim taken only to record that the
 workload needs an operator gets none. The append is a plain publish, retried until it lands or the
-lease is lost. A claim with no record
-is `placement unknown`; a record whose epoch names no claim on `.out` is a `felixd check` finding.
-A reader refuses another format or an unknown reason.
+lease is lost, so a lost acknowledgement followed by a retry leaves two records for one epoch;
+`felixd check` and `felixd ps` accept that. A claim with no record
+is `unknown` in `ps`; a record whose epoch names no claim on `.out` is a `felixd check` finding.
+A reader refuses another format, but ignores a reason or a kind of `placed` it does not know, so a
+newer build can add them under format 1: `ps` shows such a record plainly and `check` does not
+report it.
 
 ## Caches
 

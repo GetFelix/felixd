@@ -1035,6 +1035,35 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// How a [`wait_or_change`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Paused {
+    Elapsed,
+    /// The lease or the assignments changed: someone may have claimed the
+    /// workload, or an assignment landed that changes who should.
+    Changed,
+    Stop,
+}
+
+async fn wait_or_change(
+    delay: Duration,
+    lease: &mut watch::Receiver<Seen>,
+    assignments: &mut watch::Receiver<u64>,
+    stop: &mut watch::Receiver<bool>,
+) -> Paused {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Paused::Elapsed,
+        _ = lease.changed() => Paused::Changed,
+        _ = assignments.changed() => Paused::Changed,
+        _ = stop.wait_for(|stop| *stop) => Paused::Stop,
+    }
+}
+
+/// The placement record for a claim won at `epoch` under `authority`.
+fn placement_record(epoch: u64, authority: Authority) -> PlacementRecord {
+    PlacementRecord { epoch, authority }
+}
+
 impl Node {
     /// Waits until the lease looks free, this node has room and the placement
     /// policy lets it claim, and returns the authority it claims under.
@@ -1087,20 +1116,26 @@ impl Node {
             let since = *free_since.get_or_insert_with(tokio::time::Instant::now);
             let assigned = self.assigned(id, record, since).await;
             match self.placement.turn(id, &assigned, self.random()) {
-                Turn::Claim(delay, authority) => tokio::select! {
-                    () = tokio::time::sleep(delay) => return Some(authority),
-                    // Someone may have claimed it meanwhile, or an assignment
-                    // landed that changes who should.
-                    _ = lease.changed() => {}
-                    _ = assignments.changed() => {}
-                    _ = stop.wait_for(|stop| *stop) => return None,
-                },
-                Turn::Defer(left) => tokio::select! {
-                    () = tokio::time::sleep(left.min(CHECK_ASSIGNEE_EVERY)) => {}
-                    _ = lease.changed() => {}
-                    _ = assignments.changed() => {}
-                    _ = stop.wait_for(|stop| *stop) => return None,
-                },
+                Turn::Claim(delay, authority) => {
+                    match wait_or_change(delay, lease, &mut assignments, stop).await {
+                        Paused::Elapsed => return Some(authority),
+                        Paused::Changed => {}
+                        Paused::Stop => return None,
+                    }
+                }
+                Turn::Defer(left) => {
+                    match wait_or_change(
+                        left.min(CHECK_ASSIGNEE_EVERY),
+                        lease,
+                        &mut assignments,
+                        stop,
+                    )
+                    .await
+                    {
+                        Paused::Stop => return None,
+                        Paused::Elapsed | Paused::Changed => {}
+                    }
+                }
             }
         }
     }
@@ -1318,7 +1353,7 @@ async fn run_held(
     let placing = placement::record(
         &node.felix,
         id,
-        PlacementRecord { epoch, authority },
+        placement_record(epoch, authority),
         &fence,
         &progress,
     );

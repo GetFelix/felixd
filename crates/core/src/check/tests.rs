@@ -1327,3 +1327,32 @@ fn placement_records_below_a_deleted_head_are_passed_over() {
     );
     assert_eq!(whole.len(), 2);
 }
+
+#[test]
+fn two_placement_records_for_one_epoch_are_clean() {
+    // A retried append after a lost acknowledgement leaves both.
+    let output = [output::encode_claim(1, "a")];
+    let placed = [placed(1), placed(1)];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings, vec![]);
+}
+
+#[test]
+fn a_placement_record_from_a_newer_build_is_clean() {
+    let output = [output::encode_claim(1, "a"), output::encode_claim(2, "b")];
+    let placed = [
+        br#"{"format": 1, "value": {"epoch": 1, "placed": "first-claim", "reason": "group-bound"}}"#
+            .to_vec(),
+        br#"{"format": 1, "value": {"epoch": 2, "placed": "group", "members": ["a"]}}"#.to_vec(),
+    ];
+    let findings = check_placements(
+        &placements(&placed),
+        output.iter().map(Vec::as_slice),
+        false,
+    );
+    assert_eq!(findings, vec![]);
+}

@@ -340,7 +340,7 @@ stops no claim. `--replication-factor 1` is for a single development broker.
 | `modules` | cache | sha256 of the module; `<sha256>/<n>` for the chunks of a module over 8 MiB | the module bytes, or for a larger module a manifest and then its chunks ([Modules](#modules)) | submitters (`felixd run`) |
 | `wl.<id>.out` | stream, 1 shard, `Quorum` | | output records | the lease holder, with `publish_if` |
 | `wl.<id>.snap` | stream, 1 shard, `Quorum` | | snapshots | the lease holder |
-| `wl.<id>.placed` | stream, 1 shard, `Quorum` ([Placement rules](#one-placement-authority-per-workload)) | | placement records, one per claim ([records.md](records.md#placement-records)) | the lease holder |
+| `wl.<id>.placed` | stream, 1 shard, `Quorum` ([Placement rules](#one-placement-authority-per-workload)) | | placement records, at least one per claim ([records.md](records.md#placement-records)) | the lease holder |
 
 A workload's input is any stream: one written by an outside producer, or
 another workload's `.out`. v0 reads one shard of one stream per workload.
@@ -1732,7 +1732,7 @@ Anything Felix doesn't do yet that felixd needs gets an issue labelled
 
 ## Scale
 
-Every workload is two single-shard streams, so N workloads are 2N streams with
+Every workload is three single-shard streams (output, snapshot and placement), so N workloads are 3N streams with
 three replicas each, plus one lease renewal per workload every TTL/3. The
 `Scale` workflow measures what that costs: it starts three Felix brokers, a
 control plane and three agents on a 4 vCPU, 16 GB GitHub runner, creates N
@@ -1800,10 +1800,9 @@ What the numbers say:
   about 1.5 to 7 streams a second, falling as the cluster fills (the saturated
   runner may play a part). At that rate the 20,000 streams of 10,000
   workloads take several hours. See
-  [felix#1761](https://github.com/GetFelix/felix/issues/1761). The proposed
-  `wl.<id>.placed` ([Placement rules](#placement-rules)) makes it three
+  [felix#1761](https://github.com/GetFelix/felix/issues/1761). `wl.<id>.placed` ([Placement rules](#placement-rules)) makes it three
   streams per workload, so creating them takes half as long again: 30,000
-  streams for 10,000 workloads.
+  streams for 10,000 workloads. SCALE_PLACED
 - **Starting is slow on 0.7.0-preview.2.** Its 500-workload run took 282 s to
   first output, against 6.9 s on 0.6.2.
 - **1000 workloads settle on 0.7.2.** The run claimed exactly 1000 times
@@ -2141,7 +2140,8 @@ Part built (#100). Built: the placement record on `wl.<id>.placed`, its
 check in `felixd check` and the PLACED column of `ps`, and ticks from
 `sys.facts`. Not built yet: groups and `--group-bound-ms` (the reason
 `group-bound` with them), the status fields (`assignments`, `held_at`) and
-lag in `ps`, the `.placed` head trim, the `workloads` writer change, and the
+lag in `ps`, `ps` showing an assignment offset that was trimmed as
+`trimmed`, the `.placed` head trim, the `workloads` writer change, and the
 TLA model. These rules fix what the scheduler and the agents
 may assume about each other before rebalancing, groups and moving a running
 workload are built on them. One thing does not change: the lease and the
@@ -2219,7 +2219,7 @@ Mixed versions. An agent from before groups skips records it cannot decode
 (`Followed::fold` in `crates/agent/src/assignments.rs`), so it ignores
 `group` records, sees each member as unassigned and claims it after the
 grace. Such a node starts a group split at once and writes no placement
-record, so `ps` shows its members as `placement unknown` and the group as
+record, so `ps` shows its members as `unknown` and the group as
 `split` if they run on more than one node. Run groups only once every node
 has the new build.
 
@@ -2245,7 +2245,7 @@ The holder does not wait on the append before it steps: placement never
 decides output. It retries the append until it lands or the holder loses the
 lease, so a slow broker delays the record rather than losing it. A workload
 admitted before the upgrade has no `.placed` stream; its holder writes no
-placement record and `ps` shows `placement unknown`. The append is a plain
+placement record and `ps` shows `unknown`. The append is a plain
 publish, not fenced: like the any-node writer to `wl.scheduler.out` below, a
 node can write there without the lease, and `felixd check` catches a record
 whose epoch names no claim.
@@ -2258,8 +2258,7 @@ The record carries the claim's epoch, which ties it to its claim, and:
   claimer's view that put the workload on this node. That is the `assign` or
   `group` record when the agent read it, or the `table` it started from when
   that is newer. Once `wl.scheduler.out` is trimmed below it (#19) the offset
-  still names the record but nothing can read it; `ps` shows it as
-  `trimmed`.
+  still names the record but nothing can read it.
 - `scheduler_epoch`: the epoch of the scheduler holder that wrote that record.
 
 The reasons, in the order the agent checks them; the first that holds is
@@ -2282,7 +2281,7 @@ A placement record names one authority, so no claim was placed by two.
 `felixd check` reads `wl.<id>.placed` beside `.out`: a placement record must
 name the epoch of a claim on `.out`, and one that does not is reported. A
 claim with no placement record (an older holder, or a crash between the two
-appends) is `placement unknown`, not an error, since placement never decides
+appends) is `unknown` in `ps`, not an error, since placement never decides
 output. `.placed` is trimmed with the head trim of `.out`, to the oldest
 claim kept.
 

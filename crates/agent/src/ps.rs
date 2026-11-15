@@ -67,7 +67,7 @@ pub struct Workload {
 }
 
 /// What `wl.<id>.placed` says about the holder's claim.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlacedBy {
     Recorded(Authority),
     /// No placement record for the claim: an older holder, a workload
@@ -223,12 +223,17 @@ async fn placement(felix: &Felix, id: &str, epoch: u64) -> Result<PlacedBy> {
     let (recent, _) = felix
         .read_back(&stream, tail.saturating_sub(PLACED_LOOK), tail)
         .await?;
-    Ok(recent
-        .iter()
+    Ok(placed_by(recent.iter().map(|r| &r.payload[..]), epoch))
+}
+
+/// The newest record for `epoch` among `records`, oldest first. A retried
+/// append can leave two for one epoch.
+fn placed_by<'a>(records: impl DoubleEndedIterator<Item = &'a [u8]>, epoch: u64) -> PlacedBy {
+    records
         .rev()
-        .filter_map(|r| PlacementRecord::decode(&r.payload).ok())
+        .filter_map(|r| PlacementRecord::decode(r).ok())
         .find(|p| p.epoch == epoch)
-        .map_or(PlacedBy::Unknown, |p| PlacedBy::Recorded(p.authority)))
+        .map_or(PlacedBy::Unknown, |p| PlacedBy::Recorded(p.authority))
 }
 
 /// Reads the state and positions from the workload's streams into
@@ -301,3 +306,6 @@ async fn read_streams(felix: &Felix, spec: &WorkloadSpec, workload: &mut Workloa
     });
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
