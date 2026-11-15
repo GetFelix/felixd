@@ -1,0 +1,1 @@
+- The scheduler writes its whole table at ticks taken from `sys.facts` append times: the first fact, then the first fact past each ten-minute boundary of the largest fact time seen. Spec records no longer trigger a table, and a broker clock that steps back does not tick twice. Switch a running cluster with `felixd run --id scheduler --upgrade-at <offset> scheduler.wasm` (#100).

@@ -423,8 +423,10 @@ can take it, for at most `--assignment-bound-ms` (15 s), and wait for an
 assignment at most `--assignment-grace-ms` (2 s); otherwise it is first
 claim wins at once.
 Every claim still goes through the lease and the fence, so a bad assignment
-delays work and nothing else. `ps` then shows each workload's assignment, and
-a drained node's workloads go where the scheduler moves them. See
+delays work and nothing else. Each holder records who placed its claim, the
+scheduler's assignment or first claim and why, on `wl.<id>.placed`. `ps` then
+shows each workload's assignment and placement, and a drained node's
+workloads go where the scheduler moves them. See
 [Placement](docs/design.md#placement).
 
 `felixd init admission.wasm` brings up admission, itself a felixd workload.

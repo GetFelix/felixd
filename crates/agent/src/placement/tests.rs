@@ -26,7 +26,7 @@ async fn a_failed_append_is_retried_until_it_lands() {
 async fn retries_stop_once_the_lease_is_lost() {
     let tries = AtomicUsize::new(0);
     let held = AtomicBool::new(true);
-    let ended = append_until_landed(
+    let appending = append_until_landed(
         || async { held.load(Ordering::SeqCst) },
         || async { Ok(true) },
         || async {
@@ -35,8 +35,10 @@ async fn retries_stop_once_the_lease_is_lost() {
             }
             Err(anyhow!("broker away"))
         },
-    )
-    .await;
+    );
+    let ended = tokio::time::timeout(Duration::from_secs(60), appending)
+        .await
+        .expect("still retrying after the lease was lost");
     assert_eq!(ended, Ended::Lost);
     assert_eq!(tries.load(Ordering::SeqCst), 2);
 }
