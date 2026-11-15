@@ -2,7 +2,7 @@
 //! appends to `sys.facts` while a scheduler runs. Neither touches the lease
 //! or the fence: an assignment only says which node should try a claim.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow};
 use felix_client::StreamRecord;
 use felixd_core::lease::LeaseTiming;
 use felixd_core::schedule::{Change, NodeFact, Record};
+use felixd_core::spec::Group;
 use felixd_core::{names, output};
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -35,10 +36,21 @@ pub struct Placed {
     pub epoch: u64,
 }
 
+/// One `group` record: the node of each member, the scheduler output
+/// offset that says so, and the epoch of its writer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupPlacement {
+    pub members: BTreeMap<String, String>,
+    pub offset: u64,
+    pub epoch: u64,
+}
+
 /// What a reader has folded from the scheduler's output so far.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Followed {
     pub table: HashMap<String, Placed>,
+    /// The group placements in force, by group name.
+    pub groups: HashMap<String, GroupPlacement>,
     /// The next `sys.specs` offset the scheduler had not stepped, as of the
     /// last record read.
     pub specs: u64,
@@ -76,7 +88,32 @@ impl Followed {
             } => {
                 self.table.remove(&workload);
             }
-            Change::Table { assignments } => {
+            Change::Group { group, members } if members.is_empty() => {
+                self.groups.remove(&group);
+            }
+            Change::Group { group, members } => {
+                let placed = GroupPlacement {
+                    members,
+                    offset,
+                    epoch,
+                };
+                self.groups.insert(group, placed);
+            }
+            Change::Table {
+                assignments,
+                groups,
+            } => {
+                self.groups = groups
+                    .into_iter()
+                    .map(|(group, members)| {
+                        let placed = GroupPlacement {
+                            members,
+                            offset,
+                            epoch,
+                        };
+                        (group, placed)
+                    })
+                    .collect();
                 self.table = assignments
                     .into_iter()
                     .map(|(workload, node)| {
@@ -91,6 +128,20 @@ impl Followed {
             }
             Change::Progress => {}
         }
+    }
+
+    /// Where the record in force for `group` places `member`. A record for
+    /// another member list under the same name places nobody.
+    pub fn group_placed(&self, member: &str, group: &Group) -> Option<Placed> {
+        let placement = self.groups.get(&group.name)?;
+        if !placement.members.keys().eq(group.members.iter()) {
+            return None;
+        }
+        Some(Placed {
+            node: placement.members.get(member)?.clone(),
+            offset: placement.offset,
+            epoch: placement.epoch,
+        })
     }
 }
 
@@ -217,6 +268,9 @@ pub(crate) struct Assignments {
     /// When the scheduler's lease expires, by the broker's clock in
     /// milliseconds (0 never), or `None` when it has no lease.
     holder: Mutex<Option<u64>>,
+    /// The group each running workload's spec declares, from the
+    /// `workloads` cache, so a node can tell when a whole group is admitted.
+    declared: Mutex<HashMap<String, Group>>,
 }
 
 impl Assignments {
@@ -226,7 +280,32 @@ impl Assignments {
             changed: watch::channel(0).0,
             scheduler: watch::channel(false).0,
             holder: Mutex::new(None),
+            declared: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Records the group `workload`'s running spec declares, or none.
+    pub(crate) fn set_declared(&self, workload: &str, group: Option<Group>) {
+        let mut declared = self.declared.lock().unwrap_or_else(|e| e.into_inner());
+        let before = match group {
+            Some(group) => declared.insert(workload.to_owned(), group.clone()).filter(|b| *b == group).is_some(),
+            None => declared.remove(workload).is_none(),
+        };
+        drop(declared);
+        if !before {
+            self.bump();
+        }
+    }
+
+    /// Whether every member of `group` runs and declares it.
+    pub(crate) fn complete(&self, group: &Group) -> bool {
+        let declared = self.declared.lock().unwrap_or_else(|e| e.into_inner());
+        group.members.iter().all(|m| declared.get(m) == Some(group))
+    }
+
+    /// Where the `group` record in force places `member`.
+    pub(crate) fn group_placed(&self, member: &str, group: &Group) -> Option<Placed> {
+        self.lock().group_placed(member, group)
     }
 
     pub(crate) fn set_scheduler(&self, runs: bool) {
