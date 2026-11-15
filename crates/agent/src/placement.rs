@@ -19,8 +19,11 @@ use crate::felix::Felix;
 use crate::lease::Fence;
 use crate::stuck::Progress;
 
-/// How long to wait after a failed append before trying again.
-const RETRY_EVERY: Duration = Duration::from_secs(1);
+/// How long to wait after the first failed append. It doubles up to
+/// [`RETRY_AT_MOST`], so a broker in trouble is not sent a publish per held
+/// workload every second.
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_AT_MOST: Duration = Duration::from_secs(30);
 
 /// Appends `record` once the claim it names is on the output stream, then
 /// waits for ever, so it can sit beside the holder's work in a `select!`.
@@ -74,6 +77,7 @@ where
 {
     let mut looked = false;
     let mut failing = false;
+    let mut wait = RETRY_FIRST;
     loop {
         if !held().await {
             return Ended::Lost;
@@ -95,7 +99,8 @@ where
             }
             Err(_) => {}
         }
-        tokio::time::sleep(RETRY_EVERY).await;
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(RETRY_AT_MOST);
     }
 }
 

@@ -227,25 +227,32 @@ pub enum Finding {
 /// Checks the placement records on `wl.<id>.placed`, as `(offset, record)`,
 /// against the records of the output stream: each must name the epoch of a
 /// claim there. `cut` says Felix has deleted the head of the output stream,
-/// so a placement record below its oldest claim is passed over. A claim with
-/// no placement record is not a finding: placement never decides output.
+/// so a placement record at or below the epoch of the oldest record kept is
+/// passed over: its claim may be among those deleted. A claim with no
+/// placement record is not a finding: placement never decides output.
 pub fn check_placements<'a>(
     placements: &[(u64, &[u8])],
     output: impl IntoIterator<Item = &'a [u8]>,
     cut: bool,
 ) -> Vec<Finding> {
-    let claims: BTreeSet<u64> = output
-        .into_iter()
-        .filter_map(|r| match output::decode(r) {
-            Ok(Record::Claim { epoch, .. }) => Some(epoch),
-            _ => None,
-        })
-        .collect();
-    let kept_from = claims.first().copied().filter(|_| cut).unwrap_or(0);
+    let mut oldest_kept = None;
+    let mut claims = BTreeSet::new();
+    for record in output {
+        let Ok(decoded) = output::decode(record) else {
+            continue;
+        };
+        oldest_kept.get_or_insert(decoded.epoch());
+        if let Record::Claim { epoch, .. } = decoded {
+            claims.insert(epoch);
+        }
+    }
+    let deleted_up_to = oldest_kept.filter(|_| cut);
     let mut findings = Vec::new();
     for &(offset, record) in placements {
         match PlacementRecord::decode(record) {
-            Ok(placed) if placed.epoch < kept_from || claims.contains(&placed.epoch) => {}
+            Ok(placed)
+                if deleted_up_to.is_some_and(|e| placed.epoch <= e)
+                    || claims.contains(&placed.epoch) => {}
             Ok(placed) => findings.push(Finding::PlacementUnclaimed {
                 offset,
                 epoch: placed.epoch,

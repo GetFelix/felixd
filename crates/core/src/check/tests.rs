@@ -1294,6 +1294,21 @@ fn a_placement_record_whose_epoch_names_no_claim_is_found() {
 }
 
 #[test]
+fn a_deleted_head_that_took_the_only_claim_is_not_a_finding() {
+    // One holder at epoch 5 for long enough that its claim was deleted.
+    let output = [record(10, 0, 5, b"x"), record(11, 0, 5, b"y")];
+    let placed = [placed(5), placed(6)];
+    let cut = check_placements(&placements(&placed), output.iter().map(Vec::as_slice), true);
+    assert_eq!(
+        cut,
+        vec![Finding::PlacementUnclaimed {
+            offset: 1,
+            epoch: 6
+        }]
+    );
+}
+
+#[test]
 fn placement_records_below_a_deleted_head_are_passed_over() {
     let output = [output::encode_claim(5, "a")];
     let placed = [placed(2), placed(5), placed(6)];

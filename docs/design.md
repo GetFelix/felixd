@@ -2269,8 +2269,9 @@ recorded:
    assigned, so its holder always claims by first claim.
 2. `group-bound`: a group member held past `--group-bound-ms`.
 3. `no-scheduler`: the scheduler is not healthy.
-4. `unreadable`: `wl.scheduler.out` or the assignee's `nodes` entry could not
-   be read.
+4. `unreadable`: the assignee's `nodes` entry could not be read, or is in a
+   format this build does not know. A failed read of `wl.scheduler.out` is
+   not a reason of its own: the node keeps the assignments it has read.
 5. `unassigned`: the scheduler read the spec record and left it unassigned.
 6. `assignee-unavailable`: the assignee is down, silent, full, draining or
    blocked.

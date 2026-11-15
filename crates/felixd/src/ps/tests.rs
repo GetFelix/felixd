@@ -1,4 +1,4 @@
-use felixd_agent::ps::{Node, Placement, Position, Report, Workload};
+use felixd_agent::ps::{Node, PlacedBy, Position, Report, Workload};
 use felixd_core::class::{ErrorClass, Failure};
 use felixd_core::lease::Lease;
 use felixd_core::node::{Drain, NodeInfo};
@@ -240,16 +240,16 @@ fn with_a_scheduler_each_workload_shows_its_assignment() {
         offset: 912,
         epoch: 4,
     });
-    placed.placed = Some(Placement::Recorded(Authority::Assigned {
+    placed.placed = Some(PlacedBy::Recorded(Authority::Assigned {
         assignment: 912,
         scheduler_epoch: 4,
     }));
     let mut first = workload("fc", State::Running, Some(Lease::held("n-2", 2)));
-    first.placed = Some(Placement::Recorded(Authority::FirstClaim {
+    first.placed = Some(PlacedBy::Recorded(Authority::FirstClaim {
         reason: Reason::Grace,
     }));
     let mut old = workload("old", State::Running, Some(Lease::held("n-2", 5)));
-    old.placed = Some(Placement::Unknown);
+    old.placed = Some(PlacedBy::Unknown);
     let unplaced = workload("new", State::Waiting, None);
     let report = Report {
         workloads: vec![placed, first, old, unplaced],

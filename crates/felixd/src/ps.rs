@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use felixd_agent::ps::{Placement, Report};
+use felixd_agent::ps::{PlacedBy, Report};
 use felixd_core::placement::Authority;
 use felixd_core::status::State;
 
@@ -138,15 +138,15 @@ pub(crate) fn render(report: &Report) -> String {
 
 /// `assigned@<offset>`, `first-claim:<reason>`, `unknown` for a claim with
 /// no placement record, or `-` when nothing holds the workload.
-fn placed_word(placed: Option<&Placement>) -> String {
+fn placed_word(placed: Option<&PlacedBy>) -> String {
     match placed {
-        Some(Placement::Recorded(Authority::Assigned { assignment, .. })) => {
+        Some(PlacedBy::Recorded(Authority::Assigned { assignment, .. })) => {
             format!("assigned@{assignment}")
         }
-        Some(Placement::Recorded(Authority::FirstClaim { reason })) => {
+        Some(PlacedBy::Recorded(Authority::FirstClaim { reason })) => {
             format!("first-claim:{}", reason.name())
         }
-        Some(Placement::Unknown) => "unknown".to_owned(),
+        Some(PlacedBy::Unknown) => "unknown".to_owned(),
         None => "-".to_owned(),
     }
 }

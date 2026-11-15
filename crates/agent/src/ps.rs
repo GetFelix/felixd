@@ -48,7 +48,7 @@ pub struct Workload {
     pub assigned: Option<Placed>,
     /// Who placed the holder's claim, while a scheduler runs and the
     /// workload is held.
-    pub placed: Option<Placement>,
+    pub placed: Option<PlacedBy>,
     /// The output stream's next offset.
     pub outputs: u64,
     /// The epoch of the last record on the output stream.
@@ -68,7 +68,7 @@ pub struct Workload {
 
 /// What `wl.<id>.placed` says about the holder's claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Placement {
+pub enum PlacedBy {
     Recorded(Authority),
     /// No placement record for the claim: an older holder, a workload
     /// admitted before placement records, a crash between the claim and the
@@ -166,7 +166,10 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
                 if scheduled && epoch > 0 {
                     match placement(&felix, &workload.id, epoch).await {
                         Ok(placed) => workload.placed = Some(placed),
-                        Err(error) => workload.unread = Some(format!("{error:#}")),
+                        Err(error) if workload.unread.is_none() => {
+                            workload.unread = Some(format!("{error:#}"));
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -212,10 +215,10 @@ fn node_entry<'a>(nodes: &'a mut BTreeMap<String, Node>, id: &str) -> &'a mut No
 
 /// The placement record of the claim at `epoch`. It is near the tail: one
 /// record per claim, and a claim after it would have a later epoch.
-async fn placement(felix: &Felix, id: &str, epoch: u64) -> Result<Placement> {
+async fn placement(felix: &Felix, id: &str, epoch: u64) -> Result<PlacedBy> {
     let stream = names::placed_stream(id);
     let Some(tail) = felix.read_tail_if_exists(&stream).await? else {
-        return Ok(Placement::Unknown);
+        return Ok(PlacedBy::Unknown);
     };
     let (recent, _) = felix
         .read_back(&stream, tail.saturating_sub(PLACED_LOOK), tail)
@@ -225,7 +228,7 @@ async fn placement(felix: &Felix, id: &str, epoch: u64) -> Result<Placement> {
         .rev()
         .filter_map(|r| PlacementRecord::decode(&r.payload).ok())
         .find(|p| p.epoch == epoch)
-        .map_or(Placement::Unknown, |p| Placement::Recorded(p.authority)))
+        .map_or(PlacedBy::Unknown, |p| PlacedBy::Recorded(p.authority)))
 }
 
 /// Reads the state and positions from the workload's streams into

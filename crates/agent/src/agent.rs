@@ -1089,8 +1089,10 @@ impl Node {
             match self.placement.turn(id, &assigned, self.random()) {
                 Turn::Claim(delay, authority) => tokio::select! {
                     () = tokio::time::sleep(delay) => return Some(authority),
-                    // Someone may have claimed it meanwhile.
+                    // Someone may have claimed it meanwhile, or an assignment
+                    // landed that changes who should.
                     _ = lease.changed() => {}
+                    _ = assignments.changed() => {}
                     _ = stop.wait_for(|stop| *stop) => return None,
                 },
                 Turn::Defer(left) => tokio::select! {

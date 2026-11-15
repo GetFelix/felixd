@@ -449,7 +449,9 @@ epoch, and `placed`:
 {"format": 1, "value": {"epoch": 8, "placed": "first-claim", "reason": "assignee-unavailable"}}
 ```
 
-The append is a plain publish, retried until it lands or the lease is lost. A claim with no record
+The record is the holder's view when it decided to claim. A claim taken only to record that the
+workload needs an operator gets none. The append is a plain publish, retried until it lands or the
+lease is lost. A claim with no record
 is `placement unknown`; a record whose epoch names no claim on `.out` is a `felixd check` finding.
 A reader refuses another format or an unknown reason.
 
