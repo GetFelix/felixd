@@ -2,6 +2,24 @@
 
 # felixd
 
+<p align="center">
+  <a href="https://github.com/GetFelix/felixd/actions/workflows/ci.yml">
+    <img src="https://github.com/GetFelix/felixd/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI" />
+  </a>
+  <a href="https://github.com/GetFelix/felixd/releases">
+    <img src="https://img.shields.io/github/v/release/GetFelix/felixd?sort=semver&label=release" alt="Latest release" />
+  </a>
+  <a href="https://github.com/GetFelix/felixd/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/rust%20min-1.97-blue" alt="Minimum supported Rust 1.97" />
+  </a>
+  <a href="https://github.com/GetFelix/felixd/blob/main/rust-toolchain.toml">
+    <img src="https://img.shields.io/badge/rust%20built%20with-1.97.1-blue" alt="Built and tested with Rust 1.97.1" />
+  </a>
+</p>
+
 A node agent that runs programs across a cluster with
 [Felix](https://github.com/GetFelix/felix) as its only backend.
 
