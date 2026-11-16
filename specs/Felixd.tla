@@ -321,7 +321,7 @@ TakeEpoch(n) ==
     /\ LET floor == IF EpochFloor THEN Max2(LastEpoch(out), LastEpoch(snap)) ELSE 0
            last == IF ctr.present THEN ctr.val ELSE 0
        IN nd' = [nd EXCEPT ![n].pc = "putepoch", ![n].want = Max2(last, floor) + 1,
-                           ![n].kt = Len(out), ![n].kc = Len(out),
+                           ![n].kt = Len(out), ![n].kc = IF CountAfterClaim THEN 0 ELSE Len(out),
                            ![n].cseen = [present |-> ctr.present, ver |-> ctr.ver]]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
