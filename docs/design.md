@@ -2645,8 +2645,8 @@ Payloads stay opaque bytes. The system's own records do not (#73):
   - Only the holder's verdict matters: its fenced record settles it. A build
     from before the field ignores it, and an admission holder of that build
     drops it from the spec it accepts. Upgrade every node before setting it.
-  There is no escalation tree. The TLA model gets the counter under
-  `NoStaleFailure` (#104).
+  There is no escalation tree. The counter is modelled in
+  [the formal model](formal.md#restart-intensity) (#104).
 - **Poison has a recorded way out.** The failing input is in the log, so every
   replay reaches it. An operator resolves it with a spec change at offset N
   that either skips input N, copying it to a dead-letter stream, or switches
