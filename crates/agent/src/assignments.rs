@@ -130,13 +130,25 @@ impl Followed {
         }
     }
 
+    /// The record in force for `group`, if it lists exactly its members.
+    pub fn group_placement(&self, group: &Group) -> Option<&GroupPlacement> {
+        let placement = self.groups.get(&group.name)?;
+        placement
+            .members
+            .keys()
+            .eq(group.members.iter())
+            .then_some(placement)
+    }
+
+    /// The node of each member in the record in force for `group`.
+    pub fn group_record(&self, group: &Group) -> Option<&BTreeMap<String, String>> {
+        self.group_placement(group).map(|p| &p.members)
+    }
+
     /// Where the record in force for `group` places `member`. A record for
     /// another member list under the same name places nobody.
     pub fn group_placed(&self, member: &str, group: &Group) -> Option<Placed> {
-        let placement = self.groups.get(&group.name)?;
-        if !placement.members.keys().eq(group.members.iter()) {
-            return None;
-        }
+        let placement = self.group_placement(group)?;
         Some(Placed {
             node: placement.members.get(member)?.clone(),
             offset: placement.offset,

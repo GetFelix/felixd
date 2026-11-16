@@ -537,9 +537,11 @@ impl Scheduler {
         for (name, group) in complete {
             let running = self.running(&group);
             let current = self.groups.get(&name);
-            if !running.is_empty()
-                && !current.is_some_and(|c| running.iter().all(|(m, n)| c.get(m) == Some(n)))
-            {
+            // With no record, running members count as matching it: they stay
+            // where they are and the rest is placed beside them.
+            if current.is_some_and(|c| {
+                !running.is_empty() && !running.iter().all(|(m, n)| c.get(m) == Some(n))
+            }) {
                 continue;
             }
             if let Some(current) = current

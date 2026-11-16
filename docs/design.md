@@ -2183,8 +2183,7 @@ fits. One record lands whole or not at all, so no reader can see half a
 group, and no cross-key or cross-shard transaction is needed. A `publish_if`
 batch can land in part on a leader change
 ([felix#1630](https://github.com/GetFelix/felix/issues/1630)); a single
-record cannot. A group is bounded by the record size, 8 MiB, far more members
-than a group needs.
+record cannot. A group is bounded by `MAX_GROUP_MEMBERS`, 256 members.
 
 A group is a barrier on the start. A node does not first-claim a free member
 until a `group` record in its view places the whole group, and then claims
@@ -2194,7 +2193,8 @@ when the node first sees the member free with the group complete, that is
 with every listed member admitted, so a group admitted slowly does not use up
 its bound before the scheduler can place it. Past the bound the node claims
 by first claim with reason `group-bound`, so a group that never fits still
-runs, split.
+runs, split. The clock lives in the agent's memory, so a restart starts the
+bound over, as it does `--assignment-bound-ms`.
 
 A group with a member that is never admitted does not hold the others for
 ever. While some listed member is not admitted, the bound runs from when the

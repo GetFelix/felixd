@@ -686,6 +686,12 @@ async fn group_record(t: &TestFelix, group: &str) -> Option<Vec<(String, String)
     Some(placed.members.clone().into_iter().collect())
 }
 
+/// The scheduler output offset of the `group` record in force.
+async fn group_offset(t: &TestFelix, group: &str) -> u64 {
+    let followed = assignments::read(&t.felix).await.unwrap();
+    followed.groups.get(group).expect("a group record").offset
+}
+
 /// Waits until both members of `group` are held and returns their holders.
 async fn group_held(t: &TestFelix, group: &str, members: [&str; 2]) -> [String; 2] {
     eventually(&format!("group {group} to be held"), SOON, || async {
@@ -823,6 +829,7 @@ async fn a_group_record_survives_a_scheduler_crash_and_replays() {
     run_in_group(&t, "ry", "pair=rx,ry").await;
     let held = group_held(&t, "pair", ["rx", "ry"]).await;
     let before = group_record(&t, "pair").await.expect("a group record");
+    let offset = group_offset(&t, "pair").await;
     agents.get_mut(first.as_str()).unwrap().kill();
     eventually("another node to take the scheduler over", SOON, || async {
         holder(&t, names::SCHEDULER).await.filter(|n| *n != first)
@@ -841,6 +848,15 @@ async fn a_group_record_survives_a_scheduler_crash_and_replays() {
         if *was != first {
             assert_eq!(was, now, "{m} moved");
         }
+    }
+    // A holder that did not restore the groups would write the record again
+    // for the same nodes, at a later offset.
+    if before.iter().all(|(_, node)| *node != first) {
+        assert_eq!(
+            group_offset(&t, "pair").await,
+            offset,
+            "the group was placed again"
+        );
     }
     let (ok, report) = t.check(&["--id", names::SCHEDULER]);
     assert!(ok, "felixd check found problems:\n{report}");

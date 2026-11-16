@@ -52,8 +52,11 @@ pub enum GroupStatus {
     /// No member is held yet.
     Waiting,
     /// Every member is held, each where the group's record in force places
-    /// it, if one is.
+    /// it.
     Together,
+    /// Every member is held but no record in force matches the group: the
+    /// group bound released them, or no scheduler runs.
+    Released,
     /// Some member is held and some is not, or a member is held off the
     /// group's record: the group bound passed, or a node died.
     Split,
@@ -64,6 +67,7 @@ impl GroupStatus {
         match self {
             GroupStatus::Waiting => "waiting",
             GroupStatus::Together => "together",
+            GroupStatus::Released => "released",
             GroupStatus::Split => "split",
         }
     }
@@ -71,6 +75,7 @@ impl GroupStatus {
 
 /// The status of a group whose members are held by `holders`, against the
 /// node each member has in the group's record in force, if there is one.
+/// Without a record nothing is together.
 pub(crate) fn group_status(
     members: &[(String, Option<String>)],
     record: Option<&BTreeMap<String, String>>,
@@ -82,11 +87,16 @@ pub(crate) fn group_status(
     if held == 0 {
         return GroupStatus::Waiting;
     }
-    let off_record = record.is_some_and(|record| {
-        members
-            .iter()
-            .any(|(m, holder)| holder.is_some() && holder.as_ref() != record.get(m))
-    });
+    let Some(record) = record else {
+        return if held < members.len() {
+            GroupStatus::Split
+        } else {
+            GroupStatus::Released
+        };
+    };
+    let off_record = members
+        .iter()
+        .any(|(m, holder)| holder.is_some() && holder.as_ref() != record.get(m));
     if held < members.len() || off_record {
         GroupStatus::Split
     } else {
@@ -212,7 +222,10 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             continue;
         }
         let holder = leases.get(&id).cloned();
-        let assigned = placed.remove(&id);
+        let assigned = placed.remove(&id).or_else(|| {
+            let group = declared.get(&id)?;
+            followed.group_placed(&id, group)
+        });
         let holder_draining = holder.as_ref().is_some_and(|l| draining.contains(&l.owner));
         let mut workload = Workload {
             id,
@@ -302,7 +315,7 @@ fn group_reports(
                 .iter()
                 .map(|m| (m.clone(), leases.get(m).map(|l| l.owner.clone())))
                 .collect();
-            let record = followed.groups.get(&group.name).map(|g| &g.members);
+            let record = followed.group_record(group);
             GroupReport {
                 name: group.name.clone(),
                 status: group_status(&members, record),

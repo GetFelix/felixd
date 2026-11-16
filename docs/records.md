@@ -446,8 +446,8 @@ claim lands on `wl.<id>.out`. Each is `{"format": 1, "value": ...}` with `epoch`
 epoch, and `placed`:
 
 - `assigned`, with `assignment`, the `wl.scheduler.out` offset of the latest record in the
-  claimer's view that put the workload on this node (an `assign`, or the `table` it started
-  from), and `scheduler_epoch`, the epoch of the scheduler holder that wrote it.
+  claimer's view that put the workload on this node (an `assign`, a `group` record placing its
+  group, or the `table` it started from), and `scheduler_epoch`, the epoch of the scheduler holder that wrote it.
 - `first-claim`, with `reason`: `scheduler`, `group-bound`, `no-scheduler`, `unreadable`, `unassigned`,
   `assignee-unavailable`, `grace` or `bound` ([Placement rules](design.md#one-placement-authority-per-workload)).
 

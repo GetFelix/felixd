@@ -589,6 +589,25 @@ fn a_member_freed_by_a_node_death_is_placed_again_beside_the_ones_still_running(
 }
 
 #[test]
+fn a_group_with_no_record_is_placed_beside_the_members_still_running() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    f.fact(3, holding("a", &["x"]));
+    f.fact(4, holding("b", &["y"]));
+    // y stops: the record is withdrawn while x keeps running on a.
+    assert_eq!(
+        f.spec(5, "y", WorkloadState::Stopped),
+        vec![f.group("g", &[])]
+    );
+    f.fact(6, holding("b", &[]));
+    // y is run again with the same group: x stays, y is placed beside it.
+    let out = f.run_in(7, "y", &g);
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "b")])]);
+}
+
+#[test]
 fn a_split_group_is_left_alone_until_no_member_runs() {
     let mut f = Feed::hearing(&["a", "b", "c"]);
     let g = pair("g", "x", "y");

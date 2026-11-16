@@ -1,3 +1,4 @@
+use crate::assignments::{Followed, GroupPlacement};
 use felixd_core::placement::{Authority, PlacementRecord, Reason};
 
 use super::*;
@@ -58,9 +59,36 @@ fn a_group_waits_when_nothing_is_held_and_is_together_when_all_are() {
         GroupStatus::Waiting
     );
     let all = [held("x", Some("a")), held("y", Some("b"))];
-    assert_eq!(group_status(&all, None), GroupStatus::Together);
     let record = BTreeMap::from([("x".into(), "a".into()), ("y".into(), "b".into())]);
     assert_eq!(group_status(&all, Some(&record)), GroupStatus::Together);
+}
+
+#[test]
+fn held_members_with_no_record_in_force_are_released_not_together() {
+    let all = [held("x", Some("a")), held("y", Some("b"))];
+    assert_eq!(group_status(&all, None), GroupStatus::Released);
+}
+
+#[test]
+fn a_record_for_another_member_list_is_not_in_force() {
+    let group = Group::new("g", ["x".to_owned(), "y".to_owned()]);
+    let mut followed = Followed::default();
+    followed.groups.insert(
+        "g".to_owned(),
+        GroupPlacement {
+            members: BTreeMap::from([("x".into(), "a".into())]),
+            offset: 1,
+            epoch: 1,
+        },
+    );
+    assert_eq!(followed.group_record(&group), None);
+    followed
+        .groups
+        .get_mut("g")
+        .unwrap()
+        .members
+        .insert("y".into(), "b".into());
+    assert!(followed.group_record(&group).is_some());
 }
 
 #[test]
