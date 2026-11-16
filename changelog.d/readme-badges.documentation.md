@@ -1,1 +1,1 @@
-- Status badges in the README.
+Status badges in the README.
