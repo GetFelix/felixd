@@ -3,6 +3,9 @@ name: TLA nightly
 # FelixdFull, FelixdSpecsFull and FelixdMergeFull are too large to check every state, so this
 # walks random behaviours of them instead. The pull request suite checks the
 # smaller configurations exhaustively.
+#
+# One job per configuration: run back to back in one job, the three together outlast any
+# sensible job timeout and the later ones never ran.
 on:
   schedule:
     - cron: "43 8 * * *"
@@ -15,7 +18,15 @@ on:
 jobs:
   simulate:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { module: Felixd, config: FelixdFull }
+          - { module: FelixdSpecs, config: FelixdSpecsFull }
+          - { module: FelixdMerge, config: FelixdMergeFull }
+    name: simulate ${{ matrix.config }}
     env:
       TLC_SIMULATE: ${{ inputs.traces || '3000000' }}
       TLC_WORKERS: "4"
@@ -25,8 +36,4 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: scripts/check_tla.sh FelixdFull
-      - if: ${{ !cancelled() }}
-        run: TLA_MODULE=FelixdSpecs scripts/check_tla.sh FelixdSpecsFull
-      - if: ${{ !cancelled() }}
-        run: TLA_MODULE=FelixdMerge scripts/check_tla.sh FelixdMergeFull
+      - run: TLA_MODULE=${{ matrix.module }} scripts/check_tla.sh ${{ matrix.config }}
