@@ -120,6 +120,7 @@ The agent's own flags, all optional:
 | `--stuck-after-ms` | 60000, or the TTL if longer | How long a held workload may keep failing on a transient error, with no progress, before the node records it as degraded and releases it. At least the TTL; 0 turns it off |
 | `--degraded-backoff-ms` | 120000 | How long a node leaves a workload alone after releasing it as degraded, so another node gets a turn |
 | `--assignment-bound-ms`, `--assignment-grace-ms`, `--facts-every-ms` | 15000, 2000, three TTLs | Only matter while a [scheduler](design.md#placement) runs |
+| `--group-bound-ms` | 180000 | How long a member of a [group](design.md#incremental-by-default-a-group-all-or-nothing) waits for its group's placement before it is claimed anywhere and the group runs split. Keep it above three fact intervals plus a placement round, or a node death splits the group |
 | `--metrics-bind` (`FELIXD_METRICS_BIND`) | off | Serve Prometheus metrics, such as `127.0.0.1:9464` |
 | `--metrics-max-workloads` | 100 | Workloads that get their own metric series |
 | `--admission-token-file` (`FELIXD_ADMISSION_TOKEN_FILE`) | the node's own token | Broker token of admission's credential, for a node that runs admission |

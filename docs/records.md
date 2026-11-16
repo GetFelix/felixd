@@ -426,7 +426,14 @@ stepped, and `kind`:
   assignment before it. One is written at each tick: the first `sys.facts` record, and then the
   first one whose append time crosses a multiple of ten minutes past the largest fact time seen.
   Spec records never tick.
+- `group`, with no key, with `group`, a group's name, and `members`, an object from member id to
+  node. It places every member in one record; an empty `members` withdraws the group's placement.
+  A group's members are never in `assign` records or in `table`'s `assignments`. An older agent
+  cannot decode it and passes over it.
 - `progress`, with no key: a spec record that changed no assignment.
+
+`table` also carries `groups`, an object from group name to its `members` object, left out when
+empty; like `assignments` it replaces every group record before it.
 
 A reader starts at the latest table and folds what follows; the last word on a workload is in
 force, and its offset is what `felixd ps` shows after the node. A running workload with no
@@ -441,7 +448,7 @@ epoch, and `placed`:
 - `assigned`, with `assignment`, the `wl.scheduler.out` offset of the latest record in the
   claimer's view that put the workload on this node (an `assign`, or the `table` it started
   from), and `scheduler_epoch`, the epoch of the scheduler holder that wrote it.
-- `first-claim`, with `reason`: `scheduler`, `no-scheduler`, `unreadable`, `unassigned`,
+- `first-claim`, with `reason`: `scheduler`, `group-bound`, `no-scheduler`, `unreadable`, `unassigned`,
   `assignee-unavailable`, `grace` or `bound` ([Placement rules](design.md#one-placement-authority-per-workload)).
 
 ```json

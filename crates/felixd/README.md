@@ -44,6 +44,7 @@ Flags of `agent`:
 | `--claim-delay-ms` | 1000 | The longest random wait before claiming a free workload. |
 | `--assignment-bound-ms` | 15000 | The longest a free workload is left to the node the scheduler assigned it to, if that node can take it. |
 | `--assignment-grace-ms` | 2000 | The longest an unassigned workload waits for a healthy scheduler to read its spec. |
+| `--group-bound-ms` | 180000 | The longest a member of a group (`felixd run --group name=a,b`) is left for its group's placement, whatever the scheduler's health. Then it is claimed anywhere and the group runs split. |
 | `--facts-every-ms` | three lease TTLs | How often the node appends its facts for the scheduler when they have not changed. |
 | `--stuck-after-ms` | 60000, or the lease TTL if longer | How long a held workload may keep failing on a transient error, with no new input stepped and no record appended, before the node records it as `degraded` and releases the lease. At least the lease TTL. 0 turns it off, which a rolling upgrade from a build that predates the record needs. |
 | `--degraded-backoff-ms` | 120000 | How long a node that released a workload as degraded leaves it to other nodes. |

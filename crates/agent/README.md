@@ -66,7 +66,10 @@ Behaviour that matters:
   draining, able to read its drain mark) and was rewritten lately, for at most
   `--assignment-bound-ms`, and an unassigned one only while the scheduler has not read its spec
   record, for at most `--assignment-grace-ms`, both from when it first saw it free. The
-  scheduler counts as running only while its holder renewed its lease lately.
+  scheduler counts as running only while its holder renewed its lease lately. A member of a group
+  (`felixd run --group name=a,b`) is claimed only where the scheduler's `group` record puts it,
+  whatever the scheduler's health, until `--group-bound-ms` has passed; then it is first claim wins
+  with reason `group-bound`.
   Anything else is first claim wins at once. Every claim still goes through the lease and the
   fence, so an assignment can delay work but never makes two owners. Each node appends a fact (its
   id, interval, `--max-workloads`, the workloads it holds, and whether it is draining or blocked) to
