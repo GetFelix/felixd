@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check a module in specs/ under each configuration registered for it
 # below, and hold each to its outcome. `TLA_MODULE` picks the module:
-# Felixd (the default), FelixdTrimming, FelixdSpecs, FelixdMerge or FelixdAdmission.
+# Felixd (the default), FelixdTrimming, FelixdIntensity, FelixdSpecs, FelixdMerge or FelixdAdmission.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -63,6 +63,15 @@ felixd_trim_expectations=(
   "FelixdTrimAnyTime violates RestoreIntact"
 )
 
+# Felixd.tla with the restart intensity counter on (docs/formal.md, Restart
+# intensity). Its own job for the same reason as trimming.
+felixd_intensity_expectations=(
+  "FelixdIntensity pass"
+  "FelixdIntensityZero pass"
+  "FelixdIntensityNoFence violates NoStaleFailure"
+  "FelixdIntensityBeforeClaim violates NoRunPastLimit"
+)
+
 felixd_specs_expectations=(
   "FelixdSpecs pass"
   "FelixdSpecsStale pass"
@@ -113,6 +122,7 @@ MODULE="${TLA_MODULE:-Felixd}"
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
   FelixdTrimming) MODULE=Felixd; expectations=("${felixd_trim_expectations[@]}") ;;
+  FelixdIntensity) MODULE=Felixd; expectations=("${felixd_intensity_expectations[@]}") ;;
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
   FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
   FelixdAdmission) expectations=("${felixd_admission_expectations[@]}") ;;

@@ -1,0 +1,1 @@
+- The TLA model covers the restart intensity counter: a holder over `max_takeovers` in the window runs nothing (`NoRunPastLimit`), and the needs-operator record it writes is fenced like a failure (`NoStaleFailure`). New `tla-intensity` CI job (#104).

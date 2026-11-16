@@ -26,6 +26,12 @@
 (* names. RestoreIntact says the snapshot a resume would restore, and the *)
 (* inputs after its step, are still there.                                *)
 (*                                                                         *)
+(* Restart intensity (docs/design.md, System records and errors): with   *)
+(* Intensity on, records carry the broker's append time, and a holder     *)
+(* that finds its claim past MaxTakeovers in a row within Window records  *)
+(* needs operator, fenced like a failure. NoRunPastLimit says no holder   *)
+(* over the limit writes an output.                                        *)
+(*                                                                         *)
 (* Knobs, each turned off in a twin configuration that TLC finds a        *)
 (* violation in:                                                          *)
 (*   ClaimMarker     the claim record.                                     *)
@@ -46,6 +52,11 @@
 (*                   snapshots, not the oldest kept record's.             *)
 (*   TrimAnyTime     off in the code: a holder trims right after the ack  *)
 (*                   of a snapshot it wrote, not at any later time.       *)
+(*   CountAfterClaim the restart count reads the stream after the holder's *)
+(*                   own claim has landed, not on the tail read before the *)
+(*                   marker was sent plus its own claim.                   *)
+(*   NopFenced       the needs-operator record is a publish_if at the     *)
+(*                   tail, not a plain append.                             *)
 (* Assumptions, each dropped in a twin:                                    *)
 (*   RecreateWhenWritten  `epochs` is recreated only while every live     *)
 (*                        epoch is on a record (design.md, Leases).        *)
@@ -83,14 +94,22 @@ CONSTANTS
     RecreateWhenWritten,
     TrimOwnSnap,
     TrimLowestStep,
-    TrimAnyTime
+    TrimAnyTime,
+    Intensity,         \* the spec sets restart_intensity
+    MaxTakeovers,      \* its max_takeovers
+    Window,            \* its window, in ticks of the broker's clock
+    MaxTime,           \* ticks the broker's clock makes
+    CountAfterClaim,
+    NopFenced
 
 ASSUME /\ NoNode \notin Nodes
        /\ \A b \in {ClaimMarker, EpochFloor, Confirmer, LaterEpochWins,
                     ReplayGuard, FoldOnEvents, FailRecord, IndexFold, LocalFaults, TimingFaults,
                     FaultsInFailWindow, RecreateWhenWritten, TrimOwnSnap,
-                    TrimLowestStep, TrimAnyTime} : b \in BOOLEAN
+                    TrimLowestStep, TrimAnyTime, Intensity, CountAfterClaim,
+                    NopFenced} : b \in BOOLEAN
        /\ MaxTrims \in Nat
+       /\ {MaxTakeovers, Window, MaxTime} \subseteq Nat
        /\ Keep \in Nat \ {0}
 
 \* Workload shapes for the configurations.
@@ -108,8 +127,9 @@ Max2(a, b) == IF a > b THEN a ELSE b
 Min2(a, b) == IF a < b THEN a ELSE b
 Min(S) == CHOOSE m \in S : \A y \in S : m <= y
 
-\* `c` is the claim that wrote the record. Only the invariants read it.
-Rec(k, e, c, i, x) == [k |-> k, e |-> e, c |-> c, i |-> i, x |-> x]
+\* `c` is the claim that wrote the record. Only the invariants read it. `t`
+\* is the broker's append time, set when the record lands.
+Rec(k, e, c, i, x) == [k |-> k, e |-> e, c |-> c, i |-> i, x |-> x, t |-> 0]
 GenRec == Rec("gen", 0, 0, 0, 0)
 
 \* What input i produces, stamped with epoch e by claim c.
@@ -139,14 +159,16 @@ VARIABLES
     started,    \* ghost: [e, at] once epoch e began, with the .out tail then
     staleFail,  \* ghost: a failure was written by a node not holding the lease,
                 \* or its record landed after a later owner began
-    poisoned    \* ghost: some node found the streams impossible to resume
+    poisoned,   \* ghost: some node found the streams impossible to resume
+    now         \* the broker's clock, which stamps each record as it lands
 
-vars == <<out, snap, net, lease, ctr, spec, nd, bud, del, started, staleFail, poisoned>>
-\* What most actions leave alone. `del` is Felix's, but only Delete* changes it.
-ghosts == <<del, started, staleFail, poisoned>>
+vars == <<out, snap, net, lease, ctr, spec, nd, bud, del, started, staleFail, poisoned, now>>
+\* What most actions leave alone. `del` and `now` are Felix's, but only
+\* Delete* and Tick change them.
+ghosts == <<del, started, staleFail, poisoned, now>>
 
 NodeInit == [pc |-> "idle", ep |-> 0, cid |-> 0, ok |-> FALSE, desync |-> FALSE,
-             up |-> TRUE, kt |-> 0, kst |-> 0, pos |-> 0, skip |-> NoSkip,
+             up |-> TRUE, kt |-> 0, kc |-> 0, kst |-> 0, pos |-> 0, skip |-> NoSkip,
              wnext |-> 0, wend |-> 0, batch |-> <<>>, want |-> 0,
              cseen |-> [present |-> FALSE, ver |-> 0], sseen |-> NoSnap,
              await |-> NoMsg, rep |-> "none", nop |-> FALSE]
@@ -165,6 +187,7 @@ Init ==
     /\ started = {}
     /\ staleFail = FALSE
     /\ poisoned = FALSE
+    /\ now = 0
 
 -----------------------------------------------------------------------------
 (* Helpers *)
@@ -194,6 +217,39 @@ MaxEpochOn(s) ==
     IN IF es = {} THEN 0 ELSE Max(es)
 
 Owns(n) == lease.owner = n /\ lease.cid = nd[n].cid
+
+\* Records stamped with the broker's clock as they land.
+Stamp(recs) == [j \in 1..Len(recs) |-> [recs[j] EXCEPT !.t = now]]
+
+\* Restart intensity, as `felixd_core::intensity::Takeovers`: the claims in
+\* the run that ends at s[p], walking back. Notes (failure and
+\* needs-operator records) are passed over; before the newest claim they
+\* are passed over without a time. The newest claim sets the window's start.
+\* The run ends at a record older than that, an output or a trim. A claim of
+\* an epoch already counted is not counted again. Generation-start records
+\* are never read. The model has one spec record, so every claim names it.
+Notes == {"fail", "nop"}
+
+RECURSIVE RunClaims(_, _, _, _, _, _)
+RunClaims(s, p, on, since, claims, low) ==
+    IF p = 0 THEN claims
+    ELSE LET r == s[p]
+             sn == IF on THEN since ELSE IF r.t >= Window THEN r.t - Window ELSE 0
+         IN IF r.k = "gen" \/ (~on /\ r.k \in Notes)
+            THEN RunClaims(s, p - 1, on, since, claims, low)
+            ELSE IF r.t < sn THEN claims
+            ELSE IF r.k = "claim"
+            THEN IF r.e < low THEN RunClaims(s, p - 1, TRUE, sn, claims + 1, r.e)
+                 ELSE RunClaims(s, p - 1, TRUE, sn, claims, low)
+            ELSE IF r.k \in Notes THEN RunClaims(s, p - 1, TRUE, sn, claims, low)
+            ELSE claims
+
+\* A run of n claims is n - 1 takeovers: the oldest is its start.
+Takeovers(s) ==
+    LET c == RunClaims(s, Len(s), FALSE, 0, 0, MaxEpoch + 1) IN IF c > 0 THEN c - 1 ELSE 0
+
+\* The last claim on s takes the spec record past its limit.
+Over(s) == Intensity /\ Takeovers(s) > MaxTakeovers
 
 InFlight(n) == Cardinality({m \in net : m.n = n})
 
@@ -265,7 +321,7 @@ TakeEpoch(n) ==
     /\ LET floor == IF EpochFloor THEN Max2(LastEpoch(out), LastEpoch(snap)) ELSE 0
            last == IF ctr.present THEN ctr.val ELSE 0
        IN nd' = [nd EXCEPT ![n].pc = "putepoch", ![n].want = Max2(last, floor) + 1,
-                           ![n].kt = Len(out),
+                           ![n].kt = Len(out), ![n].kc = IF CountAfterClaim THEN 0 ELSE Len(out),
                            ![n].cseen = [present |-> ctr.present, ver |-> ctr.ver]]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -347,11 +403,23 @@ Probe(n) ==
           ELSE nd' = [nd EXCEPT ![n].pc = "rsnap", ![n].kt = Len(out)]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
+\* The restart count comes first, on the stream below the tail after the
+\* claim, so a holder that crashes before recording its verdict leaves its
+\* claim for the next one to count. A resume (Probe) counts again.
+\* Without CountAfterClaim it counts the tail read before the marker was
+\* sent, plus its own claim. A marker that is refused and retried lands past
+\* that tail, so claims that landed in between are not counted.
 ReadSnap(n) ==
     /\ nd[n].pc = "rsnap"
     /\ LET p0 == LastOf(snap, {"snap"})
            p == IF p0 > del.snap THEN p0 ELSE 0     \* a deleted record is not there to read
-       IN IF p > 0 /\ snap[p].e > nd[n].ep
+           below == SubSeq(out, 1, nd[n].kt)
+           own == SelectSeq(below, LAMBDA r : r.k = "claim" /\ r.e = nd[n].ep)
+           view == IF CountAfterClaim THEN below
+                   ELSE SubSeq(out, 1, nd[n].kc) \o own
+       IN IF Over(view)
+          THEN nd' = [nd EXCEPT ![n].pc = "failing", ![n].nop = TRUE]
+          ELSE IF p > 0 /\ snap[p].e > nd[n].ep
           THEN Superseded(n)
           ELSE nd' = [nd EXCEPT ![n].pc = "rout", ![n].kst = Len(snap),
                                 ![n].sseen = IF p = 0 THEN NoSnap
@@ -379,7 +447,7 @@ ReadOut(n) ==
                              THEN started \cup {[e |-> nd[n].ep, at |-> T]}
                              ELSE started
                /\ UNCHANGED poisoned
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, staleFail>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, staleFail, now>>
 
 -----------------------------------------------------------------------------
 (* Running *)
@@ -402,7 +470,7 @@ Step(n) ==
                                    ![n].pos = IF b = <<>> THEN i + 1 ELSE i,
                                    ![n].pc = IF b = <<>> THEN "post" ELSE "osend"]
                /\ UNCHANGED poisoned
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, started, staleFail>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, started, staleFail, now>>
 
 OSend(n) ==
     /\ nd[n].pc = "osend" /\ nd[n].ok
@@ -445,7 +513,7 @@ Reconcile(n) ==
                              ELSE [clear EXCEPT ![n].kt = T, ![n].batch = rest,
                                                 ![n].pc = "osend"]
                     /\ UNCHANGED poisoned
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, started, staleFail>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, del, started, staleFail, now>>
 
 \* After a step the owner may snapshot or go on. Choosing freely covers every
 \* snapshot_every.
@@ -539,7 +607,7 @@ WriteFail(n) ==
        ELSE UNCHANGED <<spec, staleFail>>
     /\ lease' = IF Owns(n) THEN NoLease ELSE lease
     /\ nd' = Left(n)
-    /\ UNCHANGED <<out, snap, net, ctr, bud, del, started, poisoned>>
+    /\ UNCHANGED <<out, snap, net, ctr, bud, del, started, poisoned, now>>
 
 \* With FailRecord: the failure record at the tail just read, unless the last
 \* record there is from a later epoch or is already a failure. A node that
@@ -647,7 +715,8 @@ TrimStep(n) ==
                  /\ floors # LastTrim
                  /\ floors.i >= LastTrim.i /\ floors.x >= LastTrim.x
        IN IF ok
-          THEN /\ out' = Append(out, Rec("trim", nd[n].ep, nd[n].cid, floors.i, floors.x))
+          THEN /\ out' = Append(out, [Rec("trim", nd[n].ep, nd[n].cid, floors.i, floors.x)
+                                        EXCEPT !.t = now])
                /\ nd' = [nd EXCEPT ![n].pc = "run", ![n].kt = @ + 1]
                /\ bud' = [bud EXCEPT !.trims = @ + 1]
           ELSE /\ nd' = [nd EXCEPT ![n].pc = "run"]
@@ -660,12 +729,12 @@ TrimStep(n) ==
 DeleteSnaps ==
     /\ LastTrim.x > del.snap
     /\ del' = [del EXCEPT !.snap = LastTrim.x]
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned, now>>
 
 DeleteInputs ==
     /\ LastTrim.i > del.inp
     /\ del' = [del EXCEPT !.inp = LastTrim.i]
-    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned>>
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, started, staleFail, poisoned, now>>
 
 -----------------------------------------------------------------------------
 (* The lease over time *)
@@ -712,11 +781,12 @@ Expire ==
 -----------------------------------------------------------------------------
 (* Felix and the environment *)
 
+\* Without NopFenced a needs-operator record lands wherever the tail is.
 Deliver(m) ==
     /\ m \in net
     /\ LET s == IF m.s = "out" THEN out ELSE snap
-           applied == Len(s) = m.at
-           s2 == IF applied THEN s \o m.recs ELSE s
+           applied == Len(s) = m.at \/ (~NopFenced /\ m.recs[1].k = "nop")
+           s2 == IF applied THEN s \o Stamp(m.recs) ELSE s
        IN /\ out' = IF m.s = "out" THEN s2 ELSE out
           /\ snap' = IF m.s = "snap" THEN s2 ELSE snap
           /\ started' =
@@ -731,7 +801,7 @@ Deliver(m) ==
                           \/ /\ applied /\ m.s = "out" /\ m.recs[1].k \in {"fail", "nop"}
                              /\ \E x \in started : x.e > m.recs[1].e
     /\ net' = net \ {m}
-    /\ UNCHANGED <<lease, ctr, spec, bud, del, poisoned>>
+    /\ UNCHANGED <<lease, ctr, spec, bud, del, poisoned, now>>
 
 \* A multi-record batch lands in part: a Quorum leader replicated a prefix of
 \* it and lost the shard, and the follower promoted with that prefix keeps it.
@@ -739,7 +809,7 @@ Deliver(m) ==
 DeliverPrefix(m) ==
     /\ m \in net /\ m.s = "out" /\ Len(m.recs) > 1 /\ Len(out) = m.at
     /\ bud.partials < MaxPartials
-    /\ \E k \in 1..(Len(m.recs) - 1) : out' = out \o SubSeq(m.recs, 1, k)
+    /\ \E k \in 1..(Len(m.recs) - 1) : out' = out \o SubSeq(Stamp(m.recs), 1, k)
     /\ nd' = IF nd[m.n].up /\ nd[m.n].await = m /\ nd[m.n].rep = "none"
              THEN [nd EXCEPT ![m.n].await = NoMsg, ![m.n].rep = "lost"]
              ELSE nd
@@ -793,6 +863,12 @@ Recreate ==
     /\ bud' = [bud EXCEPT !.recreates = @ + 1]
     /\ UNCHANGED <<out, snap, net, lease, spec, nd, ghosts>>
 
+\* The broker's clock moves on. Only restart intensity reads it.
+Tick ==
+    /\ Intensity /\ now < MaxTime
+    /\ now' = now + 1
+    /\ UNCHANGED <<out, snap, net, lease, ctr, spec, nd, bud, del, started, staleFail, poisoned>>
+
 -----------------------------------------------------------------------------
 
 NodeStep(n) ==
@@ -816,6 +892,7 @@ Next ==
     \/ GenStart
     \/ Recreate
     \/ DeleteSnaps \/ DeleteInputs
+    \/ Tick
 
 Fairness ==
     /\ \A n \in Nodes : WF_vars(NodeStep(n))
@@ -864,6 +941,15 @@ NoStaleFailure ==
                (p < q /\ out[p].k \in {"fail", "nop"}) => out[q].k = "gen"
 
 NoPoison == ~poisoned
+
+\* No holder whose claim took the spec record past its restart intensity
+\* writes an output. The verdict is a function of the stream up to the
+\* claim, so it is the one every node reaches. A later claim outside the
+\* window may run again; that is the window's point.
+NoRunPastLimit ==
+    \A p, q \in 1..Len(out) :
+        (p < q /\ out[p].k = "claim" /\ out[q].k = "out" /\ out[q].c = out[p].c)
+            => ~Over(SubSeq(out, 1, p))
 
 \* No two claims run, or write, with the same epoch.
 UniqueEpoch ==

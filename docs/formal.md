@@ -3,7 +3,7 @@
 `specs/Felixd.tla` models one workload: nodes that claim it through the `leases` cache, take an
 epoch from `epochs`, and fold its input into `wl.<id>.out` and `wl.<id>.snap` with
 `publish_if`. TLC checks it under each `.cfg` beside it. `scripts/check_tla.sh` runs them all
-and holds each to its registered outcome; the `tla` job in CI runs the script, and the `tla-trim` job its trimming configurations ([Trimming](#trimming)).
+and holds each to its registered outcome; the `tla` job in CI runs the script, the `tla-trim` job its trimming configurations ([Trimming](#trimming)), and the `tla-intensity` job its restart intensity ones ([Restart intensity](#restart-intensity)).
 `specs/FelixdSpecs.tla` models spec history on the same stream, and the `tla-specs` job checks
 it ([Spec history](#spec-history)).
 `specs/FelixdMerge.tla` models the merge log of a workload with several inputs, and the
@@ -34,6 +34,7 @@ TLA_MODULE=FelixdAdmission scripts/check_tla.sh      # the admission model
 | `UniqueEpoch` | No two claims that run, or have records or requests in flight, share an epoch. |
 | `SnapshotsSplit` | For each snapshot (X, T), the output records below offset T are of inputs up to X and the rest are of later inputs. |
 | `RestoreIntact` | After a trim and the deletion it names, the snapshot a resume restores is still on `.snap`, and so are the inputs from its step on ([Trimming](#trimming)). Only configurations with `MaxTrims` above 0 can break it. |
+| `NoRunPastLimit` | No output lands under a claim whose takeovers, counted on the stream up to and including that claim, are past `max_takeovers` ([Restart intensity](#restart-intensity)). Only configurations with `Intensity` can break it. |
 
 Under weak fairness of every node's own steps, of delivery and of expiry, `FelixdLive` checks
 `FreeIsClaimed` (a free, running workload is claimed) and `EventuallyDone` (every output is
@@ -144,6 +145,8 @@ Paths are from the repository root, as of workload contract 0.2.
 | `GenStart` | Felix's generation-start record on a new shard leader |
 | `Crash`, `Restart` | an agent killed and started again under the same node id |
 | `Recreate` | the `epochs` cache recreated |
+| `Tick` | the broker's clock moving on, which stamps each record as it lands. Only `Intensity` configurations take it |
+| `ReadSnap` (count) | the restart count before the snapshot is read: `intensity::refuse_over_limit` after the claim and the spec recheck, on every attempt: `crates/agent/src/runner.rs:515-521`, `crates/agent/src/intensity.rs`; the walk is `felixd_core::intensity::Takeovers`: `crates/core/src/intensity.rs`. Over the limit the node writes a needs-operator record (`FailSend`) |
 
 ### The claim record, as modelled
 
@@ -479,6 +482,50 @@ Two things the models showed about the code's rules:
 
 Not modelled: snapshot chunks (a snapshot is its manifest), the `.snap` offsets in `FelixdMerge`
 (`Felixd.tla` checks them), and the head trim of `.out` ([Not modelled](#not-modelled)).
+
+## Restart intensity
+
+With `Intensity` on, a spec carries `restart_intensity` (`max_takeovers` in a `window`), and every
+record on `.out` carries the broker's append time. A holder walks `.out` back from its claim
+the way `felixd_core::intensity::Takeovers` does. It passes over failure and needs-operator
+records. It sets the window's start from the newest claim, and counts claims of distinct epochs
+until a record older than that, an output or a trim. A run of n claims is n - 1 takeovers.
+Past `max_takeovers` it records needs-operator, fenced like any failure, and runs nothing.
+
+The count is made after the claim has landed and on every attempt, so a holder that crashes
+before it records its verdict leaves its claim for the next holder to count. The two knobs
+`CountAfterClaim` and `NopFenced` turn that off, and the twins below show what each does.
+
+`FelixdIntensityBeforeClaim` counts the tail the holder read before it sent its marker, plus its
+own claim. TLC finds the race this allows: n1 reads the empty tail, sends its marker and crashes,
+and the marker lands, leaving one claim. n2 reads the empty tail too, and its marker is lost.
+On retry the marker lands past n1's claim, but n2 counts only the tail it read before, so it sees
+its own claim alone, no takeover, and runs. The stream before its claim held two claims, one
+takeover, over the limit of none, so it writes an output past the limit.
+
+Configurations have `LocalFaults` off, so the only needs-operator records come from the counter.
+
+| Configuration | Expected | Model | Distinct states | Time |
+|---|---|---|---|---|
+| `FelixdIntensity` | pass | one input, three claims, one takeover allowed in a window of 1 tick, a clock of 2 ticks, a crash, a clock fault | 21,116,027 | 3 min 51 s |
+| `FelixdIntensityZero` | pass | the same with no takeover allowed, a clock of 1 tick | 6,800,807 | 1 min 12 s |
+| `FelixdIntensityNoFence` | `NoStaleFailure` | the needs-operator record a plain append, not fenced at the tail | about 2,300,000 | 16 s |
+| `FelixdIntensityBeforeClaim` | `NoRunPastLimit` | the count made on the tail read before the marker, plus the holder's own claim | about 195,000 at the violation | a few seconds |
+
+Distinct states and times are from TLC 1.7.4 with `-workers 8` on a build box; the `tla-intensity` job has not set CI times yet.
+
+Two reachability checks, run once and not in CI, show the invariant is not vacuous: a needs-operator
+record on `.out` is reachable, and so is a claim outside the window, after an over claim, that runs.
+`NoRunPastLimit` is not "no output after any over claim": a later claim outside the window counts afresh.
+Abstractions: `now` is a counter the broker advances by one tick at any time up to `MaxTime`,
+and `Window` is in those ticks. Wall-clock rates are not modelled; the window only needs the
+order of records and which are within it. `NoRunPastLimit` checks against the model's own `Over`,
+so it shows that holders reach the verdict for their claim's prefix, not that the window rules
+are right. A record time of 0 means "no append time" in the code (`crates/agent/src/intensity.rs`)
+and is not modelled, and record times that go backwards (a broker failover) are not either.
+Neither affects safety, because every node computes the same verdict from the same stream. Degraded records (a release after a stuck workload) are not
+modelled: the walk passes over them, so a stuck-after release does not count as a takeover here
+(GetFelix/felixd#234).
 
 ## Pipelines
 
