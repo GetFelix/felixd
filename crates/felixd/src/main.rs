@@ -19,7 +19,7 @@ use felixd_agent::settings::TokenSource;
 use felixd_agent::submit::{Submission, submit};
 use felixd_core::lease::LeaseTiming;
 use felixd_core::placement::{self, FirstClaimWins};
-use felixd_core::spec::{RestartIntensity, WorkloadSpec, WorkloadState};
+use felixd_core::spec::{Group, RestartIntensity, WorkloadSpec, WorkloadState, validate_group};
 use felixd_core::{module, names};
 use felixd_runtime::{Limits, Runtime};
 
@@ -70,6 +70,14 @@ enum Command {
         /// spec, counted from when this node first saw it free.
         #[arg(long, default_value_t = placement::DEFAULT_ASSIGNMENT_GRACE.as_millis() as u64)]
         assignment_grace_ms: u64,
+        /// The longest, in milliseconds, a member of a group is left
+        /// unclaimed for its group's placement, counted from when this node
+        /// saw every member admitted. Then, and when some member is never
+        /// admitted, it is claimed by first claim wins and the group may run
+        /// split. Longer than a node death takes to notice, plus a placement
+        /// round.
+        #[arg(long, default_value_t = placement::DEFAULT_GROUP_BOUND.as_millis() as u64)]
+        group_bound_ms: u64,
         /// While a scheduler runs, how often, in milliseconds, this node
         /// appends its facts to sys.facts when they have not changed. A
         /// change is appended within half a second. Three lease TTLs when
@@ -300,6 +308,13 @@ enum Command {
         /// Stored in the spec.
         #[arg(long, default_value_t = Limits::default().snapshot_fuel)]
         snapshot_fuel: u64,
+        /// Place this workload together with others or not at all, as
+        /// `name=a,b,c`: the group's name and every member's id, this
+        /// workload among them. Submit every member with the same flag. A
+        /// member waits for the group's placement for at most the agents'
+        /// `--group-bound-ms`, then runs wherever it is claimed.
+        #[arg(long, value_parser = parse_group)]
+        group: Option<Group>,
         /// Replicas of felixd's caches and the workload's output and snapshot
         /// streams. More than one makes them `Quorum`. Use 1 against a single
         /// broker. Caches that already exist keep their replicas.
@@ -341,6 +356,7 @@ async fn main() -> Result<()> {
             claim_delay_ms,
             assignment_bound_ms,
             assignment_grace_ms,
+            group_bound_ms,
             facts_every_ms,
             stuck_after_ms,
             degraded_backoff_ms,
@@ -367,6 +383,7 @@ async fn main() -> Result<()> {
                 },
                 assignment_bound: Duration::from_millis(assignment_bound_ms),
                 assignment_grace: Duration::from_millis(assignment_grace_ms),
+                group_bound: Duration::from_millis(group_bound_ms),
                 facts_every: facts_every_ms.map_or(
                     3 * Duration::from_millis(lease_ttl_ms),
                     Duration::from_millis,
@@ -546,6 +563,7 @@ async fn main() -> Result<()> {
             fuel,
             max_memory,
             snapshot_fuel,
+            group,
             replication_factor,
             wait_secs,
             upgrade_at,
@@ -566,6 +584,9 @@ async fn main() -> Result<()> {
                         max_takeovers,
                         window_ms,
                     });
+            if let Some(group) = &group {
+                validate_group(&id, group)?;
+            }
             if !names::is_system(&id) && upgrade_at.is_none() {
                 let felix = Felix::connect(&settings).await?;
                 if admission::runs(&felix).await? {
@@ -579,6 +600,7 @@ async fn main() -> Result<()> {
                     spec.keep_snapshots = keep_snapshots;
                     spec.restart_intensity = restart_intensity;
                     spec.limits = limits;
+                    spec.group = group;
                     let within = Duration::from_secs(wait_secs);
                     let submitted =
                         admission::request(&felix, &id, bytes, spec, replication_factor, within)
@@ -597,6 +619,7 @@ async fn main() -> Result<()> {
             submission.keep_snapshots = keep_snapshots;
             submission.restart_intensity = restart_intensity;
             submission.limits = limits;
+            submission.group = group;
             submission.replication_factor = replication_factor;
             submission.upgrade_at = upgrade_at;
             let hash = submit(&settings, submission).await?;
@@ -670,6 +693,14 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     async {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// `name=a,b,c`: a group's name and its members.
+fn parse_group(arg: &str) -> Result<Group, String> {
+    let (name, members) = arg
+        .split_once('=')
+        .ok_or("a group is name=member,member,...")?;
+    Ok(Group::new(name, members.split(',').map(str::to_owned)))
 }
 
 fn parse_target(to: &str) -> Result<Target, String> {

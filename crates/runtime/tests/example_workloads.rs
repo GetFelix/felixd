@@ -167,6 +167,7 @@ fn scheduler_inputs() -> Vec<(&'static str, u64, u64, Vec<u8>)> {
             restart_intensity: None,
             upgrades: Vec::new(),
             state,
+            group: None,
             limits: Limits::default(),
             failure: None,
             record: None,

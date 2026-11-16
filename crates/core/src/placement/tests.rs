@@ -9,6 +9,7 @@ const SCHEDULED: Scheduled = Scheduled {
     fallback: POLICY,
     bound: Duration::from_secs(10),
     grace: Duration::from_secs(2),
+    group_bound: Duration::from_secs(180),
 };
 
 const THIS_NODE: AssignedTo = AssignedTo::ThisNode {
@@ -28,6 +29,7 @@ fn assigned(to: AssignedTo, waited_secs: u64) -> Assigned {
         scheduler: true,
         to,
         waited: Duration::from_secs(waited_secs),
+        group: None,
     }
 }
 
@@ -216,13 +218,13 @@ fn a_placement_record_of_another_format_is_refused() {
 #[test]
 fn a_reason_from_a_newer_build_decodes_and_is_kept() {
     let bytes =
-        br#"{"format": 1, "value": {"epoch": 4, "placed": "first-claim", "reason": "group-bound"}}"#;
+        br#"{"format": 1, "value": {"epoch": 4, "placed": "first-claim", "reason": "some-future-reason"}}"#;
     let record = PlacementRecord::decode(bytes).unwrap();
     assert_eq!(record.epoch, 4);
     assert_eq!(
         record.authority,
         Authority::FirstClaim {
-            reason: Reason::Other("group-bound".to_owned())
+            reason: Reason::Other("some-future-reason".to_owned())
         }
     );
     let again = PlacementRecord::decode(&record.encode()).unwrap();
@@ -253,4 +255,59 @@ fn reason_names_match_the_record() {
             serde_json::json!(reason.name())
         );
     }
+}
+
+fn grouped(placed: GroupPlaced, held_secs: u64) -> Assigned {
+    Assigned {
+        group: Some(GroupHold {
+            placed,
+            held: Duration::from_secs(held_secs),
+        }),
+        ..assigned(AssignedTo::Nobody { decided: true }, 0)
+    }
+}
+
+const GROUP_HERE: GroupPlaced = GroupPlaced::ThisNode {
+    assignment: 40,
+    scheduler_epoch: 5,
+};
+
+#[test]
+fn a_member_placed_here_claims_at_once_whatever_the_scheduler_does() {
+    let claim = Turn::Claim(
+        Duration::ZERO,
+        Authority::Assigned {
+            assignment: 40,
+            scheduler_epoch: 5,
+        },
+    );
+    assert_eq!(SCHEDULED.turn("w", &grouped(GROUP_HERE, 0), 0.9), claim);
+    // No healthy scheduler: the record still places it.
+    let mut none = grouped(GROUP_HERE, 0);
+    none.scheduler = false;
+    assert_eq!(SCHEDULED.turn("w", &none, 0.9), claim);
+}
+
+#[test]
+fn a_member_placed_elsewhere_or_not_yet_waits_the_group_bound_then_claims_split() {
+    for placed in [GroupPlaced::Elsewhere, GroupPlaced::Unplaced] {
+        assert_eq!(
+            SCHEDULED.turn("w", &grouped(placed, 60), 0.5),
+            Turn::Defer(Duration::from_secs(120))
+        );
+        assert_eq!(
+            SCHEDULED.turn("w", &grouped(placed, 180), 0.5),
+            first(400, Reason::GroupBound)
+        );
+    }
+}
+
+#[test]
+fn a_group_does_not_hold_the_scheduler_workload() {
+    let mut a = grouped(GroupPlaced::Unplaced, 0);
+    a.scheduler = true;
+    assert_eq!(
+        SCHEDULED.turn(names::SCHEDULER, &a, 0.5),
+        first(400, Reason::Scheduler)
+    );
 }

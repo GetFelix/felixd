@@ -255,6 +255,7 @@ async fn a_spec_written_around_admission_never_runs() {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits::default(),
         failure: None,
         record: None,

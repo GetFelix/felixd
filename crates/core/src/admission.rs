@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::spec::{WorkloadSpec, WorkloadState, validate_inputs};
+use crate::spec::{WorkloadSpec, WorkloadState, validate_group, validate_inputs};
 use crate::{DecodeError, module, names};
 
 /// The request format this build writes and reads.
@@ -302,6 +302,9 @@ fn check(
     let invalid = |detail: &str| Err((Reason::InvalidSpec, detail.to_owned()));
     if spec.output != names::output_stream(&request.id) {
         return invalid("the output stream is wl.<id>.out");
+    }
+    if let Some(group) = &spec.group {
+        validate_group(&request.id, group).map_err(|e| (Reason::InvalidSpec, e.to_string()))?;
     }
     if !spec.upgrades.is_empty() {
         return invalid("a request names no module upgrades; an operator upgrades a module");

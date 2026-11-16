@@ -52,6 +52,11 @@ pub struct WorkloadSpec {
     )]
     pub upgrades: Vec<Upgrade>,
     pub state: WorkloadState,
+    /// The group this workload starts with: no member is claimed until the
+    /// scheduler places the whole group, or the group bound passes
+    /// ([`crate::placement`]). Every member's spec lists the same group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<Group>,
     /// What the workload may use. It is in the spec, not node configuration,
     /// so every node runs the workload under the same limits and fails it at
     /// the same step.
@@ -265,6 +270,72 @@ pub enum InvalidInputs {
     Twice(String),
     #[error("input {0} is a system stream, which only a system workload reads")]
     System(String),
+}
+
+/// Workloads placed together or not at all: `members` lists every member's
+/// id, sorted, and each member's spec carries the same group.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Group {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// The most members a group may list. A `group` record names every member
+/// and its node, so this keeps one well inside a record.
+pub const MAX_GROUP_MEMBERS: usize = 256;
+
+impl Group {
+    /// A group of `members` in any order, sorted and without duplicates.
+    pub fn new(name: impl Into<String>, members: impl IntoIterator<Item = String>) -> Group {
+        let mut members: Vec<String> = members.into_iter().collect();
+        members.sort();
+        members.dedup();
+        Group {
+            name: name.into(),
+            members,
+        }
+    }
+}
+
+/// Checks the group of `workload`: a valid name, 2 to
+/// [`MAX_GROUP_MEMBERS`] valid member ids, sorted and none twice, and
+/// `workload` among them. No system workload is in a group, since each is
+/// placed by first claim or by the scheduler on its own.
+pub fn validate_group(workload: &str, group: &Group) -> Result<(), InvalidGroup> {
+    names::validate_id(&group.name).map_err(|e| InvalidGroup::Name(e.to_string()))?;
+    let count = group.members.len();
+    if !(2..=MAX_GROUP_MEMBERS).contains(&count) {
+        return Err(InvalidGroup::Count(count));
+    }
+    if group.members.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(InvalidGroup::Unsorted);
+    }
+    for member in &group.members {
+        names::validate_id(member).map_err(|e| InvalidGroup::Member(e.to_string()))?;
+        if names::is_system(member) {
+            return Err(InvalidGroup::System(member.clone()));
+        }
+    }
+    if !group.members.iter().any(|m| m == workload) {
+        return Err(InvalidGroup::NotAMember(workload.to_owned()));
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidGroup {
+    #[error("not a valid group name: {0}")]
+    Name(String),
+    #[error("a group has 2 to {MAX_GROUP_MEMBERS} members, not {0}")]
+    Count(usize),
+    #[error("a group's members are listed sorted, each once")]
+    Unsorted,
+    #[error("not a valid member id: {0}")]
+    Member(String),
+    #[error("{0} is a system workload, which is never in a group")]
+    System(String),
+    #[error("{0} is not among its group's members")]
+    NotAMember(String),
 }
 
 /// `inputs` in JSON: `"input": "a"` for one, `"inputs": ["a", "b"]` for

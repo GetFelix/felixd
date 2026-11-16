@@ -13,6 +13,7 @@ fn spec(id: &str) -> WorkloadSpec {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits::default(),
         failure: None,
         record: None,
@@ -343,4 +344,24 @@ fn a_request_cannot_name_module_upgrades() {
         module: "cd".repeat(32),
     }];
     assert_eq!(rejected(&decided(&asked)), Reason::InvalidSpec);
+}
+
+#[test]
+fn a_group_is_checked_at_admission() {
+    let mut ok = request("a");
+    ok.spec.group = Some(crate::spec::Group::new(
+        "g",
+        ["a".to_owned(), "b".to_owned()],
+    ));
+    assert!(decided(&ok).accepted().is_some());
+    let mut alone = request("a");
+    alone.spec.group = Some(crate::spec::Group::new("g", ["a".to_owned()]));
+    let mut stranger = request("c");
+    stranger.spec.group = Some(crate::spec::Group::new(
+        "g",
+        ["a".to_owned(), "b".to_owned()],
+    ));
+    for request in [alone, stranger] {
+        assert_eq!(rejected(&decided(&request)), Reason::InvalidSpec);
+    }
 }

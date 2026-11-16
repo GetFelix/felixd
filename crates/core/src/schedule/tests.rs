@@ -1,9 +1,13 @@
 use super::*;
-use crate::spec::{Limits, WorkloadSpec};
+use crate::spec::{Group, Limits, WorkloadSpec};
 
 const SECOND: u64 = 1_000_000;
 
 fn spec_record(id: &str, state: WorkloadState) -> Vec<u8> {
+    grouped_record(id, state, None)
+}
+
+fn grouped_record(id: &str, state: WorkloadState, group: Option<Group>) -> Vec<u8> {
     let spec = WorkloadSpec {
         module: "ab".repeat(32),
         inputs: vec!["in".into()],
@@ -14,6 +18,7 @@ fn spec_record(id: &str, state: WorkloadState) -> Vec<u8> {
         restart_intensity: None,
         upgrades: Vec::new(),
         state,
+        group,
         limits: Limits::default(),
         failure: None,
         record: None,
@@ -80,6 +85,27 @@ impl Feed {
             .unwrap()
     }
 
+    fn run_in(&mut self, at: u64, id: &str, group: &Group) -> Vec<Record> {
+        self.specs += 1;
+        let record = grouped_record(id, WorkloadState::Running, Some(group.clone()));
+        self.s
+            .step(names::SPECS, self.specs - 1, at, &record)
+            .unwrap()
+    }
+
+    fn group(&self, name: &str, members: &[(&str, &str)]) -> Record {
+        Record {
+            specs: self.specs,
+            change: Change::Group {
+                group: name.into(),
+                members: members
+                    .iter()
+                    .map(|(m, n)| (m.to_string(), n.to_string()))
+                    .collect(),
+            },
+        }
+    }
+
     fn run(&mut self, at: u64, id: &str) -> Vec<Record> {
         self.spec(at, id, WorkloadState::Running)
     }
@@ -110,6 +136,7 @@ fn the_first_step_writes_a_table() {
         Ok(vec![Record {
             specs: 0,
             change: Change::Table {
+                groups: BTreeMap::new(),
                 assignments: BTreeMap::new()
             }
         }])
@@ -251,6 +278,7 @@ fn the_whole_table_is_written_again_by_input_time() {
         vec![Record {
             specs: 1,
             change: Change::Table {
+                groups: BTreeMap::new(),
                 assignments: BTreeMap::from([("w".into(), "a".into())])
             }
         }]
@@ -374,6 +402,7 @@ fn table(specs: u64, assignments: &[(&str, &str)]) -> Record {
     Record {
         specs,
         change: Change::Table {
+            groups: BTreeMap::new(),
             assignments: assignments
                 .iter()
                 .map(|(w, n)| (w.to_string(), n.to_string()))
@@ -494,4 +523,151 @@ fn a_snapshot_from_before_ticks_restores_and_ticks_at_its_next_fact() {
         s.step(names::FACTS, 1, 7, &fact("a").encode()).unwrap(),
         vec![]
     );
+}
+
+fn pair(name: &str, a: &str, b: &str) -> Group {
+    Group::new(name, [a.to_owned(), b.to_owned()])
+}
+
+#[test]
+fn a_group_is_placed_in_one_record_once_every_member_is_admitted() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    // The first member alone places nothing, not even by itself.
+    assert_eq!(f.run_in(1, "x", &g), vec![f.progress()]);
+    assert!(f.s.assignments().is_empty());
+    let out = f.run_in(2, "y", &g);
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "b")])]);
+    assert_eq!(f.s.groups()["g"]["y"], "b");
+    // Members are never in the per-workload table.
+    assert!(f.s.assignments().is_empty());
+}
+
+#[test]
+fn a_group_that_does_not_fit_whole_is_not_placed_at_all() {
+    let mut f = Feed::hearing(&["a"]);
+    let g = Group::new("g", ["x".to_owned(), "y".to_owned(), "z".to_owned()]);
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    // The node has room for two of the three.
+    assert_eq!(f.run_in(3, "z", &g), vec![f.progress()]);
+    assert!(f.s.groups().is_empty());
+    // Room appears, and the whole group goes.
+    let more = NodeFact {
+        max_workloads: 3,
+        ..fact("a")
+    };
+    let out = f.fact(4, more);
+    assert_eq!(
+        out,
+        vec![f.group("g", &[("x", "a"), ("y", "a"), ("z", "a")])]
+    );
+}
+
+#[test]
+fn a_member_stopping_withdraws_the_groups_placement() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    let out = f.spec(3, "y", WorkloadState::Stopped);
+    assert_eq!(out, vec![f.group("g", &[])]);
+    assert!(f.s.groups().is_empty());
+}
+
+#[test]
+fn a_member_freed_by_a_node_death_is_placed_again_beside_the_ones_still_running() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    f.fact(3, holding("a", &["x"]));
+    f.fact(4, holding("b", &["y"]));
+    // b goes silent: y is free, x keeps running on a.
+    let out = f.fact(7 * SECOND, holding("a", &["x"]));
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
+}
+
+#[test]
+fn a_group_with_no_record_is_placed_beside_the_members_still_running() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    f.fact(3, holding("a", &["x"]));
+    f.fact(4, holding("b", &["y"]));
+    // y stops: the record is withdrawn while x keeps running on a.
+    assert_eq!(
+        f.spec(5, "y", WorkloadState::Stopped),
+        vec![f.group("g", &[])]
+    );
+    f.fact(6, holding("b", &[]));
+    // y is run again with the same group: x stays, y is placed beside it.
+    let out = f.run_in(7, "y", &g);
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "b")])]);
+}
+
+#[test]
+fn a_split_group_is_left_alone_until_no_member_runs() {
+    let mut f = Feed::hearing(&["a", "b", "c"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    assert_eq!(f.s.groups()["g"]["x"], "a");
+    // x runs on c by first claim wins, off the record, and y runs on b.
+    f.fact(3, holding("c", &["x"]));
+    f.fact(4, holding("b", &["y"]));
+    // b dies. y is free, but x runs off the record: no new placement.
+    let out = f.fact(7 * SECOND, holding("c", &["x"]));
+    assert_eq!(out, vec![]);
+    assert_eq!(f.s.groups()["g"]["y"], "b");
+    // x stops running: the group is placed whole again.
+    let out = f.fact(7 * SECOND + 1, fact("c"));
+    assert_eq!(out.len(), 1);
+    assert!(matches!(&out[0].change, Change::Group { members, .. } if members.len() == 2));
+}
+
+#[test]
+fn two_complete_groups_under_one_name_place_neither() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    let other = pair("g", "z", "w");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    assert_eq!(f.s.groups().len(), 1);
+    // A second group of the same name completes: neither is placed.
+    f.run_in(3, "z", &other);
+    let out = f.run_in(4, "w", &other);
+    assert_eq!(out, vec![f.group("g", &[])]);
+    assert!(f.s.groups().is_empty());
+}
+
+#[test]
+fn a_member_declaring_another_group_leaves_the_first_incomplete() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    // y now says it is in a different group: g is no longer whole.
+    let out = f.run_in(3, "y", &pair("g", "y", "z"));
+    assert_eq!(out, vec![f.group("g", &[])]);
+}
+
+#[test]
+fn the_table_carries_the_groups() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    let out = f.fact(TABLE_EVERY_MICROS, fact("a"));
+    let [
+        Record {
+            change: Change::Table { groups, .. },
+            ..
+        },
+    ] = out.as_slice()
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(groups["g"]["x"], "a");
 }

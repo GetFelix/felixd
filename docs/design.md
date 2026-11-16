@@ -2140,9 +2140,10 @@ below, and replacing per-workload lease watching with assignments
 ### Placement rules
 
 Part built (#100). Built: the placement record on `wl.<id>.placed`, its
-check in `felixd check` and the PLACED column of `ps`, and ticks from
-`sys.facts`. Not built yet: groups and `--group-bound-ms` (the reason
-`group-bound` with them), the status fields (`assignments`, `held_at`) and
+check in `felixd check` and the PLACED column of `ps`, ticks from
+`sys.facts`, and groups: the `group` field of a spec, the scheduler's `group`
+record, the agents' barrier with `--group-bound-ms`, the reason `group-bound`,
+and the `ps` group table. Not built yet: the status fields (`assignments`, `held_at`) and
 lag in `ps`, `ps` showing an assignment offset that was trimmed as
 `trimmed`, the `.placed` head trim, the `workloads` writer change, and the
 TLA model. These rules fix what the scheduler and the agents
@@ -2182,8 +2183,7 @@ fits. One record lands whole or not at all, so no reader can see half a
 group, and no cross-key or cross-shard transaction is needed. A `publish_if`
 batch can land in part on a leader change
 ([felix#1630](https://github.com/GetFelix/felix/issues/1630)); a single
-record cannot. A group is bounded by the record size, 8 MiB, far more members
-than a group needs.
+record cannot. A group is bounded by `MAX_GROUP_MEMBERS`, 256 members.
 
 A group is a barrier on the start. A node does not first-claim a free member
 until a `group` record in its view places the whole group, and then claims
@@ -2193,7 +2193,17 @@ when the node first sees the member free with the group complete, that is
 with every listed member admitted, so a group admitted slowly does not use up
 its bound before the scheduler can place it. Past the bound the node claims
 by first claim with reason `group-bound`, so a group that never fits still
-runs, split.
+runs, split. The clock lives in the agent's memory, so a restart starts the
+bound over, as it does `--assignment-bound-ms`.
+
+A group with a member that is never admitted does not hold the others for
+ever. While some listed member is not admitted, the bound runs from when the
+node first saw the member free, so after `--group-bound-ms` the members that
+are admitted are claimed `group-bound` and run split. When the last member is
+admitted the bound starts again from that moment. `felixd run --group
+name=a,b` and admission both refuse a group that lists fewer than two
+members, lists the workload being submitted nowhere, or names a system
+workload.
 
 The default is longer than the scheduler's view of a dead node (90 s, see
 [Placement](#placement)) plus a placement round, so that when a member's node

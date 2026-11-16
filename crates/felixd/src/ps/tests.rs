@@ -71,6 +71,7 @@ fn every_input_and_the_merge_log_get_a_line() {
         workloads: vec![join],
         nodes: vec![node("node-2", true, true, 1)],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     let lines: Vec<&str> = printed.lines().collect();
@@ -121,6 +122,7 @@ fn a_parked_or_failed_workload_says_why() {
         ],
         nodes: vec![node("n", true, false, 0)],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     assert!(
@@ -142,6 +144,7 @@ fn a_degraded_workload_shows_its_class_and_detail() {
         workloads: vec![workload("a", State::Degraded(degraded), None)],
         nodes: vec![node("n", true, false, 0)],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     let row = printed.lines().nth(1).expect("a workload row");
@@ -178,6 +181,7 @@ fn a_degraded_workload_prints_as_the_readme_shows() {
         workloads: vec![counter],
         nodes: vec![node("n", true, false, 0)],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     let shown: Vec<&str> = printed.lines().take(3).collect();
@@ -197,6 +201,7 @@ fn waiting_with_every_node_draining_says_so() {
         workloads: vec![workload("a", State::Waiting, None)],
         nodes: vec![node("n", true, true, 0), node("gone", false, false, 0)],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     assert!(
@@ -216,6 +221,7 @@ fn a_mark_the_node_has_not_acknowledged_is_pending_and_an_unreadable_entry_is_up
         workloads: vec![],
         nodes: vec![old, newer],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     assert!(
@@ -255,6 +261,7 @@ fn with_a_scheduler_each_workload_shows_its_assignment() {
         workloads: vec![placed, first, old, unplaced],
         nodes: vec![node("n-2", true, false, 1)],
         scheduled: true,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     let lines: Vec<Vec<&str>> = printed
@@ -324,6 +331,7 @@ fn a_failed_workload_prints_where_it_diverged_as_the_readme_shows() {
         workloads: vec![counter],
         nodes: vec![node("n", true, false, 0)],
         scheduled: false,
+        groups: Vec::new(),
     };
     let printed = render(&report);
     let shown: Vec<&str> = printed.lines().take(4).collect();
@@ -347,6 +355,7 @@ fn a_workload_with_no_divergence_prints_no_line_for_one() {
         workloads: vec![workload("a", State::Running, None)],
         nodes: vec![node("n", true, false, 0)],
         scheduled: false,
+        groups: Vec::new(),
     };
     assert!(!render(&report).contains("diverged"));
 }
@@ -356,9 +365,9 @@ fn a_placement_from_a_newer_build_is_printed_plainly() {
     use felixd_agent::ps::PlacedBy;
     assert_eq!(
         super::placed_word(Some(&PlacedBy::Recorded(Authority::FirstClaim {
-            reason: Reason::Other("group-bound".to_owned())
+            reason: Reason::Other("some-future-reason".to_owned())
         }))),
-        "first-claim:group-bound"
+        "first-claim:some-future-reason"
     );
     assert_eq!(
         super::placed_word(Some(&PlacedBy::Recorded(Authority::Unknown))),

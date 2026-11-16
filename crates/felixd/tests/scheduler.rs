@@ -367,7 +367,9 @@ async fn assignment_at(t: &TestFelix, offset: u64, id: &str) -> Option<String> {
     };
     match schedule::Record::decode(addressed.payload).ok()?.change {
         Change::Assign { workload, node } if workload == id => node,
-        Change::Table { mut assignments } => assignments.remove(id),
+        Change::Table {
+            mut assignments, ..
+        } => assignments.remove(id),
         _ => None,
     }
 }
@@ -665,4 +667,199 @@ async fn sys_facts_is_trimmed_below_the_schedulers_floor_and_failover_carries_on
     let (ok, state) = t.replay(&["--id", names::SCHEDULER, "--to", &last.to_string()]);
     assert!(ok, "felixd replay: {state}");
     assert!(state.contains("f-2"), "{state}");
+}
+
+/// Submits the counter as `id` in the group `spec` (`name=a,b`).
+async fn run_in_group(t: &TestFelix, id: &str, spec: &str) {
+    let kind = StreamKind {
+        replication_factor: replication_factor(),
+    };
+    ensure_stream(&t.settings, INPUT, kind).await.unwrap();
+    let module = felixd_testkit::workload("counter");
+    assert!(t.run(id, &module, INPUT, &["--group", spec]).success());
+}
+
+/// The node each member of `group` is placed on by the record in force.
+async fn group_record(t: &TestFelix, group: &str) -> Option<Vec<(String, String)>> {
+    let followed = assignments::read(&t.felix).await.unwrap();
+    let placed = followed.groups.get(group)?;
+    Some(placed.members.clone().into_iter().collect())
+}
+
+/// The scheduler output offset of the `group` record in force.
+async fn group_offset(t: &TestFelix, group: &str) -> u64 {
+    let followed = assignments::read(&t.felix).await.unwrap();
+    followed.groups.get(group).expect("a group record").offset
+}
+
+/// Waits until both members of `group` are held and returns their holders.
+async fn group_held(t: &TestFelix, group: &str, members: [&str; 2]) -> [String; 2] {
+    eventually(&format!("group {group} to be held"), SOON, || async {
+        let x = holder(t, members[0]).await?;
+        let y = holder(t, members[1]).await?;
+        Some([x, y])
+    })
+    .await
+}
+
+fn group_args(bound: &str) -> Vec<&str> {
+    vec!["--group-bound-ms", bound]
+}
+
+#[tokio::test]
+async fn a_group_is_placed_whole_and_both_members_follow_its_record() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g1-a", "g1-b", "g1-c"];
+    let more = group_args("300000");
+    let _agents: Vec<Agent> = nodes
+        .iter()
+        .map(|n| start_with(&t, n, Duration::from_secs(300), "", &more))
+        .collect();
+    scheduler_on(&t, &nodes).await;
+    run_in_group(&t, "gx", "pair=gx,gy").await;
+    run_in_group(&t, "gy", "pair=gx,gy").await;
+    let held = group_held(&t, "pair", ["gx", "gy"]).await;
+    let record = group_record(&t, "pair").await.expect("a group record");
+    assert_eq!(
+        record,
+        [
+            ("gx".to_owned(), held[0].clone()),
+            ("gy".to_owned(), held[1].clone())
+        ]
+    );
+    for (id, epoch) in [
+        ("gx", epoch_of(&t, "gx").await),
+        ("gy", epoch_of(&t, "gy").await),
+    ] {
+        assert!(matches!(
+            placement_of(&t, id, epoch).await,
+            Authority::Assigned { .. }
+        ));
+    }
+    let (ok, report) = t.check(&[]);
+    assert!(ok, "felixd check found problems:\n{report}");
+}
+
+#[tokio::test]
+async fn a_group_that_never_completes_is_released_after_the_bound() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g2-a", "g2-b"];
+    let bound = Duration::from_secs(8);
+    let more = group_args("8000");
+    let _agents: Vec<Agent> = nodes
+        .iter()
+        .map(|n| start_with(&t, n, Duration::from_secs(300), "", &more))
+        .collect();
+    scheduler_on(&t, &nodes).await;
+    // Its partner is never submitted.
+    let submitted = Instant::now();
+    run_in_group(&t, "lonely", "pair=lonely,missing").await;
+    claimed_by(&t, "lonely", &nodes, bound + Duration::from_secs(60)).await;
+    let after = submitted.elapsed();
+    assert!(
+        after >= bound - Duration::from_millis(500),
+        "claimed {after:?} after it was submitted, inside the {bound:?} bound"
+    );
+    let epoch = epoch_of(&t, "lonely").await;
+    assert_eq!(
+        placement_of(&t, "lonely", epoch).await,
+        Authority::FirstClaim {
+            reason: Reason::GroupBound
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_member_freed_by_a_node_death_is_placed_again_inside_the_bound() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g3-a", "g3-b", "g3-c"];
+    let more = group_args("300000");
+    let mut agents: HashMap<&str, Agent> = nodes
+        .iter()
+        .map(|&n| (n, start_with(&t, n, Duration::from_secs(300), "", &more)))
+        .collect();
+    let sched = scheduler_on(&t, &nodes).await;
+    run_in_group(&t, "dx", "pair=dx,dy").await;
+    run_in_group(&t, "dy", "pair=dx,dy").await;
+    let held = group_held(&t, "pair", ["dx", "dy"]).await;
+    // Members land on different nodes, so one of them is not the
+    // scheduler's.
+    let (freed, kept) = if held[0] != sched { (0, 1) } else { (1, 0) };
+    let ids = ["dx", "dy"];
+    let victim = held[freed].clone();
+    eprintln!("killing {victim}, which holds {}", ids[freed]);
+    agents.get_mut(victim.as_str()).unwrap().kill();
+    let again = eventually("the freed member to be held again", SOON, || async {
+        holder(&t, ids[freed]).await.filter(|n| *n != victim)
+    })
+    .await;
+    assert_ne!(again, victim);
+    // The surviving member stayed, and the one placed again was placed by
+    // the record, not by the bound.
+    assert_eq!(
+        holder(&t, ids[kept]).await.as_deref(),
+        Some(held[kept].as_str())
+    );
+    let epoch = epoch_of(&t, ids[freed]).await;
+    assert!(matches!(
+        placement_of(&t, ids[freed], epoch).await,
+        Authority::Assigned { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_group_record_survives_a_scheduler_crash_and_replays() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g4-a", "g4-b", "g4-c"];
+    let more = group_args("300000");
+    let mut agents: HashMap<&str, Agent> = nodes
+        .iter()
+        .map(|&n| (n, start_with(&t, n, Duration::from_secs(300), "", &more)))
+        .collect();
+    let first = scheduler_on(&t, &nodes).await;
+    run_in_group(&t, "rx", "pair=rx,ry").await;
+    run_in_group(&t, "ry", "pair=rx,ry").await;
+    let held = group_held(&t, "pair", ["rx", "ry"]).await;
+    let before = group_record(&t, "pair").await.expect("a group record");
+    let offset = group_offset(&t, "pair").await;
+    agents.get_mut(first.as_str()).unwrap().kill();
+    eventually("another node to take the scheduler over", SOON, || async {
+        holder(&t, names::SCHEDULER).await.filter(|n| *n != first)
+    })
+    .await;
+    // The new holder restores the groups from its snapshot or the stream
+    // and does not move members that still run.
+    tokio::time::sleep(FACTS_EVERY * SILENT_INTERVALS as u32 + Duration::from_secs(5)).await;
+    for (id, node) in ["rx", "ry"].iter().zip(&held) {
+        if *node != first {
+            assert_eq!(holder(&t, id).await.as_ref(), Some(node));
+        }
+    }
+    let after = group_record(&t, "pair").await.expect("a group record");
+    for ((m, was), (_, now)) in before.iter().zip(&after) {
+        if *was != first {
+            assert_eq!(was, now, "{m} moved");
+        }
+    }
+    // A holder that did not restore the groups would write the record again
+    // for the same nodes, at a later offset.
+    if before.iter().all(|(_, node)| *node != first) {
+        assert_eq!(
+            group_offset(&t, "pair").await,
+            offset,
+            "the group was placed again"
+        );
+    }
+    let (ok, report) = t.check(&["--id", names::SCHEDULER]);
+    assert!(ok, "felixd check found problems:\n{report}");
+    let (ok, diffed) = t.replay(&["--id", names::SCHEDULER, "--diff"]);
+    assert!(ok, "felixd replay --diff: {diffed}");
 }

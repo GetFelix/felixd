@@ -41,6 +41,9 @@ pub struct Assigned {
     /// How long this node has seen the workload free, whatever its
     /// assignment, so a changing assignment cannot defer it for ever.
     pub waited: Duration,
+    /// For a group member, where its group's record places it and how long
+    /// it has been held. A member follows only that, whatever `to` says.
+    pub group: Option<GroupHold>,
 }
 
 impl Assigned {
@@ -49,7 +52,34 @@ impl Assigned {
         scheduler: false,
         to: AssignedTo::Nobody { decided: true },
         waited: Duration::ZERO,
+        group: None,
     };
+}
+
+/// What a node knows of a free group member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupHold {
+    pub placed: GroupPlaced,
+    /// How long this node has held the member: since it first saw it free
+    /// with the whole group admitted, or, while some member is not admitted,
+    /// since it first saw it free, so a group that never completes is not
+    /// held for ever.
+    pub held: Duration,
+}
+
+/// Where the `group` record in a node's view places a member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupPlaced {
+    /// On this node, by the `wl.scheduler.out` record at `assignment`
+    /// written by the scheduler holder at `scheduler_epoch`.
+    ThisNode {
+        assignment: u64,
+        scheduler_epoch: u64,
+    },
+    /// On another node.
+    Elsewhere,
+    /// No record in view places the whole group as its members declare it.
+    Unplaced,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +175,11 @@ pub const DEFAULT_ASSIGNMENT_BOUND: Duration = Duration::from_secs(15);
 /// spec record and assign it, unless told otherwise. A healthy scheduler
 /// takes well under a second.
 pub const DEFAULT_ASSIGNMENT_GRACE: Duration = Duration::from_secs(2);
+/// The longest a group member is held for its group's record, unless told
+/// otherwise. It is longer than the scheduler takes to see a node gone (three
+/// fact intervals, 90 s at the defaults) plus a placement round, so a member
+/// freed by a node death can be placed again with its group.
+pub const DEFAULT_GROUP_BOUND: Duration = Duration::from_secs(180);
 
 /// Follows the scheduler's assignments while it runs and its holder renews,
 /// with first claim wins as the fallback. A node claims a workload assigned
@@ -152,12 +187,15 @@ pub const DEFAULT_ASSIGNMENT_GRACE: Duration = Duration::from_secs(2);
 /// until `bound` has passed since it first saw the workload free; one whose
 /// spec record the scheduler has not read yet, until `grace` has. Anything
 /// else is first claim wins at once. The scheduler itself is always placed
-/// by first claim wins.
+/// by first claim wins. A group member is claimed only where its group's
+/// record places it, whatever the scheduler's health, until `group_bound`
+/// has passed; then it is first claim wins with reason `group-bound`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scheduled {
     pub fallback: FirstClaimWins,
     pub bound: Duration,
     pub grace: Duration,
+    pub group_bound: Duration,
 }
 
 impl Placement for Scheduled {
@@ -171,6 +209,22 @@ impl Placement for Scheduled {
         let first = |reason| self.fallback.first_claim(reason, random);
         if workload == names::SCHEDULER {
             return first(Reason::Scheduler);
+        }
+        if let Some(group) = assigned.group {
+            return match group.placed {
+                GroupPlaced::ThisNode {
+                    assignment,
+                    scheduler_epoch,
+                } => Turn::Claim(
+                    Duration::ZERO,
+                    Authority::Assigned {
+                        assignment,
+                        scheduler_epoch,
+                    },
+                ),
+                _ if group.held < self.group_bound => Turn::Defer(self.group_bound - group.held),
+                _ => first(Reason::GroupBound),
+            };
         }
         if !assigned.scheduler {
             return first(Reason::NoScheduler);
@@ -233,6 +287,9 @@ pub enum Authority {
 pub enum Reason {
     /// The workload is the scheduler, which is never assigned.
     Scheduler,
+    /// A group member held past the group bound with no `group` record
+    /// placing it on this node. The group runs split.
+    GroupBound,
     /// The scheduler does not run, or its holder has not renewed lately.
     NoScheduler,
     /// The assignee's `nodes` entry could not be read.
@@ -255,6 +312,7 @@ impl Reason {
     pub fn name(&self) -> &str {
         match self {
             Reason::Scheduler => "scheduler",
+            Reason::GroupBound => "group-bound",
             Reason::NoScheduler => "no-scheduler",
             Reason::Unreadable => "unreadable",
             Reason::Unassigned => "unassigned",
@@ -277,6 +335,7 @@ impl<'de> Deserialize<'de> for Reason {
         let name = String::deserialize(d)?;
         Ok(match name.as_str() {
             "scheduler" => Reason::Scheduler,
+            "group-bound" => Reason::GroupBound,
             "no-scheduler" => Reason::NoScheduler,
             "unreadable" => Reason::Unreadable,
             "unassigned" => Reason::Unassigned,

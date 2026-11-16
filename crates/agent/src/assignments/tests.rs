@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use felixd_core::output::{Addressed, OutputHeader, encode_addressed, encode_claim};
+use felixd_core::spec::Group;
 
 use super::*;
 
@@ -37,7 +38,10 @@ fn table(specs: u64, pairs: &[(&str, &str)]) -> Record {
         .collect();
     Record {
         specs,
-        change: Change::Table { assignments },
+        change: Change::Table {
+            assignments,
+            groups: Default::default(),
+        },
     }
 }
 
@@ -252,4 +256,43 @@ async fn a_change_wakes_whoever_waits_on_it() {
     a.set_holder(Some(5));
     assert!(changes.has_changed().unwrap());
     assert_eq!(a.get("w"), (None, 0));
+}
+
+#[test]
+fn a_group_record_places_its_members_and_a_changed_member_list_places_nobody() {
+    let mut f = Followed::default();
+    let group = Group::new("g", ["x".to_owned(), "y".to_owned()]);
+    let record = Record {
+        specs: 1,
+        change: Change::Group {
+            group: "g".into(),
+            members: BTreeMap::from([("x".into(), "a".into()), ("y".into(), "b".into())]),
+        },
+    };
+    f.fold(3, &out(0, &record));
+    assert_eq!(f.group_placed("y", &group).unwrap().node, "b");
+    assert_eq!(f.group_placed("y", &group).unwrap().offset, 3);
+    let other = Group::new("g", ["x".to_owned(), "z".to_owned()]);
+    assert_eq!(f.group_placed("x", &other), None);
+    let withdrawn = Record {
+        specs: 2,
+        change: Change::Group {
+            group: "g".into(),
+            members: BTreeMap::new(),
+        },
+    };
+    f.fold(4, &out(1, &withdrawn));
+    assert_eq!(f.group_placed("x", &group), None);
+}
+
+#[test]
+fn a_node_sees_a_group_complete_only_when_every_member_declares_it() {
+    let a = Assignments::new();
+    let group = Group::new("g", ["x".to_owned(), "y".to_owned()]);
+    a.set_declared("x", Some(group.clone()));
+    assert!(!a.complete(&group));
+    a.set_declared("y", Some(group.clone()));
+    assert!(a.complete(&group));
+    a.set_declared("y", None);
+    assert!(!a.complete(&group));
 }

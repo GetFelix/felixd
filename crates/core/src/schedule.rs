@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::spec::{SpecRecord, WorkloadState};
+use crate::spec::{Group, SpecRecord, WorkloadState};
 use crate::{DecodeError, codec, names};
 
 /// The `sys.facts` record format this build writes and reads.
@@ -128,6 +128,17 @@ pub enum Change {
     /// Every assignment in force. It replaces everything before it.
     Table {
         assignments: BTreeMap<String, String>,
+        /// Every group placement in force, by group name.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        groups: BTreeMap<String, BTreeMap<String, String>>,
+    },
+    /// The node of every member of the group `group`, all in one record so
+    /// no reader sees part of a group. No members withdraws the group's
+    /// placement. An older agent cannot decode it and passes over it.
+    Group {
+        group: String,
+        #[serde(default)]
+        members: BTreeMap<String, String>,
     },
     /// A spec record that changed no assignment.
     Progress,
@@ -181,6 +192,11 @@ pub struct Scheduler {
     /// Workloads whose last spec record says `running`.
     wanted: BTreeSet<String>,
     assigned: BTreeMap<String, String>,
+    /// The group each wanted group member's spec declares. Members are
+    /// placed only through [`Change::Group`], never one by one.
+    declared: BTreeMap<String, Group>,
+    /// The group placements in force, by group name: member to node.
+    groups: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +229,7 @@ impl Scheduler {
     ) -> Result<Vec<Record>, Refused> {
         // Before the clock moves: time passing alone can make a node silent.
         let before = self.takers();
+        let running_before = self.groups_running();
         let mut wanted_changed = false;
         let mut spec_step = false;
         let mut tick = false;
@@ -224,7 +241,15 @@ impl Scheduler {
                 // The scheduler is placed by first claim wins, never by itself.
                 // A skip record is not a spec.
                 if record.id != names::SCHEDULER && !record.skipped {
-                    wanted_changed = if record.spec.state == WorkloadState::Running {
+                    let running = record.spec.state == WorkloadState::Running;
+                    let group = record.spec.group.filter(|_| running);
+                    let declared = match group {
+                        Some(group) => self.declared.insert(record.id.clone(), group.clone()),
+                        None => self.declared.remove(&record.id),
+                    };
+                    let now = self.declared.get(&record.id);
+                    wanted_changed = declared.as_ref() != now;
+                    wanted_changed |= if running {
                         self.wanted.insert(record.id)
                     } else {
                         self.wanted.remove(&record.id)
@@ -250,25 +275,27 @@ impl Scheduler {
             other => return Err(Refused::Stream(other.to_owned())),
         }
         let takers = self.takers();
-        let changes = if wanted_changed || takers != before {
-            self.reconcile(&takers)
-        } else {
-            Vec::new()
-        };
+        let changes =
+            if wanted_changed || takers != before || self.groups_running() != running_before {
+                self.reconcile(&takers)
+            } else {
+                Vec::new()
+            };
         let specs = self.specs;
         let record = |change| Record { specs, change };
         if tick {
             // The table holds every change of this step too.
             let assignments = self.assigned.clone();
-            return Ok(vec![record(Change::Table { assignments })]);
+            let groups = self.groups.clone();
+            return Ok(vec![record(Change::Table {
+                assignments,
+                groups,
+            })]);
         }
         if changes.is_empty() && spec_step {
             return Ok(vec![record(Change::Progress)]);
         }
-        Ok(changes
-            .into_iter()
-            .map(|(workload, node)| record(Change::Assign { workload, node }))
-            .collect())
+        Ok(changes.into_iter().map(record).collect())
     }
 
     /// Whether a fact appended at `at_micros` is a tick: the first fact, or
@@ -283,6 +310,11 @@ impl Scheduler {
     /// The node each workload is assigned to.
     pub fn assignments(&self) -> &BTreeMap<String, String> {
         &self.assigned
+    }
+
+    /// The group placements in force: group name to member to node.
+    pub fn groups(&self) -> &BTreeMap<String, BTreeMap<String, String>> {
+        &self.groups
     }
 
     /// Whether the scheduler still remembers `node`.
@@ -331,11 +363,13 @@ impl Scheduler {
     /// node that still takes work. A workload with nowhere to go keeps its
     /// assignment if its node is gone, which agents pass over, and is
     /// unassigned if it was moved off a full node.
-    fn reconcile(&mut self, takers: &BTreeMap<String, Taker>) -> Vec<(String, Option<String>)> {
+    fn reconcile(&mut self, takers: &BTreeMap<String, Taker>) -> Vec<Change> {
         let mut changed = Vec::new();
         let wanted = &self.wanted;
+        let declared = &self.declared;
+        // A group member is placed with its group, never on its own.
         self.assigned.retain(|workload, _| {
-            let keep = wanted.contains(workload);
+            let keep = wanted.contains(workload) && !declared.contains_key(workload);
             if !keep {
                 changed.push((workload.clone(), None));
             }
@@ -345,6 +379,9 @@ impl Scheduler {
             .iter()
             .map(|(node, t)| (node.as_str(), t.holding.len()))
             .collect();
+        for members in self.groups.values() {
+            add_load(&mut load, takers, members, 1);
+        }
         let mut over: Vec<String> = Vec::new();
         for (node, taker) in takers {
             let extra: Vec<&String> = self
@@ -361,6 +398,9 @@ impl Scheduler {
             self.assigned.remove(workload);
         }
         for workload in &self.wanted {
+            if self.declared.contains_key(workload) {
+                continue;
+            }
             if self
                 .assigned
                 .get(workload)
@@ -385,7 +425,162 @@ impl Scheduler {
             self.assigned.insert(workload.clone(), node.to_owned());
             changed.push((workload.clone(), Some(node.to_owned())));
         }
-        changed
+        let mut changes: Vec<Change> = changed
+            .into_iter()
+            .map(|(workload, node)| Change::Assign { workload, node })
+            .collect();
+        let mut load: BTreeMap<String, usize> =
+            load.into_iter().map(|(n, l)| (n.to_owned(), l)).collect();
+        changes.extend(self.place_groups(takers, &mut load));
+        changes
+    }
+
+    /// The groups every one of whose members is wanted and declares it. Two
+    /// such groups under one name are both left out, so neither is placed.
+    fn complete_groups(&self) -> BTreeMap<&str, &Group> {
+        let mut complete: BTreeMap<&str, Option<&Group>> = BTreeMap::new();
+        for group in self.declared.values() {
+            let whole = group
+                .members
+                .iter()
+                .all(|m| self.declared.get(m) == Some(group));
+            if !whole {
+                continue;
+            }
+            complete
+                .entry(&group.name)
+                .and_modify(|found| {
+                    if *found != Some(group) {
+                        *found = None;
+                    }
+                })
+                .or_insert(Some(group));
+        }
+        complete
+            .into_iter()
+            .filter_map(|(name, group)| Some((name, group?)))
+            .collect()
+    }
+
+    /// The node each member of `group` runs on, by the facts of nodes not
+    /// silent, draining or not. The lowest node id wins if two say so.
+    fn running(&self, group: &Group) -> BTreeMap<String, String> {
+        let mut running = BTreeMap::new();
+        for (node, heard) in &self.nodes {
+            let silent = Self::after(heard.every_ms, SILENT_INTERVALS);
+            if self.facts_micros.saturating_sub(heard.at_micros) > silent {
+                continue;
+            }
+            for member in &group.members {
+                if heard.holding.contains(member) {
+                    running
+                        .entry(member.clone())
+                        .or_insert_with(|| node.clone());
+                }
+            }
+        }
+        running
+    }
+
+    /// Where the members of every complete group run, so a member stopping
+    /// on a node that takes no work still reconsiders its group.
+    fn groups_running(&self) -> Vec<BTreeMap<String, String>> {
+        if self.declared.is_empty() {
+            return Vec::new();
+        }
+        self.complete_groups()
+            .values()
+            .map(|g| self.running(g))
+            .collect()
+    }
+
+    /// Places each complete group with one record, or not at all. A group
+    /// whose members all stopped running, or never ran, is placed on the
+    /// least loaded takers with room, the lowest id first, and only if every
+    /// member fits. While members run, a new placement keeps each of them on
+    /// its node, which is how a member freed by a node death is placed again;
+    /// a group with a member running off its placement is split and is not
+    /// placed again until no member runs. A placement whose members all run
+    /// where it says or sit on takers is left alone. The placement of a group
+    /// no longer complete is withdrawn.
+    fn place_groups(
+        &mut self,
+        takers: &BTreeMap<String, Taker>,
+        load: &mut BTreeMap<String, usize>,
+    ) -> Vec<Change> {
+        let mut changes = Vec::new();
+        let complete: BTreeMap<String, Group> = self
+            .complete_groups()
+            .into_iter()
+            .map(|(n, g)| (n.to_owned(), g.clone()))
+            .collect();
+        let gone: Vec<String> = self
+            .groups
+            .keys()
+            .filter(|name| {
+                complete.get(*name).is_none_or(|g| {
+                    // A placement for another member list is not this group's.
+                    !g.members.iter().eq(self.groups[*name].keys())
+                })
+            })
+            .cloned()
+            .collect();
+        for name in gone {
+            if let Some(members) = self.groups.remove(&name) {
+                add_load_owned(load, takers, &members, -1);
+            }
+            changes.push(Change::Group {
+                group: name,
+                members: BTreeMap::new(),
+            });
+        }
+        for (name, group) in complete {
+            let running = self.running(&group);
+            let current = self.groups.get(&name);
+            // With no record, running members count as matching it: they stay
+            // where they are and the rest is placed beside them.
+            if current.is_some_and(|c| {
+                !running.is_empty() && !running.iter().all(|(m, n)| c.get(m) == Some(n))
+            }) {
+                continue;
+            }
+            if let Some(current) = current
+                && current
+                    .iter()
+                    .all(|(m, n)| running.get(m) == Some(n) || takers.contains_key(n))
+            {
+                continue;
+            }
+            let mut trial = load.clone();
+            if let Some(current) = current {
+                add_load_owned(&mut trial, takers, current, -1);
+            }
+            let mut placed = running.clone();
+            let mut fits = true;
+            for member in group.members.iter().filter(|m| !running.contains_key(*m)) {
+                let pick = trial
+                    .iter()
+                    .filter(|&(node, &l)| l < takers[node].max_workloads)
+                    .min_by_key(|&(node, &l)| (l, node))
+                    .map(|(node, _)| node.clone());
+                let Some(node) = pick else {
+                    fits = false;
+                    break;
+                };
+                *trial.get_mut(&node).expect("picked from the load") += 1;
+                placed.insert(member.clone(), node);
+            }
+            if !fits || current == Some(&placed) {
+                continue;
+            }
+            *load = trial;
+            self.groups.insert(name.clone(), placed.clone());
+            changes.push(Change::Group {
+                group: name,
+                members: placed,
+            });
+        }
+        changes
     }
 
     /// The state as JSON, for snapshots and `inspect`.
@@ -395,6 +590,41 @@ impl Scheduler {
 
     pub fn decode(bytes: &[u8]) -> Result<Scheduler, DecodeError> {
         serde_json::from_slice(bytes).map_err(|e| DecodeError::Json(e.to_string()))
+    }
+}
+
+/// Adds `by` to the load of each taker that `members` places a member on
+/// and that does not hold it already.
+fn add_load(
+    load: &mut BTreeMap<&str, usize>,
+    takers: &BTreeMap<String, Taker>,
+    members: &BTreeMap<String, String>,
+    by: isize,
+) {
+    for (member, node) in members {
+        if let Some((taker, t)) = takers.get_key_value(node)
+            && !t.holding.contains(member)
+            && let Some(l) = load.get_mut(taker.as_str())
+        {
+            *l = l.saturating_add_signed(by);
+        }
+    }
+}
+
+fn add_load_owned(
+    load: &mut BTreeMap<String, usize>,
+    takers: &BTreeMap<String, Taker>,
+    members: &BTreeMap<String, String>,
+    by: isize,
+) {
+    for (member, node) in members {
+        if takers
+            .get(node)
+            .is_some_and(|t| !t.holding.contains(member))
+            && let Some(l) = load.get_mut(node)
+        {
+            *l = l.saturating_add_signed(by);
+        }
     }
 }
 

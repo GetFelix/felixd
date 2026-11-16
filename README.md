@@ -426,8 +426,10 @@ Every claim still goes through the lease and the fence, so a bad assignment
 delays work and nothing else. Each holder records who placed its claim, the
 scheduler's assignment or first claim and why, on `wl.<id>.placed`. `ps` then
 shows each workload's assignment and placement, and a drained node's
-workloads go where the scheduler moves them. See
-[Placement](docs/design.md#placement).
+workloads go where the scheduler moves them. A group (`felixd run --group
+pair=a,b`, on every member) is placed whole by one scheduler record or, past
+`--group-bound-ms` (180 s), runs split; `ps` lists each group as waiting,
+together or split. See [Placement](docs/design.md#placement).
 
 `felixd init admission.wasm` brings up admission, itself a felixd workload.
 From then on `felixd run` publishes a request on `sys.intake` and prints
