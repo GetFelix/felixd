@@ -496,6 +496,13 @@ The count is made after the claim has landed and on every attempt, so a holder t
 before it records its verdict leaves its claim for the next holder to count. The two knobs
 `CountAfterClaim` and `NopFenced` turn that off, and the twins below show what each does.
 
+`FelixdIntensityBeforeClaim` counts the tail the holder read before it sent its marker, plus its
+own claim. TLC finds the race this allows: n1 reads the empty tail, sends its marker and crashes,
+and the marker lands, leaving one claim. n2 reads the empty tail too, and its marker is lost.
+On retry the marker lands past n1's claim, but n2 counts only the tail it read before, so it sees
+its own claim alone, no takeover, and runs. The stream before its claim held two claims, one
+takeover, over the limit of none, so it writes an output past the limit.
+
 Configurations have `LocalFaults` off, so the only needs-operator records come from the counter.
 
 | Configuration | Expected | Model | Distinct states | Time |
@@ -503,7 +510,7 @@ Configurations have `LocalFaults` off, so the only needs-operator records come f
 | `FelixdIntensity` | pass | one input, three claims, one takeover allowed in a window of 1 tick, a clock of 2 ticks, a crash, a clock fault | 21,116,027 | 3 min 51 s |
 | `FelixdIntensityZero` | pass | the same with no takeover allowed, a clock of 1 tick | 6,800,807 | 1 min 12 s |
 | `FelixdIntensityNoFence` | `NoStaleFailure` | the needs-operator record a plain append, not fenced at the tail | about 2,300,000 | 16 s |
-| `FelixdIntensityBeforeClaim` | `NoRunPastLimit` | the count made on the stream before the holder's own claim | about 83,000 | 2 s |
+| `FelixdIntensityBeforeClaim` | `NoRunPastLimit` | the count made on the tail read before the marker, plus the holder's own claim | about 195,000 at the violation | a few seconds |
 
 Distinct states and times are from TLC 1.7.4 with `-workers 8` on a build box; the `tla-intensity` job has not set CI times yet.
 
@@ -512,7 +519,11 @@ record on `.out` is reachable, and so is a claim outside the window, after an ov
 `NoRunPastLimit` is not "no output after any over claim": a later claim outside the window counts afresh.
 Abstractions: `now` is a counter the broker advances by one tick at any time up to `MaxTime`,
 and `Window` is in those ticks. Wall-clock rates are not modelled; the window only needs the
-order of records and which are within it. Degraded records (a release after a stuck workload) are not
+order of records and which are within it. `NoRunPastLimit` checks against the model's own `Over`,
+so it shows that holders reach the verdict for their claim's prefix, not that the window rules
+are right. A record time of 0 means "no append time" in the code (`crates/agent/src/intensity.rs`)
+and is not modelled, and record times that go backwards (a broker failover) are not either.
+Neither affects safety, because every node computes the same verdict from the same stream. Degraded records (a release after a stuck workload) are not
 modelled: the walk passes over them, so a stuck-after release does not count as a takeover here
 (GetFelix/felixd#234).
 

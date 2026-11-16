@@ -53,7 +53,8 @@
 (*   TrimAnyTime     off in the code: a holder trims right after the ack  *)
 (*                   of a snapshot it wrote, not at any later time.       *)
 (*   CountAfterClaim the restart count reads the stream after the holder's *)
-(*                   own claim has landed.                                 *)
+(*                   own claim has landed, not on the tail read before the *)
+(*                   marker was sent plus its own claim.                   *)
 (*   NopFenced       the needs-operator record is a publish_if at the     *)
 (*                   tail, not a plain append.                             *)
 (* Assumptions, each dropped in a twin:                                    *)
@@ -167,7 +168,7 @@ vars == <<out, snap, net, lease, ctr, spec, nd, bud, del, started, staleFail, po
 ghosts == <<del, started, staleFail, poisoned, now>>
 
 NodeInit == [pc |-> "idle", ep |-> 0, cid |-> 0, ok |-> FALSE, desync |-> FALSE,
-             up |-> TRUE, kt |-> 0, kst |-> 0, pos |-> 0, skip |-> NoSkip,
+             up |-> TRUE, kt |-> 0, kc |-> 0, kst |-> 0, pos |-> 0, skip |-> NoSkip,
              wnext |-> 0, wend |-> 0, batch |-> <<>>, want |-> 0,
              cseen |-> [present |-> FALSE, ver |-> 0], sseen |-> NoSnap,
              await |-> NoMsg, rep |-> "none", nop |-> FALSE]
@@ -320,7 +321,7 @@ TakeEpoch(n) ==
     /\ LET floor == IF EpochFloor THEN Max2(LastEpoch(out), LastEpoch(snap)) ELSE 0
            last == IF ctr.present THEN ctr.val ELSE 0
        IN nd' = [nd EXCEPT ![n].pc = "putepoch", ![n].want = Max2(last, floor) + 1,
-                           ![n].kt = Len(out),
+                           ![n].kt = Len(out), ![n].kc = Len(out),
                            ![n].cseen = [present |-> ctr.present, ver |-> ctr.ver]]
     /\ UNCHANGED <<out, snap, net, lease, ctr, spec, bud, ghosts>>
 
@@ -405,14 +406,17 @@ Probe(n) ==
 \* The restart count comes first, on the stream below the tail after the
 \* claim, so a holder that crashes before recording its verdict leaves its
 \* claim for the next one to count. A resume (Probe) counts again.
-\* Without CountAfterClaim it reads the stream as it was before the claim.
+\* Without CountAfterClaim it counts the tail read before the marker was
+\* sent, plus its own claim. A marker that is refused and retried lands past
+\* that tail, so claims that landed in between are not counted.
 ReadSnap(n) ==
     /\ nd[n].pc = "rsnap"
     /\ LET p0 == LastOf(snap, {"snap"})
            p == IF p0 > del.snap THEN p0 ELSE 0     \* a deleted record is not there to read
            below == SubSeq(out, 1, nd[n].kt)
+           own == SelectSeq(below, LAMBDA r : r.k = "claim" /\ r.e = nd[n].ep)
            view == IF CountAfterClaim THEN below
-                   ELSE SelectSeq(below, LAMBDA r : ~(r.k = "claim" /\ r.e = nd[n].ep))
+                   ELSE SubSeq(out, 1, nd[n].kc) \o own
        IN IF Over(view)
           THEN nd' = [nd EXCEPT ![n].pc = "failing", ![n].nop = TRUE]
           ELSE IF p > 0 /\ snap[p].e > nd[n].ep
