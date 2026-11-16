@@ -374,3 +374,60 @@ fn a_new_upgrade_must_start_after_what_has_run() {
     // Nothing new: the same upgrades pass whatever has run since.
     assert_eq!(previous.upgrade_conflict(&previous, Some(99)), None);
 }
+
+fn group(name: &str, members: &[&str]) -> Group {
+    Group::new(name, members.iter().map(|m| m.to_string()))
+}
+
+#[test]
+fn a_group_round_trips_and_is_absent_when_unset() {
+    let mut with = spec();
+    with.group = Some(group("pair", &["b", "a"]));
+    assert_eq!(WorkloadSpec::decode(&with.encode()), Ok(with.clone()));
+    assert_eq!(with.group.as_ref().unwrap().members, ["a", "b"]);
+    assert!(
+        !String::from_utf8(spec().encode())
+            .unwrap()
+            .contains("group")
+    );
+}
+
+#[test]
+fn a_group_is_two_or_more_sorted_members_one_of_them_the_workload() {
+    assert_eq!(validate_group("a", &group("g", &["a", "b"])), Ok(()));
+    assert_eq!(
+        validate_group("a", &group("g", &["a"])),
+        Err(InvalidGroup::Count(1))
+    );
+    let many: Vec<String> = (0..=MAX_GROUP_MEMBERS).map(|i| format!("w{i}")).collect();
+    assert_eq!(
+        validate_group("w0", &Group::new("g", many)),
+        Err(InvalidGroup::Count(MAX_GROUP_MEMBERS + 1))
+    );
+    let unsorted = Group {
+        name: "g".into(),
+        members: vec!["b".into(), "a".into()],
+    };
+    assert_eq!(validate_group("a", &unsorted), Err(InvalidGroup::Unsorted));
+    let twice = Group {
+        name: "g".into(),
+        members: vec!["a".into(), "a".into()],
+    };
+    assert_eq!(validate_group("a", &twice), Err(InvalidGroup::Unsorted));
+    assert_eq!(
+        validate_group("c", &group("g", &["a", "b"])),
+        Err(InvalidGroup::NotAMember("c".into()))
+    );
+    assert!(matches!(
+        validate_group("a", &group("bad name", &["a", "b"])),
+        Err(InvalidGroup::Name(_))
+    ));
+    assert!(matches!(
+        validate_group("a", &group("g", &["a", "b/c"])),
+        Err(InvalidGroup::Member(_))
+    ));
+    assert_eq!(
+        validate_group("a", &group("g", &["a", names::SCHEDULER])),
+        Err(InvalidGroup::System(names::SCHEDULER.into()))
+    );
+}

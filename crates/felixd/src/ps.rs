@@ -86,6 +86,23 @@ pub(crate) fn render(report: &Report) -> String {
         let _ = writeln!(out, "{line}");
     }
 
+    if !report.groups.is_empty() {
+        let _ = writeln!(out);
+        let mut rows = vec![row(&["GROUP", "STATUS", "MEMBERS"])];
+        for g in &report.groups {
+            let members: Vec<String> = g
+                .members
+                .iter()
+                .map(|(m, holder)| format!("{m}@{}", holder.as_deref().unwrap_or("-")))
+                .collect();
+            rows.push(vec![
+                g.name.clone(),
+                g.status.name().to_owned(),
+                members.join(" "),
+            ]);
+        }
+        table(&mut out, &rows);
+    }
     let _ = writeln!(out);
     let mut rows = vec![row(&["NODE", "UP", "LEASES", "MAX", "VERSION", "DRAINING"])];
     let mut pending = false;

@@ -38,11 +38,36 @@ fn no_record_for_the_epoch_is_unknown() {
 
 #[test]
 fn a_record_from_a_newer_build_is_recorded_not_unknown() {
-    let bytes = br#"{"format": 1, "value": {"epoch": 3, "placed": "first-claim", "reason": "group-bound"}}"#;
+    let bytes = br#"{"format": 1, "value": {"epoch": 3, "placed": "first-claim", "reason": "some-future-reason"}}"#;
     assert_eq!(
         placed_by([bytes.as_slice()].into_iter(), 3),
         PlacedBy::Recorded(Authority::FirstClaim {
-            reason: Reason::Other("group-bound".to_owned())
+            reason: Reason::Other("some-future-reason".to_owned())
         })
     );
+}
+
+fn held(m: &str, node: Option<&str>) -> (String, Option<String>) {
+    (m.to_owned(), node.map(str::to_owned))
+}
+
+#[test]
+fn a_group_waits_when_nothing_is_held_and_is_together_when_all_are() {
+    assert_eq!(
+        group_status(&[held("x", None), held("y", None)], None),
+        GroupStatus::Waiting
+    );
+    let all = [held("x", Some("a")), held("y", Some("b"))];
+    assert_eq!(group_status(&all, None), GroupStatus::Together);
+    let record = BTreeMap::from([("x".into(), "a".into()), ("y".into(), "b".into())]);
+    assert_eq!(group_status(&all, Some(&record)), GroupStatus::Together);
+}
+
+#[test]
+fn a_group_is_split_with_a_member_free_or_held_off_its_record() {
+    let part = [held("x", Some("a")), held("y", None)];
+    assert_eq!(group_status(&part, None), GroupStatus::Split);
+    let all = [held("x", Some("a")), held("y", Some("c"))];
+    let record = BTreeMap::from([("x".into(), "a".into()), ("y".into(), "b".into())]);
+    assert_eq!(group_status(&all, Some(&record)), GroupStatus::Split);
 }

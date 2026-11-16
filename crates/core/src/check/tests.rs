@@ -1351,7 +1351,7 @@ fn two_placement_records_for_one_epoch_are_clean() {
 fn a_placement_record_from_a_newer_build_is_clean() {
     let output = [output::encode_claim(1, "a"), output::encode_claim(2, "b")];
     let placed = [
-        br#"{"format": 1, "value": {"epoch": 1, "placed": "first-claim", "reason": "group-bound"}}"#
+        br#"{"format": 1, "value": {"epoch": 1, "placed": "first-claim", "reason": "some-future-reason"}}"#
             .to_vec(),
         br#"{"format": 1, "value": {"epoch": 2, "placed": "group", "members": ["a"]}}"#.to_vec(),
     ];

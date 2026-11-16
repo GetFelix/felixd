@@ -7,7 +7,7 @@ use anyhow::Result;
 use felixd_core::lease::Lease;
 use felixd_core::node::{self, Drain, NodeInfo};
 use felixd_core::placement::{Authority, PlacementRecord};
-use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_core::spec::{Group, WorkloadSpec, WorkloadState};
 use felixd_core::status::{self, Found, State};
 use felixd_core::{merge, names, output};
 
@@ -33,6 +33,65 @@ pub struct Report {
     pub nodes: Vec<Node>,
     /// Whether the scheduler workload is running, so assignments are in force.
     pub scheduled: bool,
+    /// Each group the running specs declare.
+    pub groups: Vec<GroupReport>,
+}
+
+/// A group of workloads placed together, by name.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GroupReport {
+    pub name: String,
+    /// Every member the group lists, with the node holding it.
+    pub members: Vec<(String, Option<String>)>,
+    pub status: GroupStatus,
+}
+
+/// Where a group stands, by the leases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupStatus {
+    /// No member is held yet.
+    Waiting,
+    /// Every member is held, each where the group's record in force places
+    /// it, if one is.
+    Together,
+    /// Some member is held and some is not, or a member is held off the
+    /// group's record: the group bound passed, or a node died.
+    Split,
+}
+
+impl GroupStatus {
+    pub fn name(self) -> &'static str {
+        match self {
+            GroupStatus::Waiting => "waiting",
+            GroupStatus::Together => "together",
+            GroupStatus::Split => "split",
+        }
+    }
+}
+
+/// The status of a group whose members are held by `holders`, against the
+/// node each member has in the group's record in force, if there is one.
+pub(crate) fn group_status(
+    members: &[(String, Option<String>)],
+    record: Option<&BTreeMap<String, String>>,
+) -> GroupStatus {
+    let held = members
+        .iter()
+        .filter(|(_, holder)| holder.is_some())
+        .count();
+    if held == 0 {
+        return GroupStatus::Waiting;
+    }
+    let off_record = record.is_some_and(|record| {
+        members
+            .iter()
+            .any(|(m, holder)| holder.is_some() && holder.as_ref() != record.get(m))
+    });
+    if held < members.len() || off_record {
+        GroupStatus::Split
+    } else {
+        GroupStatus::Together
+    }
 }
 
 #[derive(Debug)]
@@ -130,11 +189,23 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
         id == names::SCHEDULER
             && WorkloadSpec::decode(value).is_ok_and(|s| s.state == WorkloadState::Running)
     });
-    let mut placed = if scheduled {
-        assignments::read(&felix).await?.table
+    let followed = if scheduled {
+        assignments::read(&felix).await?
     } else {
-        HashMap::new()
+        assignments::Followed::default()
     };
+    let mut placed = followed.table.clone();
+    let declared: BTreeMap<String, Group> = specs
+        .iter()
+        .filter_map(|(id, value)| {
+            let spec = WorkloadSpec::decode(value).ok()?;
+            Some((
+                id.clone(),
+                spec.group
+                    .filter(|_| spec.state == WorkloadState::Running)?,
+            ))
+        })
+        .collect();
     let mut workloads = Vec::new();
     for (id, value) in specs {
         if !ids.is_empty() && !ids.contains(&id) {
@@ -195,11 +266,50 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
     for lease in leases.values() {
         node_entry(&mut nodes, &lease.owner).leases += 1;
     }
+    let groups = group_reports(&declared, &leases, &followed);
     Ok(Report {
         workloads,
         nodes: nodes.into_values().collect(),
         scheduled,
+        groups,
     })
+}
+
+/// A report for each group name whose members all declare the same group.
+/// Members that disagree on a name are not reported.
+fn group_reports(
+    declared: &BTreeMap<String, Group>,
+    leases: &HashMap<String, Lease>,
+    followed: &assignments::Followed,
+) -> Vec<GroupReport> {
+    let mut by_name: BTreeMap<&str, Option<&Group>> = BTreeMap::new();
+    for group in declared.values() {
+        by_name
+            .entry(&group.name)
+            .and_modify(|found| {
+                if *found != Some(group) {
+                    *found = None;
+                }
+            })
+            .or_insert(Some(group));
+    }
+    by_name
+        .into_values()
+        .flatten()
+        .map(|group| {
+            let members: Vec<(String, Option<String>)> = group
+                .members
+                .iter()
+                .map(|m| (m.clone(), leases.get(m).map(|l| l.owner.clone())))
+                .collect();
+            let record = followed.groups.get(&group.name).map(|g| &g.members);
+            GroupReport {
+                name: group.name.clone(),
+                status: group_status(&members, record),
+                members,
+            }
+        })
+        .collect()
 }
 
 fn node_entry<'a>(nodes: &'a mut BTreeMap<String, Node>, id: &str) -> &'a mut Node {
