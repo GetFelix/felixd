@@ -13,6 +13,7 @@ fn spec(id: &str) -> WorkloadSpec {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits::default(),
         failure: None,
         record: None,

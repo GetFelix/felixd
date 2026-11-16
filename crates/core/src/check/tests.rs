@@ -550,6 +550,7 @@ fn a_refused_new_module_never_decides_what_a_check_runs() {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits {
             fuel_per_call: fuel,
             ..Limits::default()
@@ -590,6 +591,7 @@ fn a_needs_operator_record_before_the_first_claim_is_passed_over() {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits {
             fuel_per_call: fuel,
             ..Limits::default()
@@ -629,6 +631,7 @@ fn a_degraded_record_before_the_first_claim_is_passed_over() {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Default::default(),
         failure: None,
         record: None,
@@ -979,6 +982,7 @@ fn a_check_judges_a_cut_stream_under_the_spec_its_trim_carries() {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits {
             fuel_per_call: fuel,
             ..Limits::default()
@@ -1135,6 +1139,7 @@ fn a_divergence_record_before_the_first_claim_is_passed_over() {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Default::default(),
         failure: None,
         record: None,
@@ -1202,6 +1207,7 @@ fn the_latest_spec_that_ran_decides_the_upgrades() {
         restart_intensity: None,
         upgrades,
         state: WorkloadState::Running,
+        group: None,
         limits: Limits::default(),
         failure: None,
         record: None,

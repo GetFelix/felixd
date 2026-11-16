@@ -14,6 +14,7 @@ fn spec_record(id: &str, state: WorkloadState) -> Vec<u8> {
         restart_intensity: None,
         upgrades: Vec::new(),
         state,
+        group: None,
         limits: Limits::default(),
         failure: None,
         record: None,
@@ -110,6 +111,7 @@ fn the_first_step_writes_a_table() {
         Ok(vec![Record {
             specs: 0,
             change: Change::Table {
+                groups: BTreeMap::new(),
                 assignments: BTreeMap::new()
             }
         }])
@@ -251,6 +253,7 @@ fn the_whole_table_is_written_again_by_input_time() {
         vec![Record {
             specs: 1,
             change: Change::Table {
+                groups: BTreeMap::new(),
                 assignments: BTreeMap::from([("w".into(), "a".into())])
             }
         }]
@@ -374,6 +377,7 @@ fn table(specs: u64, assignments: &[(&str, &str)]) -> Record {
     Record {
         specs,
         change: Change::Table {
+            groups: BTreeMap::new(),
             assignments: assignments
                 .iter()
                 .map(|(w, n)| (w.to_string(), n.to_string()))

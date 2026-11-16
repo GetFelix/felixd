@@ -12,6 +12,7 @@ fn spec() -> WorkloadSpec {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits {
             fuel_per_call: 1000,
             max_memory_bytes: 1 << 20,

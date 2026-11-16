@@ -779,6 +779,7 @@ pub fn running(id: &str, module: &str, inputs: Vec<String>) -> WorkloadSpec {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: felixd_core::spec::Limits::default(),
         failure: None,
         record: None,

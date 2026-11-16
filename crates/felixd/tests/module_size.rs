@@ -279,6 +279,7 @@ async fn spec_for(t: &common::TestFelix, module: &[u8]) -> WorkloadSpec {
         restart_intensity: None,
         upgrades: Vec::new(),
         state: WorkloadState::Running,
+        group: None,
         limits: Limits::default(),
         failure: None,
         record: None,

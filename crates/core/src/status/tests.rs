@@ -12,6 +12,7 @@ fn spec(state: WorkloadState, record: Option<u64>) -> WorkloadSpec {
         restart_intensity: None,
         upgrades: Vec::new(),
         state,
+        group: None,
         limits: Default::default(),
         failure: None,
         record,

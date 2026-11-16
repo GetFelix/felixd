@@ -37,7 +37,10 @@ fn table(specs: u64, pairs: &[(&str, &str)]) -> Record {
         .collect();
     Record {
         specs,
-        change: Change::Table { assignments },
+        change: Change::Table {
+            assignments,
+            groups: Default::default(),
+        },
     }
 }
 

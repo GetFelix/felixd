@@ -21,11 +21,11 @@ use felixd_core::lease::{LeaseTiming, MIN_TTL};
 use felixd_core::node::NodeInfo;
 use felixd_core::output::Abi;
 use felixd_core::placement::{
-    Assigned, AssignedTo, Assignee, Authority, FirstClaimWins, Placement, PlacementRecord,
-    Scheduled, Turn,
+    Assigned, AssignedTo, Assignee, Authority, FirstClaimWins, GroupHold, GroupPlaced, Placement,
+    PlacementRecord, Scheduled, Turn,
 };
 use felixd_core::schedule::NodeFact;
-use felixd_core::spec::{WorkloadSpec, WorkloadState};
+use felixd_core::spec::{Group, WorkloadSpec, WorkloadState};
 use felixd_core::{names, output, snapshot, status};
 use felixd_runtime::Runtime;
 use tokio::sync::futures::Notified;
@@ -108,6 +108,9 @@ pub struct AgentConfig {
     /// The longest a free workload waits for a healthy scheduler to read its
     /// spec and assign it.
     pub assignment_grace: Duration,
+    /// The longest a group member is left unclaimed for its group's
+    /// placement, from when this node saw the whole group admitted.
+    pub group_bound: Duration,
     /// How often this node appends its facts for the scheduler when they
     /// have not changed.
     pub facts_every: Duration,
@@ -273,6 +276,7 @@ pub async fn run(
             fallback: config.placement,
             bound: config.assignment_bound,
             grace: config.assignment_grace,
+            group_bound: config.group_bound,
         }),
         held: AtomicUsize::new(0),
         room: Notify::new(),
@@ -628,6 +632,7 @@ fn prune(node: &Node, tasks: &mut HashMap<String, Task>, current: &HashSet<Strin
     tasks.retain(|id, task| {
         let keep = current.contains(id);
         if !keep {
+            node.assignments.set_declared(id, None);
             tracing::info!(workload = %id, "gone while the watch was closed, stopping");
             let _ = task.stop.send(true);
         }
@@ -679,6 +684,8 @@ fn apply(
         }
         able
     });
+    node.assignments
+        .set_declared(&id, wanted.as_ref().and_then(|s| s.group.clone()));
     if let Some(task) = tasks.get(&id) {
         // A changed spec restarts the task, which resumes under it.
         if !task.handle.is_finished() && wanted.as_ref() == Some(&task.spec) {
@@ -723,7 +730,7 @@ async fn own(
             }
         }
         let Some(authority) = node
-            .wait_for_chance(&id, spec.record, &mut lease, &mut stop)
+            .wait_for_chance(&id, spec.record, spec.group.as_ref(), &mut lease, &mut stop)
             .await
         else {
             return;
@@ -1072,6 +1079,7 @@ impl Node {
         &self,
         id: &str,
         record: Option<u64>,
+        group: Option<&Group>,
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
     ) -> Option<Authority> {
@@ -1081,6 +1089,8 @@ impl Node {
         // assignment, so assignments that keep changing cannot defer it for
         // longer than the bound.
         let mut free_since: Option<tokio::time::Instant> = None;
+        // When the group of a member became complete in this node's view.
+        let mut group_since: Option<tokio::time::Instant> = None;
         loop {
             if *draining.borrow_and_update() {
                 tokio::select! {
@@ -1096,6 +1106,7 @@ impl Node {
             };
             if !wait.is_zero() {
                 free_since = None;
+                group_since = None;
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     _ = lease.changed() => continue,
@@ -1114,7 +1125,18 @@ impl Node {
             }
             assignments.mark_unchanged();
             let since = *free_since.get_or_insert_with(tokio::time::Instant::now);
-            let assigned = self.assigned(id, record, since).await;
+            // The group bound runs from the whole group admitted. While some
+            // member is not, it runs from when this member was first seen
+            // free, so a group that never completes is still released.
+            let held = group.map(|group| {
+                if self.assignments.complete(group) {
+                    group_since.get_or_insert_with(tokio::time::Instant::now);
+                } else {
+                    group_since = None;
+                }
+                group_since.unwrap_or(since).elapsed()
+            });
+            let assigned = self.assigned(id, record, group.zip(held), since).await;
             match self.placement.turn(id, &assigned, self.random()) {
                 Turn::Claim(delay, authority) => {
                     match wait_or_change(delay, lease, &mut assignments, stop).await {
@@ -1147,10 +1169,27 @@ impl Node {
         &self,
         id: &str,
         record: Option<u64>,
+        group: Option<(&Group, Duration)>,
         since: tokio::time::Instant,
     ) -> Assigned {
+        // A group member follows its group's record whatever the scheduler's
+        // health, so the group does not split when the scheduler stops.
+        let group = group.map(|(group, held)| GroupHold {
+            placed: match self.assignments.group_placed(id, group) {
+                Some(p) if p.node == self.node_id => GroupPlaced::ThisNode {
+                    assignment: p.offset,
+                    scheduler_epoch: p.epoch,
+                },
+                Some(_) => GroupPlaced::Elsewhere,
+                None => GroupPlaced::Unplaced,
+            },
+            held,
+        });
         if !self.assignments.healthy(&self.timing, now_millis()) {
-            return Assigned::NONE;
+            return Assigned {
+                group,
+                ..Assigned::NONE
+            };
         }
         let (placed, specs) = self.assignments.get(id);
         let to = match placed {
@@ -1169,6 +1208,7 @@ impl Node {
             scheduler: true,
             to,
             waited: since.elapsed(),
+            group,
         }
     }
 

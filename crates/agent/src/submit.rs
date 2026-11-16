@@ -5,8 +5,8 @@ use felix_client::ConditionalWrite;
 use felixd_core::module::ModuleInfo;
 use felixd_core::snapshot::{self, Pending};
 use felixd_core::spec::{
-    DEFAULT_SNAPSHOT_EVERY, Limits, RestartIntensity, SpecRecord, Upgrade, WorkloadSpec,
-    WorkloadState, validate_inputs,
+    DEFAULT_SNAPSHOT_EVERY, Group, Limits, RestartIntensity, SpecRecord, Upgrade, WorkloadSpec,
+    WorkloadState, validate_group, validate_inputs,
 };
 use felixd_core::{module, names};
 use felixd_runtime::Runtime;
@@ -35,6 +35,8 @@ pub struct Submission {
     /// How many takeovers in a row without progress the spec allows.
     pub restart_intensity: Option<RestartIntensity>,
     pub limits: Limits,
+    /// Workloads placed together with this one or not at all.
+    pub group: Option<Group>,
     pub replication_factor: u32,
     /// Replace the workload's module with `module` from this input on, and
     /// keep running its earlier inputs under the old one.
@@ -52,6 +54,7 @@ impl Submission {
             keep_snapshots: None,
             restart_intensity: None,
             limits: Limits::default(),
+            group: None,
             replication_factor: DEFAULT_REPLICATION_FACTOR,
             upgrade_at: None,
         }
@@ -65,6 +68,9 @@ impl Submission {
 pub async fn submit(settings: &Settings, submission: Submission) -> Result<String> {
     names::validate_id(&submission.id)?;
     validate_inputs(&submission.id, &submission.inputs)?;
+    if let Some(group) = &submission.group {
+        validate_group(&submission.id, group)?;
+    }
     if let Some(why) =
         module::size_problem(submission.module.len() as u64, module::MAX_MODULE_BYTES)
     {
@@ -132,6 +138,7 @@ pub async fn submit(settings: &Settings, submission: Submission) -> Result<Strin
         restart_intensity: submission.restart_intensity,
         upgrades,
         state: WorkloadState::Running,
+        group: submission.group,
         limits: submission.limits,
         failure: None,
         record: None,

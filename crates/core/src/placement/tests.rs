@@ -9,6 +9,7 @@ const SCHEDULED: Scheduled = Scheduled {
     fallback: POLICY,
     bound: Duration::from_secs(10),
     grace: Duration::from_secs(2),
+    group_bound: Duration::from_secs(180),
 };
 
 const THIS_NODE: AssignedTo = AssignedTo::ThisNode {
@@ -28,6 +29,7 @@ fn assigned(to: AssignedTo, waited_secs: u64) -> Assigned {
         scheduler: true,
         to,
         waited: Duration::from_secs(waited_secs),
+        group: None,
     }
 }
 
@@ -216,13 +218,13 @@ fn a_placement_record_of_another_format_is_refused() {
 #[test]
 fn a_reason_from_a_newer_build_decodes_and_is_kept() {
     let bytes =
-        br#"{"format": 1, "value": {"epoch": 4, "placed": "first-claim", "reason": "group-bound"}}"#;
+        br#"{"format": 1, "value": {"epoch": 4, "placed": "first-claim", "reason": "some-future-reason"}}"#;
     let record = PlacementRecord::decode(bytes).unwrap();
     assert_eq!(record.epoch, 4);
     assert_eq!(
         record.authority,
         Authority::FirstClaim {
-            reason: Reason::Other("group-bound".to_owned())
+            reason: Reason::Other("some-future-reason".to_owned())
         }
     );
     let again = PlacementRecord::decode(&record.encode()).unwrap();

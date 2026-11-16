@@ -367,7 +367,9 @@ async fn assignment_at(t: &TestFelix, offset: u64, id: &str) -> Option<String> {
     };
     match schedule::Record::decode(addressed.payload).ok()?.change {
         Change::Assign { workload, node } if workload == id => node,
-        Change::Table { mut assignments } => assignments.remove(id),
+        Change::Table {
+            mut assignments, ..
+        } => assignments.remove(id),
         _ => None,
     }
 }

@@ -71,6 +71,7 @@ fn config(ttl: Duration, stuck_after: Duration) -> AgentConfig {
         },
         assignment_bound: Duration::from_secs(15),
         assignment_grace: Duration::from_secs(2),
+        group_bound: Duration::from_secs(180),
         facts_every: Duration::from_secs(30),
         stuck_after,
         degraded_backoff: DEFAULT_DEGRADED_BACKOFF,

@@ -288,7 +288,10 @@ impl Assignments {
     pub(crate) fn set_declared(&self, workload: &str, group: Option<Group>) {
         let mut declared = self.declared.lock().unwrap_or_else(|e| e.into_inner());
         let before = match group {
-            Some(group) => declared.insert(workload.to_owned(), group.clone()).filter(|b| *b == group).is_some(),
+            Some(group) => declared
+                .insert(workload.to_owned(), group.clone())
+                .filter(|b| *b == group)
+                .is_some(),
             None => declared.remove(workload).is_none(),
         };
         drop(declared);

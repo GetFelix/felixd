@@ -275,14 +275,12 @@ impl Scheduler {
             other => return Err(Refused::Stream(other.to_owned())),
         }
         let takers = self.takers();
-        let changes = if wanted_changed
-            || takers != before
-            || self.groups_running() != running_before
-        {
-            self.reconcile(&takers)
-        } else {
-            Vec::new()
-        };
+        let changes =
+            if wanted_changed || takers != before || self.groups_running() != running_before {
+                self.reconcile(&takers)
+            } else {
+                Vec::new()
+            };
         let specs = self.specs;
         let record = |change| Record { specs, change };
         if tick {
@@ -475,7 +473,9 @@ impl Scheduler {
             }
             for member in &group.members {
                 if heard.holding.contains(member) {
-                    running.entry(member.clone()).or_insert_with(|| node.clone());
+                    running
+                        .entry(member.clone())
+                        .or_insert_with(|| node.clone());
                 }
             }
         }
@@ -616,7 +616,9 @@ fn add_load_owned(
     by: isize,
 ) {
     for (member, node) in members {
-        if takers.get(node).is_some_and(|t| !t.holding.contains(member))
+        if takers
+            .get(node)
+            .is_some_and(|t| !t.holding.contains(member))
             && let Some(l) = load.get_mut(node)
         {
             *l = l.saturating_add_signed(by);
