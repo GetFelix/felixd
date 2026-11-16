@@ -23,12 +23,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { module: Felixd, config: FelixdFull }
-          - { module: FelixdSpecs, config: FelixdSpecsFull }
-          - { module: FelixdMerge, config: FelixdMergeFull }
+          # traces: empty walks the default; FelixdMergeFull walks fewer because
+          # it did not finish the default within the timeout.
+          - { module: Felixd, config: FelixdFull, traces: "" }
+          - { module: FelixdSpecs, config: FelixdSpecsFull, traces: "" }
+          - { module: FelixdMerge, config: FelixdMergeFull, traces: "750000" }
     name: simulate ${{ matrix.config }}
     env:
-      TLC_SIMULATE: ${{ inputs.traces || '3000000' }}
+      TLC_SIMULATE: ${{ inputs.traces || matrix.traces || '3000000' }}
       TLC_WORKERS: "4"
     steps:
       - uses: actions/checkout@v4
