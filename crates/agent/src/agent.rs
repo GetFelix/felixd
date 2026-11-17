@@ -1402,13 +1402,16 @@ fn group_placed(
     member: &str,
     group: &Group,
 ) -> GroupPlaced {
-    match assignments.group_placed(member, group) {
+    // The record and the relist answer come from one view: from two, an
+    // old record placing the member here could pass on a newer view's
+    // answer while that view moves the member away.
+    let (placed, relisted) =
+        assignments.group_placed(member, group, node_id, |holds| standing.relisted(holds));
+    match placed {
         // Until relisted, a record placing the member here may be replaced
         // by one this view lacks, so it places nothing and the member waits
         // for the group bound at most (#256, #257).
-        Some(p) if p.node == node_id && !relisted(assignments, standing, node_id) => {
-            GroupPlaced::Unplaced
-        }
+        Some(p) if p.node == node_id && !relisted => GroupPlaced::Unplaced,
         Some(p) if p.node == node_id => GroupPlaced::ThisNode {
             assignment: p.offset,
             scheduler_epoch: p.epoch,

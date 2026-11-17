@@ -308,6 +308,9 @@ pub(crate) struct Assignments {
     /// The group each running workload's spec declares, from the
     /// `workloads` cache, so a node can tell when a whole group is admitted.
     declared: Mutex<HashMap<String, Group>>,
+    /// Replaces the view at the given later lock, as [`follow`] may.
+    #[cfg(test)]
+    swap_at_lock: Mutex<Option<(usize, Followed)>>,
 }
 
 impl Assignments {
@@ -318,6 +321,8 @@ impl Assignments {
             scheduler: watch::channel(false).0,
             holder: Mutex::new(None),
             declared: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            swap_at_lock: Mutex::new(None),
         }
     }
 
@@ -343,9 +348,23 @@ impl Assignments {
         group.members.iter().all(|m| declared.get(m) == Some(group))
     }
 
-    /// Where the `group` record in force places `member`.
-    pub(crate) fn group_placed(&self, member: &str, group: &Group) -> Option<Placed> {
-        self.lock().group_placed(member, group)
+    /// Where the `group` record in force places `member`, and, when it is
+    /// on `node`, `relisted`'s answer to whether the same view holds the
+    /// scheduler's answer to a relist nonce. Both come from one lock, since
+    /// [`follow`] can swap in a view that both moves the member and answers
+    /// the nonce (#256, #257).
+    pub(crate) fn group_placed(
+        &self,
+        member: &str,
+        group: &Group,
+        node: &str,
+        relisted: impl FnOnce(&dyn Fn(u64) -> bool) -> bool,
+    ) -> (Option<Placed>, bool) {
+        let followed = self.lock();
+        let placed = followed.group_placed(member, group);
+        let here = placed.as_ref().is_some_and(|p| p.node == node);
+        let answered = here && relisted(&|relist| followed.relisted.get(node) == Some(&relist));
+        (placed, answered)
     }
 
     pub(crate) fn set_scheduler(&self, runs: bool) {
@@ -398,7 +417,33 @@ impl Assignments {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Followed> {
-        self.followed.lock().unwrap_or_else(|e| e.into_inner())
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut followed = self.followed.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        {
+            let mut swap = self.swap_at_lock.lock().unwrap_or_else(|e| e.into_inner());
+            match swap.as_mut() {
+                Some((0, _)) => *followed = swap.take().map(|(_, view)| view).unwrap_or_default(),
+                Some((n, _)) => *n -= 1,
+                None => {}
+            }
+        }
+        followed
+    }
+
+    /// Makes the lock taken after `locks` more replace the view with `view`.
+    #[cfg(test)]
+    pub(crate) fn swap_view_at_lock(&self, locks: usize, view: Followed) {
+        *self.swap_at_lock.lock().unwrap_or_else(|e| e.into_inner()) = Some((locks, view));
+    }
+
+    /// A copy of the view, to build a test's next one from.
+    #[cfg(test)]
+    pub(crate) fn view(&self) -> Followed {
+        self.followed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn bump(&self) {

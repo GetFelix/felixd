@@ -292,6 +292,35 @@ fn a_group_member_is_placed_here_only_once_relisted_since_start_and_every_lift()
 }
 
 #[test]
+fn a_group_member_is_placed_from_one_view_of_its_record_and_relist_answer() {
+    let assignments = Assignments::new();
+    let standing = Standing::new();
+    let group = Group::new("g", ["x".to_owned(), "y".to_owned()]);
+    let record = |node: &str| felixd_core::schedule::Change::Group {
+        group: "g".into(),
+        members: [("x".into(), node.into()), ("y".into(), node.into())].into(),
+    };
+    // The view in force places x on n; n is not yet relisted.
+    assignments.fold(3, &scheduler_output(0, record("n")));
+    let relist = fact_of(&standing).relist;
+    assert_ne!(relist, 0);
+    // The next view moves x to m and answers n's nonce. `follow` swaps it
+    // in right after the first lock this decision takes.
+    let mut next = assignments.view();
+    next.fold(4, &scheduler_output(1, record("m")));
+    next.fold(5, &scheduler_output(2, answer("n", relist)));
+    assignments.swap_view_at_lock(1, next);
+    let placed = group_placed(&assignments, &standing, "n", "x", &group);
+    assert_eq!(placed, GroupPlaced::Unplaced);
+    // The new view is in force from the next decision on.
+    let _ = assignments.get("x");
+    assert_eq!(
+        group_placed(&assignments, &standing, "n", "x", &group),
+        GroupPlaced::Elsewhere
+    );
+}
+
+#[test]
 fn a_lift_takes_a_new_nonce_before_it_shows() {
     let standing = Standing::new();
     standing.set_draining(true);
