@@ -121,6 +121,7 @@ felixd_admission_expectations=(
 
 felixd_placement_expectations=(
   "FelixdPlacement pass"
+  "FelixdPlacementLease pass"
   "FelixdPlacementNoBarrier violates GroupHeld"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
@@ -176,10 +177,14 @@ for entry in "${selected[@]}"; do
   if [ -n "${TLC_SIMULATE:-}" ]; then
     mode=(-simulate "num=$TLC_SIMULATE" -depth "${TLC_DEPTH:-100}")
   fi
-  status=0
-  output="$(cd "$SPEC_DIR" && java -XX:+UseParallelGC -jar "../$JAR" -metadir "$scratch" \
+  # TLC's per-minute progress lines go to the log as it runs, so a run the
+  # job times out still shows how far it got.
+  (cd "$SPEC_DIR" && { java -XX:+UseParallelGC -jar "../$JAR" -metadir "$scratch" \
     ${mode[@]+"${mode[@]}"} -deadlock -workers "${TLC_WORKERS:-auto}" -checkpoint 0 \
-    -config "$cfg.cfg" "$MODULE.tla" 2>&1)" || status=$?
+    -config "$cfg.cfg" "$MODULE.tla" 2>&1; echo $? >"$scratch/status"; }) \
+    | tee "$scratch/tlc.log" | grep --line-buffered -E "^Progress\(" || true
+  status="$(cat "$scratch/status")"
+  output="$(cat "$scratch/tlc.log")"
   rm -rf "$scratch"
   echo "$output" | grep -E "states generated|distinct states|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
   case "$expect" in

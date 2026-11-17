@@ -573,15 +573,19 @@ not; a claim of the lease and an agent restart start it over.
 | `ReplaySame` | A new holder replaying an input produces the change first written for it. |
 | `FencedOut` | No `group` record from an earlier epoch lands after a later holder's claim. |
 
-| Configuration | Expected | Model |
-|---|---|---|
-| `FelixdPlacement` | pass | two nodes of room two, a group of two admitted one after the other, a takeover with replay, a node crash, a lease lost |
-| `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps |
-| `FelixdPlacementNoBarrier` | `GroupHeld` | the agent claims a member without looking for its record |
-| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off |
-| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member |
-| `FelixdPlacementNoFence` | `FencedOut` | a deposed holder's append not fenced |
-| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts |
+| Configuration | Expected | Model | Distinct states | Time |
+|---|---|---|---|---|
+| `FelixdPlacement` | pass | two nodes of room two, a group of two admitted one after the other, a takeover with replay, a node crash | TBD | TBD |
+| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | TBD | TBD |
+| `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | n/a | n/a |
+| `FelixdPlacementNoBarrier` | `GroupHeld` | the agent claims a member without looking for its record | TBD | TBD |
+| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | TBD | TBD |
+| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | TBD | TBD |
+| `FelixdPlacementNoFence` | `FencedOut` | a deposed holder's append not fenced | TBD | TBD |
+| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | TBD | TBD |
+
+The crash and the lost lease are separate configurations because together they did not finish
+inside the job; the `tla-placement` job checks each in its own leg, and the twins in a third.
 
 What the model leaves out: ungrouped workloads and the `assign`, grace and bound paths of `turn`;
 `table` records, which hold the same group placements as the records before them; a member's spec
