@@ -2221,22 +2221,32 @@ name=a,b` and admission both refuse a group that lists fewer than two
 members, lists the workload being submitted nowhere, or names a system
 workload.
 
-The default is longer than the scheduler's view of a dead node (90 s, see
-[Placement](#placement)) plus a placement round, so that when a member's node
-dies the scheduler can see it and place the member again before the bound
-passes. The cost is plain: a node death in a group stops that member for up
-to the bound, and if no `group` record has placed it again by then, the group
-runs split from then on.
-
 A group is split when its members are not all on the nodes of one `group`
 record. While members run the scheduler writes a `group` record for the group
 only if it keeps every running member on its node, which is how a member
-freed by a node death is placed again. No assignment moves a running member,
-so a split group stays split. Its `group-bound` members' placement records
+freed elsewhere is placed again. No assignment moves a running member, so a
+split group stays split. Its `group-bound` members' placement records
 say so, and `felixd ps` shows the group as `split` with each member's node.
 The scheduler counts the members as load like any first-claim placement, and
 writes a `group` record for a split group again only once no member runs, so
 it joins up once every member has stopped and been freed.
+
+For a group, a member counts as running on a node until that node's hold on
+it is known to be gone, not merely until the node goes silent. Silence is
+measured on `sys.facts`, while the lease is renewed on its own; a live node
+whose facts are slow or paused still holds its members, and may have claimed
+one under the record after its last fact landed. So a silent node counts as
+running what its last fact says it holds and what the group's record places
+on it. That hold ends when the node's own fact drops the member, a node that
+is not silent reports holding it (the lease is exclusive, so the old one is
+gone), or the node is forgotten after thirty intervals. Moving the group
+sooner would let the new node claim the free members while the old holder
+keeps its own, which runs the group split before the bound (#247).
+
+The cost is on a node death. A member on a dead node is not placed again
+until the node is forgotten (15 min at the default `--facts-every-ms`), which
+is longer than `--group-bound-ms`. So the member waits up to the bound and is
+then claimed `group-bound`, and the group runs split until no member runs.
 
 A race the agents handle the same way: a member is claimed `group-bound`, and
 then a `group` record lands. The other members are claimed as `assigned` to

@@ -583,9 +583,76 @@ fn a_member_freed_by_a_node_death_is_placed_again_beside_the_ones_still_running(
     f.run_in(2, "y", &g);
     f.fact(3, holding("a", &["x"]));
     f.fact(4, holding("b", &["y"]));
-    // b goes silent: y is free, x keeps running on a.
-    let out = f.fact(7 * SECOND, holding("a", &["x"]));
+    // b goes silent, which does not end its lease: y stays put.
+    assert_eq!(f.fact(7 * SECOND, holding("a", &["x"])), vec![]);
+    // b is forgotten: y is free, x keeps running on a.
+    let out = f.fact(61 * SECOND, holding("a", &["x"]));
     assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
+}
+
+#[test]
+fn a_silent_node_that_comes_back_without_the_member_frees_it() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    f.fact(3, holding("a", &["x"]));
+    f.fact(4, holding("b", &["y"]));
+    assert_eq!(f.fact(7 * SECOND, holding("a", &["x"])), vec![]);
+    // b speaks again and holds nothing, but is draining.
+    let draining = NodeFact {
+        draining: true,
+        ..fact("b")
+    };
+    let out = f.fact(7 * SECOND + 1, draining);
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
+}
+
+/// The group record of #247: both members on a, then b joins.
+fn both_on_a() -> Feed {
+    let mut f = Feed::hearing(&["a"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    assert_eq!(
+        f.run_in(2, "y", &g),
+        vec![f.group("g", &[("x", "a"), ("y", "a")])]
+    );
+    assert_eq!(f.fact(3, fact("b")), vec![]);
+    f
+}
+
+#[test]
+fn a_group_is_not_moved_off_a_silent_node_that_holds_a_member() {
+    let mut f = both_on_a();
+    // a claims x and says so, then goes quiet while b keeps writing.
+    f.fact(4, holding("a", &["x"]));
+    assert_eq!(f.fact(7 * SECOND, fact("b")), vec![]);
+    assert_eq!(f.s.groups()["g"]["y"], "a");
+}
+
+#[test]
+fn a_group_is_not_moved_off_a_silent_node_whose_claim_never_reached_a_fact() {
+    let mut f = both_on_a();
+    // a may have claimed x under the record after its last fact.
+    f.fact(4, fact("a"));
+    assert_eq!(f.fact(7 * SECOND, fact("b")), vec![]);
+    assert_eq!(f.s.groups()["g"]["x"], "a");
+    // Once a is forgotten its leases are long gone, and the group moves whole.
+    let out = f.fact(61 * SECOND, fact("b"));
+    assert_eq!(out, vec![f.group("g", &[("x", "b"), ("y", "b")])]);
+}
+
+#[test]
+fn a_node_not_silent_reporting_a_member_ends_a_silent_hold() {
+    let mut f = both_on_a();
+    f.fact(4, holding("a", &["x"]));
+    assert_eq!(f.fact(7 * SECOND, fact("b")), vec![]);
+    // b runs x by first claim: a's lease on it is gone. x runs off the
+    // record, so the group is split and left alone.
+    assert_eq!(f.fact(7 * SECOND + 1, holding("b", &["x"])), vec![]);
+    // x stops on b and a is still silent: y may still run on a.
+    assert_eq!(f.fact(7 * SECOND + 2, fact("b")), vec![]);
+    assert_eq!(f.s.groups()["g"]["y"], "a");
 }
 
 #[test]
@@ -621,8 +688,10 @@ fn a_split_group_is_left_alone_until_no_member_runs() {
     let out = f.fact(7 * SECOND, holding("c", &["x"]));
     assert_eq!(out, vec![]);
     assert_eq!(f.s.groups()["g"]["y"], "b");
-    // x stops running: the group is placed whole again.
-    let out = f.fact(7 * SECOND + 1, fact("c"));
+    // x stops running, but silent b may still hold y.
+    assert_eq!(f.fact(7 * SECOND + 1, fact("c")), vec![]);
+    // b is forgotten: no member runs, and the group is placed whole again.
+    let out = f.fact(61 * SECOND, fact("c"));
     assert_eq!(out.len(), 1);
     assert!(matches!(&out[0].change, Change::Group { members, .. } if members.len() == 2));
 }

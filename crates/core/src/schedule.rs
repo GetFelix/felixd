@@ -335,15 +335,19 @@ impl Scheduler {
         });
     }
 
+    /// Whether `heard` is past [`SILENT_INTERVALS`] of its interval, by
+    /// `sys.facts` time.
+    fn silent(&self, heard: &Heard) -> bool {
+        self.facts_micros.saturating_sub(heard.at_micros)
+            > Self::after(heard.every_ms, SILENT_INTERVALS)
+    }
+
     /// The nodes that take work now: heard from within [`SILENT_INTERVALS`] of
     /// their interval, by `sys.facts` time, and neither draining nor blocked.
     fn takers(&self) -> BTreeMap<String, Taker> {
         self.nodes
             .iter()
-            .filter(|(_, h)| {
-                let silent = Self::after(h.every_ms, SILENT_INTERVALS);
-                !h.draining && !h.blocked && self.facts_micros.saturating_sub(h.at_micros) <= silent
-            })
+            .filter(|(_, h)| !h.draining && !h.blocked && !self.silent(h))
             .map(|(node, h)| {
                 let taker = Taker {
                     max_workloads: h.max_workloads,
@@ -462,24 +466,43 @@ impl Scheduler {
             .collect()
     }
 
-    /// The node each member of `group` runs on, by the facts of nodes not
-    /// silent, draining or not. The lowest node id wins if two say so.
+    /// The node each member of `group` may run on. A node not silent runs
+    /// what its latest fact says. A silent node may still hold what its last
+    /// fact says and what the group's record places on it, since silence
+    /// does not end a lease and its claims may not have reached a fact;
+    /// moving the group off such a member would split it (#247). That hold
+    /// ends when the node's own fact drops it, a node not silent reports the
+    /// member, or the node is forgotten. A node not silent wins, then the
+    /// lowest id.
     fn running(&self, group: &Group) -> BTreeMap<String, String> {
-        let mut running = BTreeMap::new();
+        let mut running: BTreeMap<String, (bool, String)> = BTreeMap::new();
         for (node, heard) in &self.nodes {
-            let silent = Self::after(heard.every_ms, SILENT_INTERVALS);
-            if self.facts_micros.saturating_sub(heard.at_micros) > silent {
-                continue;
-            }
-            for member in &group.members {
-                if heard.holding.contains(member) {
-                    running
-                        .entry(member.clone())
-                        .or_insert_with(|| node.clone());
+            let silent = self.silent(heard);
+            for member in group.members.iter().filter(|m| heard.holding.contains(*m)) {
+                // Nodes come in id order, so only a silent holder is replaced.
+                let best = running
+                    .entry(member.clone())
+                    .or_insert_with(|| (silent, node.clone()));
+                if best.0 && !silent {
+                    *best = (false, node.clone());
                 }
             }
         }
+        let record = self
+            .groups
+            .get(&group.name)
+            .filter(|r| group.members.iter().eq(r.keys()));
+        for (member, node) in record.into_iter().flatten() {
+            if self.nodes.get(node).is_some_and(|h| self.silent(h)) {
+                running
+                    .entry(member.clone())
+                    .or_insert_with(|| (true, node.clone()));
+            }
+        }
         running
+            .into_iter()
+            .map(|(member, (_, node))| (member, node))
+            .collect()
     }
 
     /// Where the members of every complete group run, so a member stopping
