@@ -596,14 +596,14 @@ did, would make `GroupTogether` hold by construction or say nothing.
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
 | `FelixdPlacement` | pass (named only) | two nodes of room two, a group of two, a takeover with replay, a node crash | over 67,000,000 | over 30 min |
-| `FelixdPlacementCrashN1E1Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, before the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN1E1Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, after the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN1E2Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, before the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN1E2Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, after the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN2E1Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, before the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN2E1Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, after the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN2E2Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, before the first group record, or no node crashes | TBD | TBD |
-| `FelixdPlacementCrashN2E2Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, after the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN1E1Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, before the first group record, or no node crashes | 29,944,984 | 14 min 13 s |
+| `FelixdPlacementCrashN1E1Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, after the first group record, or no node crashes | 27,671,984 | 9 min 12 s |
+| `FelixdPlacementCrashN1E2Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, before the first group record, or no node crashes | 11,237,612 | 5 min 25 s |
+| `FelixdPlacementCrashN1E2Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, after the first group record, or no node crashes | 25,655,664 | 12 min 32 s |
+| `FelixdPlacementCrashN2E1Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, before the first group record, or no node crashes | 29,944,984 | 8 min 41 s |
+| `FelixdPlacementCrashN2E1Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, after the first group record, or no node crashes | 27,671,984 | 8 min 36 s |
+| `FelixdPlacementCrashN2E2Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, before the first group record, or no node crashes | 11,237,612 | 5 min 18 s |
+| `FelixdPlacementCrashN2E2Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, after the first group record, or no node crashes | 25,655,664 | 12 min 19 s |
 | `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 26,473,728 | 9 min 07 s |
 | `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | 21,504,874 | 6 min 05 s |
 | `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
