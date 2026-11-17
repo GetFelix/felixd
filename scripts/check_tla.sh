@@ -123,7 +123,11 @@ felixd_placement_expectations=(
   "FelixdPlacement pass"
   "FelixdPlacementLease pass"
   "FelixdPlacementCrashLease pass"
+  "FelixdPlacementSilent pass"
   "FelixdPlacementNoBarrier violates GroupTogether"
+  # GroupTogetherFresh leaves out the members the known splits mark; this
+  # shows it still finds a split from another cause.
+  "FelixdPlacementNoBarrierFresh violates GroupTogetherFresh"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
   "FelixdPlacementNoFence violates StaleNeverApplied"
@@ -136,7 +140,7 @@ felixd_placement_expectations=(
 )
 # Checked only when named, as the nightly walks them: too large for every state.
 felixd_placement_named=(
-  "FelixdPlacementFull violates GroupTogether"
+  "FelixdPlacementFull pass"
 )
 
 MODULE="${TLA_MODULE:-Felixd}"
@@ -208,7 +212,8 @@ for entry in "${selected[@]}"; do
       ;;
     "violates "*)
       invariant="${expect#violates }"
-      if ! grep -q "Invariant $invariant is violated" <<<"$output"; then
+      # The exact name: GroupTogether must not match GroupTogetherFresh.
+      if ! grep -qE "Invariant ${invariant} is violated\." <<<"$output"; then
         echo "   FAIL: expected TLC to violate $invariant"
         echo "$output" | tail -60
         failed=1

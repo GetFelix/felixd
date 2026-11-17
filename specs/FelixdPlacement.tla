@@ -58,11 +58,15 @@ VARIABLES
     epoch, up, stale, out,                \* holder, a paused deposed holder, `out`
     lease, early, nup, view, since, gsince,\* agents
     nodeCrashes, expires,
-    applied                               \* history: records agents claimed on
+    applied,                              \* history: records agents claimed on
+    lagged, silentHeld, judged            \* ghosts for the two known splits
 
 vars == <<inputs, admitted, st, pos, written, hist, epoch, up, stale, out,
           lease, early, nup, view, since, gsince, nodeCrashes, expires,
-          applied>>
+          applied, lagged, silentHeld, judged>>
+
+\* The ghosts only Claim, Lapse and NodeCrash change.
+ghosts == <<lagged, silentHeld, judged>>
 
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
@@ -161,14 +165,14 @@ SchedStep ==
     /\ st' = StepIn(st, inputs[pos + 1]).st
     /\ pos' = pos + 1
     /\ UNCHANGED <<inputs, admitted, epoch, up, stale, lease, early, nup, view, since, gsince,
-                   nodeCrashes, expires, applied>>
+                   nodeCrashes, expires, applied, ghosts>>
 
 SchedCrash ==
     /\ up /\ epoch < MaxEpoch
     /\ up' = FALSE
     /\ UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, stale, out,
                    lease, early, nup, view, since, gsince, nodeCrashes, expires,
-                   applied>>
+                   applied, ghosts>>
 
 \* The holder's lease expired: it crashed, or it is paused and keeps its
 \* next output to append later. The new holder claims `out` and restores the
@@ -186,7 +190,7 @@ SchedTakeover ==
     /\ up' = TRUE
     /\ out' = Append(out, ClaimRec(epoch + 1))
     /\ UNCHANGED <<inputs, admitted, written, hist, lease, early, nup, view, since, gsince,
-                   nodeCrashes, expires, applied>>
+                   nodeCrashes, expires, applied, ghosts>>
 
 \* The deposed holder's append: the fence refuses it behind a later claim.
 StaleWrite ==
@@ -196,7 +200,7 @@ StaleWrite ==
     /\ stale' = NoStale
     /\ UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, up,
                    lease, early, nup, view, since, gsince, nodeCrashes, expires,
-                   applied>>
+                   applied, ghosts>>
 
 (***************************************************************************)
 (* Inputs: admission and node facts.                                       *)
@@ -211,18 +215,21 @@ Admit(m) ==
     /\ m \notin admitted /\ Len(inputs) < MaxIn
     /\ admitted' = admitted \cup {m}
     /\ inputs' = Append(inputs, [k |-> "spec", m |-> m])
-    /\ InputUnchanged
+    /\ InputUnchanged /\ UNCHANGED ghosts
 
 Fact(n) ==
     /\ nup[n] /\ Len(inputs) < MaxIn
     /\ inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n)])
-    /\ UNCHANGED admitted /\ InputUnchanged
+    /\ UNCHANGED <<admitted, ghosts>> /\ InputUnchanged
 
 Lapse(n) ==
     /\ LapseLive \/ ~nup[n]
     /\ Len(inputs) < MaxIn
     /\ inputs' = Append(inputs, [k |-> "lapse", n |-> n])
-    /\ UNCHANGED admitted /\ InputUnchanged
+    \* Ghosts for #247: a node judged silent while up, and what it holds.
+    /\ judged' = IF nup[n] THEN [judged EXCEPT ![n] = TRUE] ELSE judged
+    /\ silentHeld' = IF nup[n] THEN [m \in Members |-> silentHeld[m] \/ lease[m] = n] ELSE silentHeld
+    /\ UNCHANGED <<admitted, lagged>> /\ InputUnchanged
 
 (***************************************************************************)
 (* Agents: Followed::fold and group_placement, wait_for_chance and turn.  *)
@@ -246,7 +253,7 @@ Read(n) ==
     /\ nup[n] /\ view[n] < Len(out)
     /\ view' = [view EXCEPT ![n] = @ + 1]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, since, gsince, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, since, gsince, nodeCrashes, expires, applied, ghosts>>
 
 \* One of the node's own steps for an admitted member. A clock starts only
 \* while the member is free, then runs until the node sees it held.
@@ -258,7 +265,7 @@ Tick(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = IF @ < Bound THEN @ + 1 ELSE @]
     /\ gsince' = [gsince EXCEPT ![n][m] = IF admitted = Members /\ @ < Bound THEN @ + 1 ELSE @]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, view, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, view, nodeCrashes, expires, applied, ghosts>>
 
 \* The node's lease watch shows the member held with time left, and
 \* wait_for_chance starts its clocks over. A watch may skip from one free
@@ -269,7 +276,7 @@ SeeHeld(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, view, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, view, nodeCrashes, expires, applied, ghosts>>
 
 Claim(n, m) ==
     /\ nup[n] /\ lease[m] = None /\ m \in admitted
@@ -280,11 +287,15 @@ Claim(n, m) ==
     /\ lease' = [lease EXCEPT ![m] = n]
     /\ early' = [early EXCEPT ![m] = Held(n, m) < Bound]
     /\ applied' = IF PlacesHere(view[n], m, n) THEN applied \cup {InForce(view[n])} ELSE applied
+    \* Ghosts for the known splits: claimed under a record no longer in force
+    \* (#248), or by a node judged silent while up (#247).
+    /\ lagged' = [lagged EXCEPT ![m] = InForce(view[n]) # InForce(Len(out))]
+    /\ silentHeld' = [silentHeld EXCEPT ![m] = judged[n]]
     \* The claimer waits afresh once it lets the member go.
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<nup, view, nodeCrashes, expires>>
+    /\ UNCHANGED <<nup, view, nodeCrashes, expires, judged>>
 
 \* A lease lapses: its holder is down, or lost it while alive and stops.
 Expire(m) ==
@@ -293,14 +304,16 @@ Expire(m) ==
     /\ expires' = IF nup[lease[m]] THEN expires + 1 ELSE expires
     /\ lease' = [lease EXCEPT ![m] = None]
     /\ AgentUnchanged
-    /\ UNCHANGED <<early, nup, view, since, gsince, nodeCrashes, applied>>
+    /\ UNCHANGED <<early, nup, view, since, gsince, nodeCrashes, applied, ghosts>>
 
 NodeCrash(n) ==
     /\ nup[n] /\ nodeCrashes < MaxNodeCrash
     /\ nup' = [nup EXCEPT ![n] = FALSE]
     /\ nodeCrashes' = nodeCrashes + 1
+    \* Down, it is judged silent rightly: a restart starts afresh.
+    /\ judged' = [judged EXCEPT ![n] = FALSE]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, view, since, gsince, expires, applied>>
+    /\ UNCHANGED <<lease, early, view, since, gsince, expires, applied, lagged, silentHeld>>
 
 \* A restarted agent reads `out` again and its clocks start over.
 NodeRestart(n) ==
@@ -310,7 +323,7 @@ NodeRestart(n) ==
     /\ since' = [since EXCEPT ![n] = [m \in Members |-> 0]]
     /\ gsince' = [gsince EXCEPT ![n] = [m \in Members |-> 0]]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nodeCrashes, expires, applied, ghosts>>
 
 Init ==
     /\ inputs = [i \in 1..Cardinality(InitAdmitted) |-> [k |-> "spec", m |-> SeqOf(InitAdmitted)[i]]]
@@ -325,6 +338,9 @@ Init ==
     /\ gsince = [n \in Nodes |-> [m \in Members |-> 0]]
     /\ nodeCrashes = 0 /\ expires = 0
     /\ applied = {}
+    /\ lagged = [m \in Members |-> FALSE]
+    /\ silentHeld = [m \in Members |-> FALSE]
+    /\ judged = [n \in Nodes |-> FALSE]
 
 Next ==
     \/ SchedStep \/ SchedCrash \/ SchedTakeover \/ StaleWrite
@@ -347,13 +363,22 @@ GroupWhole ==
 \* is early: its claimer's clock had not reached the bound.
 EarlyRunning == {m \in Members : lease[m] # None /\ nup[lease[m]] /\ early[m]}
 
-\* No group runs split before the bound: one whole group record places every
-\* member that runs and was claimed early on the node that runs it.
-GroupTogether ==
-    EarlyRunning # {} =>
+\* One whole group record places every member of S on the node that holds it.
+TogetherOn(S) ==
+    S # {} =>
         \E j \in 1..Len(out) :
             /\ out[j].k = "group" /\ DOMAIN out[j].map = Members
-            /\ \A m \in EarlyRunning : out[j].map[m] = lease[m]
+            /\ \A m \in S : out[j].map[m] = lease[m]
+
+\* No group runs split before the bound. It reads `early`, the claimer's
+\* clock at claim time: a clock that never reached the bound would make it
+\* hold by construction.
+GroupTogether == TogetherOn(EarlyRunning)
+
+\* GroupTogether for the members neither known split (#247, #248) marks, so
+\* a new way to split is still found where those splits can happen.
+GroupTogetherFresh ==
+    TogetherOn({m \in EarlyRunning : ~lagged[m] /\ ~silentHeld[m]})
 
 \* What `sys.facts` say after the first p inputs: each node's holdings and
 \* which nodes are not silent.
