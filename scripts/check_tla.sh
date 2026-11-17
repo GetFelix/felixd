@@ -131,6 +131,8 @@ felixd_placement_expectations=(
   # A known gap, felixd #247: a live holder judged silent keeps its member
   # while the rest of the group moves.
   "FelixdPlacementSilentHolder violates GroupTogether"
+  # felixd #248: a restarted agent claims on a record its reader has passed.
+  "FelixdPlacementRestartLag violates GroupTogether"
 )
 # Checked only when named, as the nightly walks them: too large for every state.
 felixd_placement_named=(
