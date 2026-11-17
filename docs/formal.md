@@ -614,10 +614,10 @@ did, would make `GroupTogether` hold by construction or say nothing.
 | `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
 | `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | 5,135,336 | 1 min 54 s |
 | `FelixdPlacementUndrain` | pass | a drain and its lift with room for six facts (the two admitted ones, the draining fact, the fact that lifts it, a claim after the fold and the fact that relists the node), the undrained node waiting until the scheduler has folded a fact of it that is not draining and its view holds every record written up to that fold; timestamps strictly increasing | 51,343,136 | 28 min 15 s |
-| `FelixdPlacementUndrainN1Unplaced` | pass | `FelixdPlacementUndrain` where node 1 is drained before the first group record | TBD | TBD |
-| `FelixdPlacementUndrainN1Placed` | pass | `FelixdPlacementUndrain` where node 1 is drained after the first group record | TBD | TBD |
-| `FelixdPlacementUndrainN2Unplaced` | pass | `FelixdPlacementUndrain` where node 2 is drained before the first group record | TBD | TBD |
-| `FelixdPlacementUndrainN2Placed` | pass | `FelixdPlacementUndrain` where node 2 is drained after the first group record | TBD | TBD |
+| `FelixdPlacementUndrainN1Unplaced` | pass | `FelixdPlacementUndrain` where node 1 is drained before the first group record, or no node drains | 18,355,696 | 10 min 34 s |
+| `FelixdPlacementUndrainN1Placed` | pass | `FelixdPlacementUndrain` where node 1 is drained after the first group record, or no node drains | 19,962,832 | 10 min 42 s |
+| `FelixdPlacementUndrainN2Unplaced` | pass | `FelixdPlacementUndrain` where node 2 is drained before the first group record, or no node drains | 18,355,696 | 7 min 11 s |
+| `FelixdPlacementUndrainN2Placed` | pass | `FelixdPlacementUndrain` where node 2 is drained after the first group record, or no node drains | 19,962,832 | 8 min 8 s |
 | `FelixdPlacementStampsN1Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes before the first group record, or no node crashes | 32,200,960 | 11 min 06 s |
 | `FelixdPlacementStampsN1Placed` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes after the first group record, or no node crashes | 31,351,946 | 12 min 56 s |
 | `FelixdPlacementStampsN2Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 2 crashes before the first group record, or no node crashes | 32,200,960 | 12 min 41 s |
