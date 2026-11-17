@@ -133,6 +133,8 @@ felixd_placement_expectations=(
   "FelixdPlacementCrashLease pass"
   "FelixdPlacementSilentHolder pass"
   "FelixdPlacementRestartLag pass"
+  "FelixdPlacementUndrain pass"
+  "FelixdPlacementStamps pass"
   "FelixdPlacementNoBarrier violates GroupTogether"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
@@ -144,6 +146,9 @@ felixd_placement_expectations=(
   # A known gap, felixd #251: a forgotten node restarts and claims on a
   # record that still names it while the scheduler moves the group.
   "FelixdPlacementForgetRestart violates GroupTogether"
+  # A known gap, felixd #256: an undrained node claims on its view from
+  # before the drain while the group moved.
+  "FelixdPlacementUndrainStale violates GroupTogether"
 )
 # Checked only when named: FelixdPlacementFull is too large for every state
 # and the nightly walks it; FelixdPlacement is the union of the splits above.

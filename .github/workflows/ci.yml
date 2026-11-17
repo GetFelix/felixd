@@ -220,7 +220,9 @@ jobs:
           - { name: crash-lease, configs: FelixdPlacementCrashLease }
           - { name: silent-holder, configs: FelixdPlacementSilentHolder }
           - { name: restart-lag, configs: FelixdPlacementRestartLag }
-          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart" }
+          - { name: undrain, configs: FelixdPlacementUndrain }
+          - { name: stamps, configs: FelixdPlacementStamps }
+          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementUndrainStale" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

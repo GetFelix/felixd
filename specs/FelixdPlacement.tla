@@ -38,7 +38,8 @@
 (* ForgetRace lets a forgotten node restart while the record in force    *)
 (* may still name it: before its forget is folded, or after a forget     *)
 (* that could not move the group. The time-only release of felixd #251, *)
-(* pinned by its own config.                                              *)
+(* pinned by its own config. UndrainRace lets an undrained node claim on  *)
+(* the view it had before its drain (felixd #256), pinned the same way.   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -60,6 +61,9 @@ CONSTANTS
     ForgetRace,   \* whether it may restart before the scheduler folds that
     Blocking,     \* whether a fact may say its node is blocked
     MaxDrain,     \* drain marks set
+    Undrain,      \* whether a drain mark may be lifted (`felixd undrain`)
+    UndrainRace,  \* whether an undrained node acts on its view from before the drain
+    Stamps,       \* broker timestamps a fact may carry; {} for strictly increasing ones
     Barrier, SplitGuard, OneRecord, Fence, FactTakers, RecordHold, TailGate
 
 Nodes == 1..N
@@ -92,7 +96,7 @@ Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 (* The scheduler, as Scheduler::step and place_groups.                    *)
 (***************************************************************************)
 \* `known` is the scheduler's `nodes`: heard from and not forgotten. `at` is
-\* the input that carried a node's last fact, standing in for its time.
+\* the broker timestamp of a node's last fact.
 SInit == [heard |-> [n \in Nodes |-> {}], at |-> [n \in Nodes |-> 0], known |-> {},
           live |-> {}, blocked |-> {}, draining |-> {}, declared |-> {}, groups |-> NoMap]
 
@@ -105,12 +109,13 @@ Takers(s) == [n \in Live(s) |-> s.heard[n]]
 Complete(s) == s.declared = Members
 
 \* running(): where a known node's last fact holds a member, silent or not,
-\* the newest fact winning. Then, with RecordHold, a member the record in
+\* the newest fact winning and a tie going to the lowest id. Then, with RecordHold, a member the record in
 \* force places on a known node that is silent or blocked: it may land a
 \* claim no fact shows. A taker, or a draining node not silent, releases it.
 Running(s) ==
     LET on(m) == {n \in s.known : m \in s.heard[n]}
-        newest(m) == CHOOSE n \in on(m) : \A o \in on(m) : s.at[o] <= s.at[n]
+        newest(m) == CHOOSE n \in on(m) :
+                        \A o \in on(m) : s.at[o] < s.at[n] \/ (s.at[o] = s.at[n] /\ n <= o)
         held(m) == /\ RecordHold /\ s.groups # NoMap
                    /\ s.groups[m] \in s.known
                    /\ s.groups[m] \notin s.live \/ s.groups[m] \in s.blocked
@@ -169,7 +174,8 @@ ForgetIn(s, g) ==
 \* Folds input p, which is x.
 StepIn(s, x, p) ==
     LET s1 == CASE x.k = "spec"  -> [s EXCEPT !.declared = @ \cup {x.m}]
-                [] x.k = "fact"  -> ForgetIn([s EXCEPT !.heard[x.n] = x.hold, !.at[x.n] = p,
+                [] x.k = "fact"  -> ForgetIn([s EXCEPT !.heard[x.n] = x.hold,
+                                       !.at[x.n] = IF Stamps = {} THEN p ELSE x.ts,
                                        !.known = @ \cup {x.n}, !.live = @ \cup {x.n},
                                        !.blocked = IF x.blocked THEN @ \cup {x.n} ELSE @ \ {x.n},
                                        !.draining = IF x.draining THEN @ \cup {x.n} ELSE @ \ {x.n}],
@@ -256,12 +262,16 @@ Admit(m) ==
 \* drops, so with Claim one step a draining fact lists every lease held.
 \* `gone` is a node the fold forgets after FORGET_INTERVALS of silence
 \* (schedule.rs forget_silent): only one that is down, so forgetting a live
-\* node whose facts fail is not modeled.
+\* node whose facts fail is not modeled. `ts` is the broker's timestamp,
+\* which may tie (a broker without timestamps gives 0) or step back. It
+\* is compared only between facts holding one member, so a fact holding
+\* nothing takes the least.
 Fact(n) ==
     /\ nup[n] /\ Len(inputs) < MaxIn
     /\ \E b \in IF Blocking THEN BOOLEAN ELSE {FALSE},
-          g \in {None} \cup (IF ForgetDown THEN {o \in Nodes \ {n} : ~nup[o]} ELSE {}) :
-        inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n),
+          g \in {None} \cup (IF ForgetDown THEN {o \in Nodes \ {n} : ~nup[o]} ELSE {}),
+          t \in IF Stamps = {} \/ Holding(n) = {} THEN {0} ELSE Stamps :
+        inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n), ts |-> t,
                                   blocked |-> b, draining |-> marked[n], gone |-> g])
     /\ UNCHANGED admitted /\ InputUnchanged
 
@@ -362,6 +372,19 @@ Drain(n) ==
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, since, gsince, view, rd, tgt, nodeCrashes, expires, applied>>
 
+\* The operator lifts the mark (drain::lift) and wait_for_chance goes on
+\* with the view it has. Without UndrainRace the node reads `out` afresh
+\* first, the gap felixd #256 leaves open.
+Lift(n) ==
+    /\ Undrain /\ marked[n]
+    /\ marked' = [marked EXCEPT ![n] = FALSE]
+    /\ IF UndrainRace THEN UNCHANGED <<view, rd, tgt>>
+       ELSE /\ view' = [view EXCEPT ![n] = 0]
+            /\ rd' = [rd EXCEPT ![n] = 0]
+            /\ tgt' = [tgt EXCEPT ![n] = 0]
+    /\ AgentUnchanged
+    /\ UNCHANGED <<lease, early, nup, since, gsince, drains, nodeCrashes, expires, applied>>
+
 \* A drained node's task stops and releases its lease.
 Release(m) ==
     /\ lease[m] # None /\ nup[lease[m]] /\ marked[lease[m]]
@@ -388,14 +411,26 @@ Forgotten(n) ==
         /\ Forgets(j, n)
         /\ \A l \in (j + 1)..written : ~(inputs[l].k = "fact" /\ inputs[l].n = n)
 
+\* A group record naming n is on `out`, or may land before the scheduler
+\* folds a pending forget of n: a deposed holder's, or one the scheduler
+\* writes while n is a taker, from the state it last wrote at or a fact of n
+\* it has not folded yet.
+MayName(n) ==
+    LET ws == IF written = 0 THEN SInit ELSE hist[written]
+    IN \/ \E m \in DOMAIN LastGroup : LastGroup[m] = n
+       \/ stale # NoStale /\ \E m \in DOMAIN stale.map : stale.map[m] = n
+       \/ n \in ws.live
+       \/ \E j \in (written + 1)..Len(inputs) : inputs[j].k = "fact" /\ inputs[j].n = n
+
 \* A restarted agent reads `out` again and its clocks start over. Without
-\* ForgetRace it waits until every forget of it has been folded and, if it
-\* is forgotten, the last group record no longer places a member on it.
-\* Coming back while still named is the time-only release, felixd #251.
+\* ForgetRace it does not come back while a forget of it is pending and a
+\* record may name it, nor once forgotten while the last group record
+\* places a member on it. Coming back while still named is the time-only
+\* release, felixd #251.
 NodeRestart(n) ==
     /\ ~nup[n] /\ Holding(n) = {}
     /\ \/ ForgetRace
-       \/ /\ \A j \in (written + 1)..Len(inputs) : ~Forgets(j, n)
+       \/ /\ (\E j \in (written + 1)..Len(inputs) : Forgets(j, n)) => ~MayName(n)
           /\ Forgotten(n) => \A m \in DOMAIN LastGroup : LastGroup[m] # n
     /\ nup' = [nup EXCEPT ![n] = TRUE]
     /\ view' = [view EXCEPT ![n] = 0]
@@ -427,7 +462,7 @@ Init ==
 Next ==
     \/ SchedStep \/ SchedCrash \/ SchedTakeover \/ StaleWrite
     \/ \E m \in Members : Admit(m) \/ Expire(m) \/ Release(m)
-    \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Read(n) \/ Drain(n)
+    \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Read(n) \/ Drain(n) \/ Lift(n)
                         \/ NodeCrash(n) \/ NodeRestart(n)
     \/ \E n \in Nodes, m \in Members : Tick(n, m) \/ SeeHeld(n, m) \/ Claim(n, m)
 
