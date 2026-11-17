@@ -133,8 +133,8 @@ felixd_placement_expectations=(
   # Without the record hold (felixd #247) or the reader's tail gate (#248).
   "FelixdPlacementNoRecordHold violates GroupTogether"
   "FelixdPlacementNoTailGate violates GroupTogether"
-  # A known gap, felixd #FORGET: a forgotten node restarts and claims before
-  # the scheduler folds its forget.
+  # A known gap, felixd #251: a forgotten node restarts and claims on a
+  # record that still names it while the scheduler moves the group.
   "FelixdPlacementForgetRestart violates GroupTogether"
 )
 # Checked only when named, as the nightly walks them: too large for every state.

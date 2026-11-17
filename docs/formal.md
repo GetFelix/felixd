@@ -559,7 +559,8 @@ and node facts) by `Scheduler::step` and `place_groups` (`crates/core/src/schedu
 holder can crash, or be paused past its lease while it still has an output to append; the next
 holder claims `wl.scheduler.out` at the next epoch and replays from any snapshot it took. A node
 judged silent by `sys.facts` time is a `lapse` input, which a later fact from the node undoes, and
-a node forgotten after `FORGET_INTERVALS` of silence is a `forget` input, only while it is down.
+a node forgotten after `FORGET_INTERVALS` of silence is dropped by another node's fact, in the
+same fold, as `forget_silent` runs only when a fact is folded; only a node that is down is forgotten.
 `running()` counts a member where a known node's newest fact holds it, silent or not, and where
 the record in force places it on a known node that is silent or blocked: such a node may land a
 claim no fact shows. A taker, or a draining node that is not silent, releases that hold. Facts
@@ -602,7 +603,7 @@ did, would make `GroupTogether` hold by construction or say nothing.
 | `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, blocked facts, a drain, dead nodes forgotten, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
 | `FelixdPlacementNoRecordHold` | `GroupTogether` | `FelixdPlacementSilentHolder` with `running()` counting only facts | TBD | TBD |
 | `FelixdPlacementNoTailGate` | `GroupTogether` | `FelixdPlacementRestartLag` with a reader that shows each record as it folds it | TBD | TBD |
-| `FelixdPlacementForgetRestart` | `GroupTogether` (#FORGET) | `FelixdPlacementRestartLag` where the node restarts before the scheduler folds its forget | TBD | TBD |
+| `FelixdPlacementForgetRestart` | `GroupTogether` (#251) | `FelixdPlacementRestartLag` where a forgotten node may restart while the record in force still names it | TBD | TBD |
 | `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | TBD | TBD |
 | `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | TBD | TBD |
 | `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | TBD | TBD |
@@ -623,12 +624,15 @@ says it is blocked, the group moves, and the rest is claimed on the new node bef
 `FelixdPlacementNoTailGate` shows why the reader waits for its tail (#248): a restarted node shows
 the old record before the one that moved the group, and claims under it.
 
-A known gap (#FORGET): forgetting is the one release of a hold that rests on time. A node down for
+A known gap (#251): forgetting is the one release of a hold that rests on time. A node down for
 `FORGET_INTERVALS` restarts, reads `wl.scheduler.out` to its tail and claims a member under the
-record in force, before its first fact lands, while the scheduler folds the facts that forget it
-and moves the group. `FelixdPlacementForgetRestart` pins it; the pass configurations restart a
-forgotten node only after its forget is folded. Forgetting a live node whose facts fail is not
-modeled (#250 design call 1).
+record in force, before its first fact lands, while the scheduler forgets it and moves the group.
+`turn` claims on a group record that places a member here without asking whether the scheduler
+still knows this node. The record still names the node when the restart reads before the forget is
+folded, or when the fold that forgets it has no taker to move the group to, so the group moves
+only on a later fact. `FelixdPlacementForgetRestart` pins it; the pass configurations restart a
+forgotten node only once its forget is folded and the last group record no longer names it.
+Forgetting a live node whose facts fail is not modeled (#250 design call 1).
 
 What the model leaves out: ungrouped workloads and the `assign`, grace and bound paths of `turn`;
 `table` records, which hold the same group placements as the records before them; the skip past a

@@ -13,7 +13,8 @@
 (* `out` are Felixd.tla's: here the claim is one record and an append     *)
 (* lands only behind its writer's own claim. Silence by `sys.facts` time  *)
 (* is abstracted as a `lapse` input that marks a node silent until its    *)
-(* next fact, and forgetting as a `forget` input for a node that is down. *)
+(* next fact. Forgetting a node that is down rides on another node's fact,*)
+(* as forget_silent runs only when a fact is folded.                      *)
 (*                                                                         *)
 (* Agents follow `turn` in crates/core/src/placement.rs: claim a member   *)
 (* the group record in their view places on them, or past the bound. The *)
@@ -34,8 +35,10 @@
 (*               silent or blocked (#247).                                *)
 (*   TailGate    the reader shows its view only once it reaches the tail  *)
 (*               it saw when the read began (#248).                       *)
-(* ForgetRace lets a forgotten node restart and claim before the          *)
-(* scheduler folds its forget, a known gap pinned by its own config.     *)
+(* ForgetRace lets a forgotten node restart while the record in force    *)
+(* may still name it: before its forget is folded, or after a forget     *)
+(* that could not move the group. The time-only release of felixd #251, *)
+(* pinned by its own config.                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -154,17 +157,21 @@ PlaceGroups(s) ==
                  ELSE [st |-> [s EXCEPT !.groups = placed],
                        ch |-> [kind |-> "group", map |-> placed]]
 
+\* forget_silent drops node g in the same fold as the fact that dates it.
+ForgetIn(s, g) ==
+    IF g = None THEN s
+    ELSE [s EXCEPT !.heard[g] = {}, !.at[g] = 0, !.known = @ \ {g}, !.live = @ \ {g},
+                   !.blocked = @ \ {g}, !.draining = @ \ {g}]
+
 \* Folds input p, which is x.
 StepIn(s, x, p) ==
     LET s1 == CASE x.k = "spec"  -> [s EXCEPT !.declared = @ \cup {x.m}]
-                [] x.k = "fact"  -> [s EXCEPT !.heard[x.n] = x.hold, !.at[x.n] = p,
+                [] x.k = "fact"  -> ForgetIn([s EXCEPT !.heard[x.n] = x.hold, !.at[x.n] = p,
                                        !.known = @ \cup {x.n}, !.live = @ \cup {x.n},
                                        !.blocked = IF x.blocked THEN @ \cup {x.n} ELSE @ \ {x.n},
-                                       !.draining = IF x.draining THEN @ \cup {x.n} ELSE @ \ {x.n}]
+                                       !.draining = IF x.draining THEN @ \cup {x.n} ELSE @ \ {x.n}],
+                                       x.gone)
                 [] x.k = "lapse" -> [s EXCEPT !.live = @ \ {x.n}]
-                [] x.k = "forget" -> [s EXCEPT !.heard[x.n] = {}, !.at[x.n] = 0,
-                                        !.known = @ \ {x.n}, !.live = @ \ {x.n},
-                                        !.blocked = @ \ {x.n}, !.draining = @ \ {x.n}]
         trigger == (x.k = "spec" /\ x.m \notin s.declared)
                    \/ Takers(s1) # Takers(s)
                    \/ GroupsRunning(s1) # GroupsRunning(s)
@@ -244,25 +251,21 @@ Admit(m) ==
 \* and shows only in facts: the model picks it per fact. Draining is said
 \* only with no claim under way and a won claim is named before its guard
 \* drops, so with Claim one step a draining fact lists every lease held.
+\* `gone` is a node the fold forgets after FORGET_INTERVALS of silence
+\* (schedule.rs forget_silent): only one that is down, so forgetting a live
+\* node whose facts fail is not modeled.
 Fact(n) ==
     /\ nup[n] /\ Len(inputs) < MaxIn
-    /\ \E b \in IF Blocking THEN BOOLEAN ELSE {FALSE} :
+    /\ \E b \in IF Blocking THEN BOOLEAN ELSE {FALSE},
+          g \in {None} \cup (IF ForgetDown THEN {o \in Nodes \ {n} : ~nup[o]} ELSE {}) :
         inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n),
-                                  blocked |-> b, draining |-> marked[n]])
+                                  blocked |-> b, draining |-> marked[n], gone |-> g])
     /\ UNCHANGED admitted /\ InputUnchanged
 
 Lapse(n) ==
     /\ LapseLive \/ ~nup[n]
     /\ Len(inputs) < MaxIn
     /\ inputs' = Append(inputs, [k |-> "lapse", n |-> n])
-    /\ UNCHANGED admitted /\ InputUnchanged
-
-\* FORGET_INTERVALS of silence. Only a node that is down: forgetting a live
-\* node whose facts fail is not modeled.
-Forget(n) ==
-    /\ ForgetDown /\ ~nup[n]
-    /\ Len(inputs) < MaxIn
-    /\ inputs' = Append(inputs, [k |-> "forget", n |-> n])
     /\ UNCHANGED admitted /\ InputUnchanged
 
 (***************************************************************************)
@@ -275,6 +278,10 @@ InForce(v) ==
     IN IF gs = {} THEN None
        ELSE LET j == CHOOSE j \in gs : \A l \in gs : l <= j
             IN IF DOMAIN out[j].map = Members THEN j ELSE None
+
+\* The last group record on `out`.
+LastGroup == LET gs == {j \in 1..Len(out) : out[j].k = "group"}
+             IN IF gs = {} THEN NoMap ELSE out[CHOOSE j \in gs : \A l \in gs : l <= j].map
 
 PlacesHere(v, m, n) == LET j == InForce(v) IN j # None /\ out[j].map[m] = n
 
@@ -366,12 +373,23 @@ NodeCrash(n) ==
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, view, rd, tgt, since, gsince, marked, drains, expires, applied>>
 
+Forgets(j, n) == inputs[j].k = "fact" /\ inputs[j].gone = n
+
+\* The scheduler has folded a forget of n and no fact of n since.
+Forgotten(n) ==
+    \E j \in 1..written :
+        /\ Forgets(j, n)
+        /\ \A l \in (j + 1)..written : ~(inputs[l].k = "fact" /\ inputs[l].n = n)
+
 \* A restarted agent reads `out` again and its clocks start over. Without
-\* ForgetRace it waits until every forget of it has been folded.
+\* ForgetRace it waits until every forget of it has been folded and, if it
+\* is forgotten, the last group record no longer places a member on it.
+\* Coming back while still named is the time-only release, felixd #251.
 NodeRestart(n) ==
     /\ ~nup[n] /\ Holding(n) = {}
-    /\ ForgetRace \/ \A j \in (written + 1)..Len(inputs) :
-                        ~(inputs[j].k = "forget" /\ inputs[j].n = n)
+    /\ \/ ForgetRace
+       \/ /\ \A j \in (written + 1)..Len(inputs) : ~Forgets(j, n)
+          /\ Forgotten(n) => \A m \in DOMAIN LastGroup : LastGroup[m] # n
     /\ nup' = [nup EXCEPT ![n] = TRUE]
     /\ view' = [view EXCEPT ![n] = 0]
     /\ rd' = [rd EXCEPT ![n] = 0]
@@ -402,7 +420,7 @@ Init ==
 Next ==
     \/ SchedStep \/ SchedCrash \/ SchedTakeover \/ StaleWrite
     \/ \E m \in Members : Admit(m) \/ Expire(m) \/ Release(m)
-    \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Forget(n) \/ Read(n) \/ Drain(n)
+    \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Read(n) \/ Drain(n)
                         \/ NodeCrash(n) \/ NodeRestart(n)
     \/ \E n \in Nodes, m \in Members : Tick(n, m) \/ SeeHeld(n, m) \/ Claim(n, m)
 
@@ -440,10 +458,12 @@ FactsAt(p) ==
     IF p = 0 THEN [heard |-> [n \in Nodes |-> {}], live |-> {}]
     ELSE LET f == FactsAt(p - 1)
              x == inputs[p]
-         IN CASE x.k = "fact"  -> [heard |-> [f.heard EXCEPT ![x.n] = x.hold], live |-> f.live \cup {x.n}]
-              [] x.k = "lapse" -> [f EXCEPT !.live = @ \ {x.n}]
-              [] x.k = "forget" -> [heard |-> [f.heard EXCEPT ![x.n] = {}], live |-> f.live \ {x.n}]
-              [] OTHER         -> f
+             g == IF x.k = "fact" THEN x.gone ELSE None
+             f1 == CASE x.k = "fact"  -> [heard |-> [f.heard EXCEPT ![x.n] = x.hold], live |-> f.live \cup {x.n}]
+                     [] x.k = "lapse" -> [f EXCEPT !.live = @ \ {x.n}]
+                     [] OTHER         -> f
+         IN IF g = None THEN f1
+            ELSE [heard |-> [f1.heard EXCEPT ![g] = {}], live |-> f1.live \ {g}]
 
 \* A split is never kept: a whole record that replaces a whole record never
 \* places a member where the facts it answers show it running off the
@@ -461,8 +481,6 @@ SplitNeverKept ==
 
 \* Replay after a takeover places the same set: once the holder has caught
 \* up with what was written, the record in force on `out` is its placement.
-LastGroup == LET gs == {j \in 1..Len(out) : out[j].k = "group"}
-             IN IF gs = {} THEN NoMap ELSE out[Max(gs)].map
 ReplaySame == (up /\ pos >= written) => LastGroup = st.groups
 
 \* No agent applies a stale record: a record a member was claimed on has an
