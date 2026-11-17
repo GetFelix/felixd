@@ -2225,22 +2225,43 @@ name=a,b` and admission both refuse a group that lists fewer than two
 members, lists the workload being submitted nowhere, or names a system
 workload.
 
-The default is longer than the scheduler's view of a dead node (90 s, see
-[Placement](#placement)) plus a placement round, so that when a member's node
-dies the scheduler can see it and place the member again before the bound
-passes. The cost is plain: a node death in a group stops that member for up
-to the bound, and if no `group` record has placed it again by then, the group
-runs split from then on.
-
 A group is split when its members are not all on the nodes of one `group`
 record. While members run the scheduler writes a `group` record for the group
 only if it keeps every running member on its node, which is how a member
-freed by a node death is placed again. No assignment moves a running member,
-so a split group stays split. Its `group-bound` members' placement records
+freed elsewhere is placed again. No assignment moves a running member, so a
+split group stays split. Its `group-bound` members' placement records
 say so, and `felixd ps` shows the group as `split` with each member's node.
 The scheduler counts the members as load like any first-claim placement, and
 writes a `group` record for a split group again only once no member runs, so
 it joins up once every member has stopped and been freed.
+
+For a group, no move may take a member off a node that may still run it, or
+be about to claim it under the record (#247). Silence is measured on
+`sys.facts`, while the lease is renewed on its own, and a claim under way
+shows in no fact until it lands. So the scheduler counts a member as running:
+
+- where a node's latest fact says it is held, silent or not. If two nodes say
+  so, the newer fact wins, since the lease is exclusive and the older one is
+  gone;
+- on the node the group's record places it on, while that node does not take
+  work and is not known to be draining: it is silent or blocked.
+
+The second hold ends only when the node takes work again (the record then
+stands, and leaving the member there is safe), when it writes a draining
+fact while not silent, or when it is forgotten after thirty intervals. An
+agent says it is draining in its facts only once no claim is under way, and
+reads what it holds after that, so a draining fact lists everything the
+node runs and the node claims nothing more. A blocked node gives no such
+proof: it cannot read its drain mark, and a claim that read the mark just
+before the node went blocked can still land. A claim that starts while it is
+blocked fails at its own read of the mark, so no new one begins. A node
+that comes back and goes silent again is held again. Moving the group sooner would let the new node claim the free members while
+the old one keeps or lands its own, running the group split before the bound.
+
+The cost is on a node death. A member on a dead node is not placed again
+until the node is forgotten (15 min at the default `--facts-every-ms`), which
+is longer than `--group-bound-ms`. So the member waits up to the bound and is
+then claimed `group-bound`, and the group runs split until no member runs.
 
 A race the agents handle the same way: a member is claimed `group-bound`, and
 then a `group` record lands. The other members are claimed as `assigned` to

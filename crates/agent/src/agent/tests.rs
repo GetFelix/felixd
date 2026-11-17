@@ -183,3 +183,38 @@ fn the_placement_record_names_the_epoch_the_holder_took() {
         }
     );
 }
+
+fn fact_of(standing: &Standing) -> NodeFact {
+    standing.fact("n", Duration::from_secs(1), 4, &AtomicUsize::new(0))
+}
+
+#[test]
+fn a_fact_does_not_say_draining_while_a_claim_is_under_way() {
+    let standing = Standing::new();
+    standing.draining.send_replace(true);
+    assert!(fact_of(&standing).draining);
+    let under_way = ClaimUnderWay::start(&standing);
+    assert!(!fact_of(&standing).draining);
+    drop(under_way);
+    assert!(fact_of(&standing).draining);
+}
+
+#[test]
+fn a_won_claim_is_held_by_the_time_the_claim_ends() {
+    let standing = Standing::new();
+    standing.draining.send_replace(true);
+    // Once the claim is won, a fact that says draining must list it.
+    let check = || {
+        let fact = fact_of(&standing);
+        assert!(!fact.draining || fact.holding.contains("w"), "{fact:?}");
+    };
+    let under_way = ClaimUnderWay::start(&standing);
+    // The claim won: it is named before it stops counting as under way.
+    check();
+    let holds = Holds::start(&standing, "w");
+    check();
+    drop(under_way);
+    check();
+    assert!(fact_of(&standing).draining);
+    drop(holds);
+}

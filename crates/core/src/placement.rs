@@ -176,9 +176,10 @@ pub const DEFAULT_ASSIGNMENT_BOUND: Duration = Duration::from_secs(15);
 /// takes well under a second.
 pub const DEFAULT_ASSIGNMENT_GRACE: Duration = Duration::from_secs(2);
 /// The longest a group member is held for its group's record, unless told
-/// otherwise. It is longer than the scheduler takes to see a node gone (three
-/// fact intervals, 90 s at the defaults) plus a placement round, so a member
-/// freed by a node death can be placed again with its group.
+/// otherwise. The scheduler does not move a group off a dead node's members
+/// until it forgets the node (thirty fact intervals, 15 min at the defaults),
+/// which is longer than this, so after a node death such a member is claimed
+/// `group-bound` once this passes.
 pub const DEFAULT_GROUP_BOUND: Duration = Duration::from_secs(180);
 
 /// Follows the scheduler's assignments while it runs and its holder renews,

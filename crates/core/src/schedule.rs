@@ -335,15 +335,19 @@ impl Scheduler {
         });
     }
 
+    /// Whether `heard` is past [`SILENT_INTERVALS`] of its interval, by
+    /// `sys.facts` time.
+    fn silent(&self, heard: &Heard) -> bool {
+        self.facts_micros.saturating_sub(heard.at_micros)
+            > Self::after(heard.every_ms, SILENT_INTERVALS)
+    }
+
     /// The nodes that take work now: heard from within [`SILENT_INTERVALS`] of
     /// their interval, by `sys.facts` time, and neither draining nor blocked.
     fn takers(&self) -> BTreeMap<String, Taker> {
         self.nodes
             .iter()
-            .filter(|(_, h)| {
-                let silent = Self::after(h.every_ms, SILENT_INTERVALS);
-                !h.draining && !h.blocked && self.facts_micros.saturating_sub(h.at_micros) <= silent
-            })
+            .filter(|(_, h)| !h.draining && !h.blocked && !self.silent(h))
             .map(|(node, h)| {
                 let taker = Taker {
                     max_workloads: h.max_workloads,
@@ -462,24 +466,52 @@ impl Scheduler {
             .collect()
     }
 
-    /// The node each member of `group` runs on, by the facts of nodes not
-    /// silent, draining or not. The lowest node id wins if two say so.
+    /// The node each member of `group` may run on, so no group move takes a
+    /// member off a node that may still run it, or be about to (#247).
+    ///
+    /// A member runs where a node's latest fact says it is held; if two
+    /// say so, the newer fact wins, then the lowest id. Silence does not end
+    /// a lease, so a silent node's last fact still counts. A member the
+    /// group's record places on a node also counts as running there while
+    /// that node is silent or blocked, since a claim under way shows in no
+    /// fact and such a node may still land one. A draining fact from a node
+    /// not silent ends that: an agent says it is draining only once no
+    /// claim is under way. A taker needs no hold, as the record stands while
+    /// its nodes take work. So a node that takes work and then goes silent
+    /// again is held again.
     fn running(&self, group: &Group) -> BTreeMap<String, String> {
-        let mut running = BTreeMap::new();
+        let mut running: BTreeMap<String, (u64, String)> = BTreeMap::new();
         for (node, heard) in &self.nodes {
-            let silent = Self::after(heard.every_ms, SILENT_INTERVALS);
-            if self.facts_micros.saturating_sub(heard.at_micros) > silent {
-                continue;
-            }
-            for member in &group.members {
-                if heard.holding.contains(member) {
-                    running
-                        .entry(member.clone())
-                        .or_insert_with(|| node.clone());
+            for member in group.members.iter().filter(|m| heard.holding.contains(*m)) {
+                // Nodes come in id order, so a tie keeps the lowest id.
+                let best = running
+                    .entry(member.clone())
+                    .or_insert_with(|| (heard.at_micros, node.clone()));
+                if heard.at_micros > best.0 {
+                    *best = (heard.at_micros, node.clone());
                 }
             }
         }
+        let record = self
+            .groups
+            .get(&group.name)
+            .filter(|r| group.members.iter().eq(r.keys()));
+        for (member, node) in record.into_iter().flatten() {
+            // Not silent and not blocked means a taker or a settled drain.
+            if self
+                .nodes
+                .get(node)
+                .is_some_and(|h| h.blocked || self.silent(h))
+            {
+                running
+                    .entry(member.clone())
+                    .or_insert_with(|| (0, node.clone()));
+            }
+        }
         running
+            .into_iter()
+            .map(|(member, (_, node))| (member, node))
+            .collect()
     }
 
     /// Where the members of every complete group run, so a member stopping
@@ -498,11 +530,12 @@ impl Scheduler {
     /// whose members all stopped running, or never ran, is placed on the
     /// least loaded takers with room, the lowest id first, and only if every
     /// member fits. While members run, a new placement keeps each of them on
-    /// its node, which is how a member freed by a node death is placed again;
-    /// a group with a member running off its placement is split and is not
-    /// placed again until no member runs. A placement whose members all run
-    /// where it says or sit on takers is left alone. The placement of a group
-    /// no longer complete is withdrawn.
+    /// its node, which is how a member freed elsewhere is placed again. A
+    /// member on a dead node is held there until the node is forgotten (see
+    /// [`Self::running`]). A group with a member running off its placement
+    /// is split and is not placed again until no member runs. A placement
+    /// whose members all run where it says or sit on takers is left alone.
+    /// The placement of a group no longer complete is withdrawn.
     fn place_groups(
         &mut self,
         takers: &BTreeMap<String, Taker>,
