@@ -61,6 +61,9 @@ pub struct Followed {
     /// Pages were folded that `changed` has not been given yet, kept across
     /// a failed read.
     unseen: bool,
+    /// The tail a read is heading for. Kept until a read reaches it, so a
+    /// log that keeps growing cannot move the target out from under retries.
+    target: Option<u64>,
 }
 
 impl Followed {
@@ -216,14 +219,22 @@ async fn within<T>(call: impl Future<Output = Result<T>>) -> Result<T> {
 /// back from the tail for the latest table and starts there, so nothing
 /// before it is read. Progress is kept in `followed` whenever a read fails,
 /// so the next call carries on from there. `changed` runs only once the
-/// read reaches the tail it saw when it started, so nothing acts on a view
-/// that holds a record a later one, already written, replaces.
+/// read reaches the tail it saw when it started, and that tail is kept across
+/// failed reads, so nothing acts on a view that holds a record a later one,
+/// already written, replaces, and a growing log cannot keep the read short.
 pub(crate) async fn read_new(
     source: &impl Source,
     followed: &mut Followed,
     mut changed: impl FnMut(&Followed),
 ) -> Result<()> {
-    let tail = within(source.tail()).await?;
+    let tail = match followed.target {
+        Some(tail) => tail,
+        None => {
+            let tail = within(source.tail()).await?;
+            followed.target = Some(tail);
+            tail
+        }
+    };
     while followed.next.is_none() {
         let end = followed.back.unwrap_or(tail);
         let from = end.saturating_sub(BACK_WINDOW);
@@ -260,6 +271,7 @@ pub(crate) async fn read_new(
         followed.next = Some(next);
         followed.unseen = true;
     }
+    followed.target = None;
     if std::mem::take(&mut followed.unseen) {
         changed(followed);
     }

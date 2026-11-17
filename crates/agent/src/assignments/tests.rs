@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use felixd_core::output::{Addressed, OutputHeader, encode_addressed, encode_claim};
@@ -240,6 +241,150 @@ async fn a_restarted_reader_shows_nothing_until_it_reaches_the_tail() {
         .is_err()
     {}
     assert_eq!(views.len(), 1);
+}
+
+/// A stream that grows by 30 records at every tail read and drops every
+/// third call. A reader that takes a new tail on each retry never catches up.
+struct Growing {
+    records: Mutex<Vec<StreamRecord>>,
+    calls: AtomicUsize,
+}
+
+impl Growing {
+    fn record(offset: u64) -> StreamRecord {
+        StreamRecord {
+            offset,
+            payload: Bytes::from(out(offset, &assign(offset, "w", Some("n")))),
+            publisher: None,
+            timestamp_micros: 0,
+        }
+    }
+
+    fn flaky(&self) -> Result<()> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) % 3 == 2 {
+            anyhow::bail!("dropped");
+        }
+        Ok(())
+    }
+}
+
+impl Source for Growing {
+    async fn tail(&self) -> Result<u64> {
+        self.flaky()?;
+        let mut records = self.records.lock().unwrap();
+        for _ in 0..30 {
+            let offset = records.len() as u64;
+            records.push(Growing::record(offset));
+        }
+        Ok(records.len() as u64)
+    }
+
+    async fn back(&self, from: u64, end: u64) -> Result<(Vec<StreamRecord>, bool)> {
+        self.flaky()?;
+        let records = self.records.lock().unwrap();
+        Ok((records[from as usize..end as usize].to_vec(), from == 0))
+    }
+
+    async fn page(&self, from: u64, end: u64) -> Result<(Vec<StreamRecord>, u64)> {
+        self.flaky()?;
+        let records = self.records.lock().unwrap();
+        let to = (from + 7).min(end);
+        Ok((records[from as usize..to as usize].to_vec(), to))
+    }
+}
+
+#[tokio::test]
+async fn a_reader_publishes_even_when_the_log_grows_between_failed_reads() {
+    let source = Growing {
+        records: Mutex::new(Vec::new()),
+        calls: AtomicUsize::new(0),
+    };
+    let mut f = Followed::default();
+    let mut views = 0;
+    let mut tries = 0;
+    while views == 0 {
+        tries += 1;
+        assert!(tries < 200, "the reader never reached a tail");
+        let _ = read_new(&source, &mut f, |_| views += 1).await;
+    }
+    assert_eq!(f.table["w"].node, "n");
+}
+
+/// A read that folds pages, fails, and then finds the rest of the log
+/// trimmed away still shows what it folded.
+struct Trimming {
+    records: Vec<StreamRecord>,
+    calls: AtomicUsize,
+    trimmed: AtomicBool,
+}
+
+impl Source for Trimming {
+    async fn tail(&self) -> Result<u64> {
+        Ok(self.records.len() as u64)
+    }
+
+    async fn back(&self, from: u64, end: u64) -> Result<(Vec<StreamRecord>, bool)> {
+        Ok((
+            self.records[from as usize..end as usize].to_vec(),
+            from == 0,
+        ))
+    }
+
+    async fn page(&self, from: u64, end: u64) -> Result<(Vec<StreamRecord>, u64)> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 2 {
+            anyhow::bail!("dropped");
+        }
+        if self.trimmed.load(Ordering::SeqCst) {
+            return Err(Trimmed {
+                stream: "out".into(),
+                requested: from,
+                oldest: end,
+            }
+            .into());
+        }
+        let to = (from + 7).min(end);
+        Ok((self.records[from as usize..to as usize].to_vec(), to))
+    }
+}
+
+#[tokio::test]
+async fn a_trim_past_the_tail_after_folding_still_shows_the_view() {
+    let mut payloads = vec![out(0, &table(0, &[("w", "n-1")]))];
+    for i in 1..40 {
+        payloads.push(out(i, &assign(i, &format!("x{i}"), Some("n-2"))));
+    }
+    let tail = payloads.len() as u64;
+    let records = (0..)
+        .zip(payloads)
+        .map(|(offset, payload)| StreamRecord {
+            offset,
+            payload: Bytes::from(payload),
+            publisher: None,
+            timestamp_micros: 0,
+        })
+        .collect();
+    let source = Trimming {
+        records,
+        calls: AtomicUsize::new(0),
+        trimmed: AtomicBool::new(false),
+    };
+    let mut f = Followed::default();
+    let mut views = Vec::new();
+    assert!(
+        read_new(&source, &mut f, |now| views.push(now.clone()))
+            .await
+            .is_err()
+    );
+    assert!(views.is_empty());
+    source.trimmed.store(true, Ordering::SeqCst);
+    read_new(&source, &mut f, |now| views.push(now.clone()))
+        .await
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].next, Some(tail));
+    assert_eq!(views[0].table["w"], placed("n-1", 0));
+    assert_eq!(views[0].table["x1"], placed("n-2", 1));
 }
 
 #[tokio::test]
