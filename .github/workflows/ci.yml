@@ -221,7 +221,10 @@ jobs:
           - { name: crash-lease, configs: FelixdPlacementCrashLease }
           - { name: silent-holder, configs: FelixdPlacementSilentHolder }
           - { name: restart-lag, configs: FelixdPlacementRestartLag }
-          - { name: undrain, configs: FelixdPlacementUndrain }
+          - { name: undrain-n1-unplaced, configs: FelixdPlacementUndrainN1Unplaced }
+          - { name: undrain-n1-placed, configs: FelixdPlacementUndrainN1Placed }
+          - { name: undrain-n2-unplaced, configs: FelixdPlacementUndrainN2Unplaced }
+          - { name: undrain-n2-placed, configs: FelixdPlacementUndrainN2Placed }
           - { name: stamps-n1-unplaced, configs: FelixdPlacementStampsN1Unplaced }
           - { name: stamps-n1-placed, configs: FelixdPlacementStampsN1Placed }
           - { name: stamps-n2-unplaced, configs: FelixdPlacementStampsN2Unplaced }

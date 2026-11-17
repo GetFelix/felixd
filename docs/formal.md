@@ -613,7 +613,11 @@ did, would make `GroupTogether` hold by construction or say nothing.
 | `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | 21,504,874 | 6 min 05 s |
 | `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
 | `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | 5,135,336 | 1 min 54 s |
-| `FelixdPlacementUndrain` | pass | a drain and its lift with room for six facts (the two admitted ones, the draining fact, the fact that lifts it, a claim after the fold and the fact that relists the node), the undrained node waiting until the scheduler has folded a fact of it that is not draining and its view holds every record written up to that fold; timestamps strictly increasing | TBD | TBD |
+| `FelixdPlacementUndrain` | pass | a drain and its lift with room for six facts (the two admitted ones, the draining fact, the fact that lifts it, a claim after the fold and the fact that relists the node), the undrained node waiting until the scheduler has folded a fact of it that is not draining and its view holds every record written up to that fold; timestamps strictly increasing | 51,343,136 | 28 min 15 s |
+| `FelixdPlacementUndrainN1Unplaced` | pass | `FelixdPlacementUndrain` where node 1 is drained before the first group record | TBD | TBD |
+| `FelixdPlacementUndrainN1Placed` | pass | `FelixdPlacementUndrain` where node 1 is drained after the first group record | TBD | TBD |
+| `FelixdPlacementUndrainN2Unplaced` | pass | `FelixdPlacementUndrain` where node 2 is drained before the first group record | TBD | TBD |
+| `FelixdPlacementUndrainN2Placed` | pass | `FelixdPlacementUndrain` where node 2 is drained after the first group record | TBD | TBD |
 | `FelixdPlacementStampsN1Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes before the first group record, or no node crashes | 32,200,960 | 11 min 06 s |
 | `FelixdPlacementStampsN1Placed` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes after the first group record, or no node crashes | 31,351,946 | 12 min 56 s |
 | `FelixdPlacementStampsN2Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 2 crashes before the first group record, or no node crashes | 32,200,960 | 12 min 41 s |
@@ -637,8 +641,12 @@ one leg, so the job checks it as the eight `FelixdPlacementCrashN*E*` configurat
 `FelixdPlacementStampsN*` configurations split it the same way, by node and by before or after the
 first `group` record. It has one scheduler epoch, so the epoch constant needs no split. A run with no
 crash is in all four and a run with one crash in exactly one, so together they check every state the
-unsplit run reaches. `FelixdPlacementUndrain`, `FelixdPlacementUndrainStale` and
-`FelixdPlacementUndrainRelist` differ in one constant each (`UndrainRace`, `RelistRace`) and set no
+unsplit run reaches. `FelixdPlacementUndrain` (51,343,136 states, 28 min 15 s, run 44098661076) is too long for one leg, so the job checks it as the four
+`FelixdPlacementUndrainN*` configurations, split by the drained node (`DrainNodes`) and by whether the drain comes before or after the
+first `group` record (`DrainPlaced`). A run drains at most one node, so it is in exactly one part and together they check every state
+of the unsplit run. The unsplit config stays as the reference and is not in the matrix. `FelixdPlacementUndrainStale` and
+`FelixdPlacementUndrainRelist` stay unsplit and differ from it in one constant each (`UndrainRace`, `RelistRace`); they stop at their
+first violation. All of them set no
 timestamps (`Stamps = {}`), to fit six facts in the time limit; the stamps legs cover ties. A run
 of `FelixdPlacement` has at most one node crash, and each split allows it on one node, in one
 scheduler epoch, and only before or only after the first `group` record is on

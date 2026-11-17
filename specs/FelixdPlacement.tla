@@ -64,6 +64,8 @@ CONSTANTS
     ForgetRace,   \* whether it may restart before the scheduler folds that
     Blocking,     \* whether a fact may say its node is blocked
     MaxDrain,     \* drain marks set
+    DrainNodes,   \* the nodes that may be drained
+    DrainPlaced,  \* whether a drain may come before (FALSE) or after (TRUE) the first group record
     Undrain,      \* whether a drain mark may be lifted (`felixd undrain`)
     UndrainRace,  \* whether an undrained node acts on its view from before the drain
     RelistRace,   \* whether an undrained node claims before its lift is folded
@@ -383,9 +385,12 @@ Expire(m) ==
     /\ AgentUnchanged
     /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, applied>>
 
-\* The operator marks a node in `drains`.
+\* The operator marks a node in `drains`. DrainNodes and DrainPlaced only split a
+\* run's drain space into configs whose union is the unsplit one.
 Drain(n) ==
     /\ ~marked[n] /\ drains < MaxDrain
+    /\ n \in DrainNodes
+    /\ (\E j \in 1..Len(out) : out[j].k = "group") \in DrainPlaced
     /\ marked' = [marked EXCEPT ![n] = TRUE]
     /\ drains' = drains + 1
     /\ AgentUnchanged
