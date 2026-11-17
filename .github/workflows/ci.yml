@@ -209,7 +209,8 @@ jobs:
         include:
           - { name: crash, configs: FelixdPlacement }
           - { name: lease, configs: FelixdPlacementLease }
-          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers" }
+          - { name: crash-lease, configs: FelixdPlacementCrashLease }
+          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementSilentHolder" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

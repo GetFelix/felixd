@@ -122,14 +122,23 @@ felixd_admission_expectations=(
 felixd_placement_expectations=(
   "FelixdPlacement pass"
   "FelixdPlacementLease pass"
-  "FelixdPlacementNoBarrier violates GroupHeld"
+  "FelixdPlacementCrashLease pass"
+  "FelixdPlacementNoBarrier violates GroupTogether"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
-  "FelixdPlacementNoFence violates FencedOut"
+  "FelixdPlacementNoFence violates StaleNeverApplied"
   "FelixdPlacementLiveTakers violates ReplaySame"
+  # A known gap, felixd #247: a live holder judged silent keeps its member
+  # while the rest of the group moves.
+  "FelixdPlacementSilentHolder violates GroupTogether"
+)
+# Checked only when named, as the nightly walks them: too large for every state.
+felixd_placement_named=(
+  "FelixdPlacementFull violates GroupTogether"
 )
 
 MODULE="${TLA_MODULE:-Felixd}"
+named=()
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
   FelixdTrimming) MODULE=Felixd; expectations=("${felixd_trim_expectations[@]}") ;;
@@ -137,7 +146,7 @@ case "$MODULE" in
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
   FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
   FelixdAdmission) expectations=("${felixd_admission_expectations[@]}") ;;
-  FelixdPlacement) expectations=("${felixd_placement_expectations[@]}") ;;
+  FelixdPlacement) expectations=("${felixd_placement_expectations[@]}"); named=("${felixd_placement_named[@]}") ;;
   *) echo "unknown TLA_MODULE: $MODULE" >&2; exit 1 ;;
 esac
 
@@ -159,7 +168,7 @@ if [ "$#" -gt 0 ]; then
   selected=()
   for name in "$@"; do
     entry="$name pass"
-    for known in "${expectations[@]}"; do
+    for known in "${expectations[@]}" ${named[@]+"${named[@]}"}; do
       if [ "${known%% *}" = "$name" ]; then entry="$known"; fi
     done
     selected+=("$entry")
