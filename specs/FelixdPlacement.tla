@@ -39,7 +39,8 @@
 (* may still name it: before its forget is folded, or after a forget     *)
 (* that could not move the group. The time-only release of felixd #251, *)
 (* pinned by its own config. UndrainRace lets an undrained node claim on  *)
-(* the view it had before its drain (felixd #256), pinned the same way.   *)
+(* a view that misses a move made on its drain (felixd #256), pinned the  *)
+(* same way.                                                              *)
 (* RelistRace lets it claim while the scheduler still folds its draining *)
 (* fact as its last (felixd #257).                                        *)
 (***************************************************************************)
@@ -345,10 +346,15 @@ SeeHeld(n, m) ==
 \* Every draining fact of n is followed by one that is not, and the
 \* scheduler has folded it. Until then the scheduler may still move a group
 \* off n on the strength of n's promise to claim nothing (felixd #257).
+\* Without UndrainRace n's view also holds every record the scheduler wrote
+\* up to that fold: a move made on the draining fact after n's re-read at
+\* the lift would otherwise stay unseen.
 Relisted(n) ==
     \A j \in 1..Len(inputs) :
         (inputs[j].k = "fact" /\ inputs[j].n = n /\ inputs[j].draining) =>
-            \E l \in (j + 1)..pos : inputs[l].k = "fact" /\ inputs[l].n = n /\ ~inputs[l].draining
+            \E l \in (j + 1)..pos :
+                /\ inputs[l].k = "fact" /\ inputs[l].n = n /\ ~inputs[l].draining
+                /\ UndrainRace \/ \A r \in (view[n] + 1)..Len(out) : out[r].k = "group" => out[r].p > l
 
 \* The claim path reads the drain mark and claims nothing while it is set.
 \* Without RelistRace an undrained node also waits for its lift to be folded.
