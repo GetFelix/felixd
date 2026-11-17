@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use felixd_agent::ps::{PlacedBy, Report};
+use felixd_agent::ps::{AssignmentLag, HeldAt, PlacedBy, Report};
 use felixd_core::placement::Authority;
 use felixd_core::status::State;
 
@@ -10,7 +10,9 @@ use felixd_core::status::State;
 /// details that do not fit in a column. While a scheduler runs, the
 /// workloads table has an ASSIGNED column: the node the scheduler assigned
 /// and the offset of that assignment on its output stream, and a PLACED
-/// column: who placed the holder's claim.
+/// column: who placed the holder's claim. HELD_AT is the claim's epoch and
+/// the assignment it acted on, and ASSIGN_LAG how many scheduler records that
+/// assignment is behind the one in force (0 when current).
 pub(crate) fn render(report: &Report) -> String {
     let mut out = String::new();
     let mut header = row(&[
@@ -22,6 +24,8 @@ pub(crate) fn render(report: &Report) -> String {
         header.insert(3, "ASSIGNED".to_owned());
         header.insert(4, "PLACED".to_owned());
         leading += 2;
+        header.push("HELD_AT".to_owned());
+        header.push("ASSIGN_LAG".to_owned());
     }
     let mut rows = vec![header];
     let mut details = Vec::new();
@@ -36,6 +40,9 @@ pub(crate) fn render(report: &Report) -> String {
             (None, Some(epoch)) => format!("({epoch})"),
             _ => "-".to_owned(),
         };
+        // A claim whose placement record could not be read, as opposed to
+        // a workload nothing holds.
+        let claimed = w.holder.as_ref().is_some_and(|l| l.epoch > 0);
         let mut lines = w.inputs.iter().chain(&w.steps).map(|p| {
             [
                 p.stream.clone(),
@@ -60,9 +67,21 @@ pub(crate) fn render(report: &Report) -> String {
                 None => "-".to_owned(),
             };
             cells.insert(3, assigned);
-            cells.insert(4, placed_word(w.placed.as_ref()));
+            cells.insert(4, placed_word(w.placed.as_ref(), claimed));
         }
         cells.extend(first);
+        if report.scheduled {
+            cells.push(held_word(w.held_at.as_ref(), claimed));
+            cells.push(
+                w.held_at
+                    .and_then(|h| h.assignment_lag(w.assigned.as_ref()))
+                    .map_or("-".to_owned(), |l| match l {
+                        AssignmentLag::Behind(n) => n.to_string(),
+                        AssignmentLag::Ahead => "ahead".to_owned(),
+                        AssignmentLag::OtherEpoch => "epoch".to_owned(),
+                    }),
+            );
+        }
         rows.push(cells);
         for more in lines {
             let mut cells = vec![String::new(); leading];
@@ -155,8 +174,9 @@ pub(crate) fn render(report: &Report) -> String {
 
 /// `assigned@<offset>`, `first-claim:<reason>`, `unknown` for a claim with
 /// no placement record, `newer-build` for an authority this build does not
-/// know, or `-` when nothing holds the workload.
-fn placed_word(placed: Option<&PlacedBy>) -> String {
+/// know, `?` when the record could not be read, or `-` when nothing holds the
+/// workload.
+fn placed_word(placed: Option<&PlacedBy>, claimed: bool) -> String {
     match placed {
         Some(PlacedBy::Recorded(Authority::Assigned { assignment, .. })) => {
             format!("assigned@{assignment}")
@@ -166,6 +186,23 @@ fn placed_word(placed: Option<&PlacedBy>) -> String {
         }
         Some(PlacedBy::Recorded(Authority::Unknown)) => "newer-build".to_owned(),
         Some(PlacedBy::Unknown) => "unknown".to_owned(),
+        None if claimed => "?".to_owned(),
+        None => "-".to_owned(),
+    }
+}
+
+/// `<epoch>` for a claim, `<epoch>@<assignment>` when an assignment placed
+/// it, `?` when the placement record could not be read, `-` when nothing
+/// holds the workload.
+fn held_word(held: Option<&HeldAt>, claimed: bool) -> String {
+    match held {
+        Some(HeldAt {
+            epoch,
+            assignment: Some(a),
+            ..
+        }) => format!("{epoch}@{a}"),
+        Some(HeldAt { epoch, .. }) => epoch.to_string(),
+        None if claimed => "?".to_owned(),
         None => "-".to_owned(),
     }
 }

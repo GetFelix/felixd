@@ -118,6 +118,10 @@ pub struct Workload {
     /// Who placed the holder's claim, while a scheduler runs and the
     /// workload is held.
     pub placed: Option<PlacedBy>,
+    /// The claim the holder holds the workload at: its epoch and the
+    /// assignment it acted on. Read from the placement record, so it is what
+    /// was recorded, not what the node believes now.
+    pub held_at: Option<HeldAt>,
     /// The output stream's next offset.
     pub outputs: u64,
     /// The epoch of the last record on the output stream.
@@ -133,6 +137,64 @@ pub struct Workload {
     pub steps: Option<Position>,
     /// Why some of the above could not be read.
     pub unread: Option<String>,
+}
+
+/// The claim a workload is held at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldAt {
+    pub epoch: u64,
+    /// The `wl.scheduler.out` offset the claim was placed by, when the
+    /// scheduler placed it.
+    pub assignment: Option<u64>,
+    /// The scheduler epoch that wrote that assignment.
+    pub scheduler_epoch: Option<u64>,
+}
+
+/// How a claim's assignment compares with the one now in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignmentLag {
+    /// The claim's assignment is this many offsets behind; 0 when current.
+    Behind(u64),
+    /// The claim's assignment is at a higher offset than the one in force,
+    /// as when a restarted scheduler rebuilt its table from earlier output.
+    Ahead,
+    /// The two were written by different scheduler epochs, so an offset
+    /// difference says nothing useful.
+    OtherEpoch,
+}
+
+impl HeldAt {
+    /// The claim at `epoch` as `placed` recorded it.
+    pub(crate) fn of(epoch: u64, placed: &PlacedBy) -> HeldAt {
+        let (assignment, scheduler_epoch) = match placed {
+            PlacedBy::Recorded(Authority::Assigned {
+                assignment,
+                scheduler_epoch,
+            }) => (Some(*assignment), Some(*scheduler_epoch)),
+            _ => (None, None),
+        };
+        HeldAt {
+            epoch,
+            assignment,
+            scheduler_epoch,
+        }
+    }
+
+    /// How many offsets of `wl.scheduler.out` the claim's assignment is
+    /// behind the one now in force for the workload. Offsets need not be
+    /// dense, so this is a difference, not a count of records. `None` when
+    /// the claim was not placed by an assignment or none is in force.
+    pub fn assignment_lag(&self, in_force: Option<&Placed>) -> Option<AssignmentLag> {
+        let in_force = in_force?;
+        let held = self.assignment?;
+        if self.scheduler_epoch? != in_force.epoch {
+            return Some(AssignmentLag::OtherEpoch);
+        }
+        Some(match in_force.offset.checked_sub(held) {
+            Some(behind) => AssignmentLag::Behind(behind),
+            None => AssignmentLag::Ahead,
+        })
+    }
 }
 
 /// What `wl.<id>.placed` says about the holder's claim.
@@ -232,6 +294,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             state: None,
             assigned,
             placed: None,
+            held_at: None,
             holder,
             holder_draining,
             outputs: 0,
@@ -249,7 +312,10 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
                 let epoch = workload.holder.as_ref().map_or(0, |l| l.epoch);
                 if scheduled && epoch > 0 {
                     match placement(&felix, &workload.id, epoch).await {
-                        Ok(placed) => workload.placed = Some(placed),
+                        Ok(placed) => {
+                            workload.held_at = Some(HeldAt::of(epoch, &placed));
+                            workload.placed = Some(placed);
+                        }
                         Err(error) if workload.unread.is_none() => {
                             workload.unread = Some(format!("{error:#}"));
                         }

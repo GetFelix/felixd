@@ -807,6 +807,21 @@ it. For each workload:
   scheduler assigned the workload to and the offset of that assignment on
   `wl.scheduler.out`, such as `node-2@912`. A holder that differs from it took
   the workload by first claim wins, or before the assignment changed.
+- **Held at.** With a scheduler, `HELD_AT` is the holder's claim epoch and, when
+  an assignment placed the claim, the assignment offset it acted on
+  (`3@912`). `ASSIGN_LAG` is how many offsets of `wl.scheduler.out` that
+  assignment is behind the one now in force for the workload (offsets need not
+  be dense, so it is a difference, not a record count): `0` when current,
+  `ahead` when the held offset is higher than the one in force (a restarted
+  scheduler rebuilt its table from earlier output), `epoch` when the two were
+  written by different scheduler epochs, so no difference is taken, and `-`
+  when the claim was not placed by an assignment or none is in force. In
+  `PLACED` and `HELD_AT`, `?` means the holder has a claim but its placement
+  record could not be read (the line below the table says why), and `-` means
+  nothing holds the workload. Both come from the
+  placement record and the scheduler's output, so they show what was recorded,
+  not what a node believes. A node's own `assignments` offset is a separate
+  fact field, [not built yet](#placement-rules).
 
 For each node: whether it has an entry in `nodes`, how many live leases name
 it, its `--max-workloads`, its version and whether it is draining: `yes`, or
@@ -2143,8 +2158,9 @@ Part built (#100). Built: the placement record on `wl.<id>.placed`, its
 check in `felixd check` and the PLACED column of `ps`, ticks from
 `sys.facts`, and groups: the `group` field of a spec, the scheduler's `group`
 record, the agents' barrier with `--group-bound-ms`, the reason `group-bound`,
-and the `ps` group table. Not built yet: the status fields (`assignments`, `held_at`) and
-lag in `ps`, `ps` showing an assignment offset that was trimmed as
+and the `ps` group table. Built from recorded state: the `HELD_AT` and `ASSIGN_LAG` columns of `ps`.
+Not built yet: the node-reported fact fields (`assignments`, `held_at`) and
+the node lag they bound, `ps` showing an assignment offset that was trimmed as
 `trimmed`, the `.placed` head trim, the `workloads` writer change, and the
 TLA model. These rules fix what the scheduler and the agents
 may assume about each other before rebalancing, groups and moving a running
