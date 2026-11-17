@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check a module in specs/ under each configuration registered for it
 # below, and hold each to its outcome. `TLA_MODULE` picks the module:
-# Felixd (the default), FelixdTrimming, FelixdIntensity, FelixdSpecs, FelixdMerge or FelixdAdmission.
+# Felixd (the default), FelixdTrimming, FelixdIntensity, FelixdSpecs, FelixdMerge, FelixdAdmission or FelixdPlacement.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -12,11 +12,12 @@
 # registered below must pass. `TLA_MODULE=FelixdTrimming` checks the trimming
 # configurations of Felixd. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
 # checks the spec history model, `TLA_MODULE=FelixdMerge` the merge log
-# model and `TLA_MODULE=FelixdAdmission` the admission model. `TLC_WORKERS=4` caps TLC's worker threads.
+# model, `TLA_MODULE=FelixdAdmission` the admission model and
+# `TLA_MODULE=FelixdPlacement` the placement groups model. `TLC_WORKERS=4` caps TLC's worker threads.
 #
 # `TLC_SIMULATE=N` walks N random behaviours of up to `TLC_DEPTH` (default
 # 100) steps instead of checking every state. The nightly job runs
-# FelixdFull, FelixdSpecsFull and FelixdMergeFull this way, as they are too
+# FelixdFull, FelixdSpecsFull, FelixdMergeFull and FelixdPlacementFull this way, as they are too
 # large to check exhaustively.
 #
 # Needs Java 11+ on PATH. The TLA+ tools are fetched once, pinned by release
@@ -118,7 +119,32 @@ felixd_admission_expectations=(
   "FelixdAdmissionFoldMemo violates NoRollback"
 )
 
+felixd_placement_expectations=(
+  "FelixdPlacement pass"
+  "FelixdPlacementLease pass"
+  "FelixdPlacementCrashLease pass"
+  "FelixdPlacementSilent pass"
+  "FelixdPlacementNoBarrier violates GroupTogether"
+  # GroupTogetherFresh leaves out the members the known splits mark; this
+  # shows it still finds a split from another cause.
+  "FelixdPlacementNoBarrierFresh violates GroupTogetherFresh"
+  "FelixdPlacementNoSplitGuard violates SplitNeverKept"
+  "FelixdPlacementPerMember violates GroupWhole"
+  "FelixdPlacementNoFence violates StaleNeverApplied"
+  "FelixdPlacementLiveTakers violates ReplaySame"
+  # A known gap, felixd #247: a live holder judged silent keeps its member
+  # while the rest of the group moves.
+  "FelixdPlacementSilentHolder violates GroupTogether"
+  # felixd #248: a restarted agent claims on a record its reader has passed.
+  "FelixdPlacementRestartLag violates GroupTogether"
+)
+# Checked only when named, as the nightly walks them: too large for every state.
+felixd_placement_named=(
+  "FelixdPlacementFull pass"
+)
+
 MODULE="${TLA_MODULE:-Felixd}"
+named=()
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
   FelixdTrimming) MODULE=Felixd; expectations=("${felixd_trim_expectations[@]}") ;;
@@ -126,6 +152,7 @@ case "$MODULE" in
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
   FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
   FelixdAdmission) expectations=("${felixd_admission_expectations[@]}") ;;
+  FelixdPlacement) expectations=("${felixd_placement_expectations[@]}"); named=("${felixd_placement_named[@]}") ;;
   *) echo "unknown TLA_MODULE: $MODULE" >&2; exit 1 ;;
 esac
 
@@ -147,7 +174,7 @@ if [ "$#" -gt 0 ]; then
   selected=()
   for name in "$@"; do
     entry="$name pass"
-    for known in "${expectations[@]}"; do
+    for known in "${expectations[@]}" ${named[@]+"${named[@]}"}; do
       if [ "${known%% *}" = "$name" ]; then entry="$known"; fi
     done
     selected+=("$entry")
@@ -165,10 +192,14 @@ for entry in "${selected[@]}"; do
   if [ -n "${TLC_SIMULATE:-}" ]; then
     mode=(-simulate "num=$TLC_SIMULATE" -depth "${TLC_DEPTH:-100}")
   fi
-  status=0
-  output="$(cd "$SPEC_DIR" && java -XX:+UseParallelGC -jar "../$JAR" -metadir "$scratch" \
+  # TLC's per-minute progress lines go to the log as it runs, so a run the
+  # job times out still shows how far it got.
+  (cd "$SPEC_DIR" && { java -XX:+UseParallelGC -jar "../$JAR" -metadir "$scratch" \
     ${mode[@]+"${mode[@]}"} -deadlock -workers "${TLC_WORKERS:-auto}" -checkpoint 0 \
-    -config "$cfg.cfg" "$MODULE.tla" 2>&1)" || status=$?
+    -config "$cfg.cfg" "$MODULE.tla" 2>&1; echo $? >"$scratch/status"; }) \
+    | tee "$scratch/tlc.log" | grep --line-buffered -E "^Progress\(" || true
+  status="$(cat "$scratch/status")"
+  output="$(cat "$scratch/tlc.log")"
   rm -rf "$scratch"
   echo "$output" | grep -E "states generated|distinct states|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
   case "$expect" in
@@ -181,7 +212,8 @@ for entry in "${selected[@]}"; do
       ;;
     "violates "*)
       invariant="${expect#violates }"
-      if ! grep -q "Invariant $invariant is violated" <<<"$output"; then
+      # The exact name: GroupTogether must not match GroupTogetherFresh.
+      if ! grep -qE "Invariant ${invariant} is violated\." <<<"$output"; then
         echo "   FAIL: expected TLC to violate $invariant"
         echo "$output" | tail -60
         failed=1

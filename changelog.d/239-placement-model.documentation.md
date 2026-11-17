@@ -1,0 +1,1 @@
+- The TLA model covers placement groups: one `group` record or none, no group running split before the group bound, a split never placed again, no stale-epoch record applied, and replay after a takeover. It found a group can run split when a live holder is judged silent (#247). New `tla-placement` CI job (#239).

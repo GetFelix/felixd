@@ -2513,8 +2513,7 @@ The scheduler reads a recorded stream of node facts (discovered, measured and
 operator-asserted, with asserted winning), not the `nodes` cache, so its view
 replays. See [Lessons from Barrelfish](#lessons-from-barrelfish).
 
-The TLA model these rules need is sketched in
-[formal.md](formal.md#placement-proposed).
+[formal.md](formal.md#placement-groups) models groups; the other rules are not modelled yet.
 
 ## Effects
 

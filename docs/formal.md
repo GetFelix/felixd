@@ -10,6 +10,8 @@ it ([Spec history](#spec-history)).
 `tla-merge` job checks it ([Several inputs](#several-inputs)).
 `specs/FelixdAdmission.tla` models admission's projection and the gate a spec record passes
 before it runs, and the `tla-admission` job checks it ([Admission](#admission)).
+`specs/FelixdPlacement.tla` models placement groups, and the `tla-placement` job checks it
+([Placement groups](#placement-groups)).
 `Felixd.tla` and `FelixdMerge.tla` also model trimming and the deletion it allows
 ([Trimming](#trimming)).
 
@@ -20,6 +22,7 @@ TLC_SIMULATE=100000 scripts/check_tla.sh FelixdFull  # random behaviours, not ev
 TLA_MODULE=FelixdSpecs scripts/check_tla.sh          # the spec history model
 TLA_MODULE=FelixdMerge scripts/check_tla.sh          # the merge log model
 TLA_MODULE=FelixdAdmission scripts/check_tla.sh      # the admission model
+TLA_MODULE=FelixdPlacement scripts/check_tla.sh      # the placement groups model
 ```
 
 ## What it checks
@@ -540,92 +543,109 @@ record. A two-stage model would be two copies of this one with the first's outpu
 second, and would check nothing the one-stage model does not. `tests/pipeline.rs` tests the
 composition.
 
-## Placement (proposed)
+## Placement groups
 
-Not written yet. This is what the model for the [placement
-rules](design.md#placement-rules) (#100) needs, so the rules can be checked before they
-are built.
+`specs/FelixdPlacement.tla` models placement groups (#100): the scheduler places a group with one
+`group` record on `wl.scheduler.out` or not at all, and an agent holds a free member for that record
+until the group bound, then claims it first claim wins with reason `group-bound`. The
+`tla-placement` job checks it, and the `TLA nightly` workflow walks `FelixdPlacementFull`.
 
-Why a model of its own. `Felixd.tla` leaves placement out because assignments only narrow
-which node tries first, so they remove behaviours and the safety invariants carry over
-([Not modelled](#not-modelled)). That argument still holds for the workload's own streams:
-the placement record goes on `wl.<id>.placed` and adds no write to `wl.<id>.out`. What it does
-not cover is placement's own promises: that a group is never seen in part and its members are
-held until it lands or the bound passes, that a claim names the authority the claimer's own view
-supported, and that a free workload is still claimed when agents disagree about the scheduler.
-Those need `specs/FelixdPlacement.tla`, checked by a `tla-placement` job like the others.
+```bash
+TLA_MODULE=FelixdPlacement scripts/check_tla.sh
+```
 
-The fence is taken as given from `Felixd.tla`: `Assign` and `AssignGroup` land only at the tail
-behind the writer's own claim, so a deposed scheduler's record never lands after a later claim.
-The model does not check that again.
+One group of `K` members and `N` nodes. The scheduler is the fold of its input log (spec records
+and node facts) by `Scheduler::step` and `place_groups` (`crates/core/src/schedule.rs`). Its
+holder can crash, or be paused past its lease while it still has an output to append; the next
+holder claims `wl.scheduler.out` at the next epoch and replays from any snapshot it took. A node
+judged silent by `sys.facts` time is a `lapse` input, which a later fact from the node undoes.
+Agents follow `turn` (`crates/core/src/placement.rs`) as `wait_for_chance` and `assigned` call it
+(`crates/agent/src/agent.rs`), reading the scheduler's output through `Followed::fold` and
+`group_placement` (`crates/agent/src/assignments.rs`). The group bound is counted in a node's own
+steps, from when it first saw the member free with the group complete, or free at all while it is
+not. As in `wait_for_chance`, a node starts its clocks over only when its lease watch shows the
+member held with time left, which a watch may skip by going from free to free; an agent restart
+also starts them over.
 
-State, kept small:
-
-- `sched`: the `scheduler` workload's lease holder and epoch, with `SchedTakeover` bumping the
-  epoch.
-- `out`: `wl.scheduler.out` as a sequence of `assign(w, n, e)`, `group(G, map, e)` and
-  `table(map, e)` records, `e` the writer's epoch.
-- `facts`: per node, its last fact's `assignments` offset, holdings and incarnation, with an
-  abstract append time.
-- `view[n]`: each node's read position on `out`, its incarnation `inc[n]` (bumped by `Crash`),
-  its own judgement of scheduler health and of each assignee, chosen nondeterministically, so
-  every disagreement between nodes is explored, and per workload its step counters for the grace,
-  the bound and the group bound, each counting the node's steps since it first saw the workload
-  free (for a group member, free with the group complete).
-- `lease[w]`, `claims[w]` and `placed[w]`: the lease, the claim records, and the placement
-  records, each carrying the claim epoch, `placed`, `assignment`, `scheduler_epoch`, the reason,
-  and a copy of the claimer's `view[n]` when it claimed, counters included (a history variable
-  for the checks below).
-
-Actions: `Assign`, `AssignGroup` and `Table`, `SchedCrash` and `SchedTakeover`, `Tick` (a fact
-whose append time crosses a period, against the largest seen so far), `Read` (a node advances
-`view`), `ClaimAssigned` and `ClaimFirst` (guarded by the agent rules and the reason order, with
-the bound, the grace and the group bound read from the counters in `view[n]`), `Fact`, and
-`Crash` and `Expire` for nodes. Three workloads, two forming one group and one ungrouped, two
-nodes and one scheduler takeover should be enough to reach every case in the failure list. The
-ungrouped workload is what reaches `Assign`, the grace, the bound and the reasons other than
-`group-bound`, since a group member is only ever placed by `AssignGroup` or claimed past the
-group bound.
-
-Invariants:
+The invariants are stated over what can be observed (`wl.scheduler.out`, the input log, the leases
+and which nodes are up), not over the guards that are meant to keep them true, with one exception:
+`GroupTogether` also reads `early`, a ghost set at claim time from the claimer's own clock. It is
+only as good as the model of that clock. A clock that never reached the bound, or one that always
+did, would make `GroupTogether` hold by construction or say nothing.
 
 | Invariant | Says |
 |---|---|
-| `GroupWhole` | Every prefix of `out` that a node can read holds each group's members all at one record or none. |
-| `GroupHeld` | A group member is claimed only on a `group` record in the claimer's view that places it there, or with reason `group-bound` when the group-bound counter in the copied view had passed the bound. |
-| `SplitStays` | A split group stays split while any member runs: a member is claimed only while free, and the scheduler writes a `group` record for a group with a running member, in its view, only if the record keeps every running member on its node. |
-| `OneAuthority` | An `assigned` placement's `assignment` was, in the claimer's view when it claimed, the latest record for that workload and named the claimer, and the claimer then judged the scheduler healthy. This is about the agent's decision; the fence says nothing about which landed record an agent follows. |
-| `FirstClaimTrue` | A `first-claim` placement's reason held in the claimer's copied view, counters included, when it claimed, and no reason earlier in the order did. |
-| `StatusMonotone` | Within one incarnation of a node, the `assignments` offset on its facts never decreases, and is never past the tail of `out`. |
-| `ReplaySame` | The assignments are a function of the recorded inputs and ticks: re-folding `facts`, specs and ticks from the scheduler's snapshot gives the records on `out`. |
-| `OneOwner` | At most one node holds each workload's lease, whatever the assignments say (a check that placement adds no ownership path). |
+| `GroupWhole` | Every `group` record names every member, or none (a withdrawal). |
+| `GroupTogether` | Before the bound a group never runs split: one whole `group` record places every member that runs on an up node and was claimed before its claimer's bound, on the node that runs it. |
+| `GroupTogetherFresh` | `GroupTogether` for the members neither known split marks: not claimed under a record no longer in force (#248), and not held or claimed by a live node judged silent (#247). |
+| `SplitNeverKept` | A record that replaces a whole record never places a member on the node the facts it answers show running it off the record it replaces. |
+| `ReplaySame` | Once a holder has caught up with what was written, from whichever snapshot it replayed, the record in force on `wl.scheduler.out` is its own placement. |
+| `StaleNeverApplied` | No agent claims a member on a `group` record whose epoch is lower than a claim of `wl.scheduler.out` before it. |
 
-Liveness, under weak fairness of node steps and expiry: `FreeIsClaimed` holds with groups and
-with nodes that disagree about the scheduler, because both bounds fire on a node's own steps.
+| Configuration | Expected | Model | Distinct states | Time |
+|---|---|---|---|---|
+| `FelixdPlacement` | pass, all but `GroupTogether` (#247, #248) | two nodes of room two, a group of two, three facts or lapses, a takeover with replay, a node crash | 70,462,210 | 17 min 46 s |
+| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 20,020,064 | 5 min 25 s |
+| `FelixdPlacementCrashLease` | pass, all but `GroupTogether` (#247, #248) | a node crash and a lease lost by a live holder, no takeover | 21,866,290 | 9 min 47 s |
+| `FelixdPlacementSilent` | pass, all but `GroupTogether` (#247) | the `FelixdPlacementSilentHolder` model | 662,344 | 19 s |
+| `FelixdPlacementFull` | pass, all but `GroupTogether` (#247, #248; nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
+| `FelixdPlacementSilentHolder` | `GroupTogether` (#247) | a live node judged silent keeps its member while the group moves | 507,730 at the violation | 9 s |
+| `FelixdPlacementRestartLag` | `GroupTogether` (#248) | a restarted node claims on the record in its view after the group moved | 2,160,254 at the violation | 31 s |
+| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | 16 at the violation | 1 s |
+| `FelixdPlacementNoBarrierFresh` | `GroupTogetherFresh` | `FelixdPlacementNoBarrier`: the ghosts for #247 and #248 do not hide another split | 16 at the violation | under 1 s |
+| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | 191,668 at the violation | 3 s |
+| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | 181 at the violation | under 1 s |
+| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | 18,454 at the violation | 1 s |
+| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | 2,564 at the violation | under 1 s |
 
-Twins, each expected to fail:
+The pass configurations start with the whole group admitted and leave three inputs for facts and
+lapses, enough for a second group record: re-placing a member a dead node held. The
+`tla-placement` job checks each pass configuration in its own leg, and the twins in another.
 
-- `FelixdPlacementSplitGroup`: a group written as one `assign` per member. Expected: `GroupWhole`
-  after a `SchedCrash` between members.
-- `FelixdPlacementNoHold`: `ClaimFirst` allowed on a group member before the group bound.
-  Expected: `GroupHeld`, on a `group-bound` claim whose copied counter is below the bound.
-- `FelixdPlacementFirstInView`: `ClaimAssigned` follows the first record for the workload in the
-  claimer's view rather than the latest. Expected: `OneAuthority`, after a reassignment.
-- `FelixdPlacementWrongReason`: `ClaimFirst` records `bound` without checking the earlier
-  reasons. Expected: `FirstClaimTrue`, on the ungrouped workload with the scheduler unhealthy.
-- `FelixdPlacementResetRead`: a failed read sends `view` back to the latest table within one
-  incarnation. Expected: `StatusMonotone`.
-- `FelixdPlacementWallClock`: `Tick` driven by a free variable instead of fact append times.
-  Expected: `ReplaySame`.
-- `FelixdPlacementSkipLease`: `ClaimAssigned` writes the lease without the conditional write,
-  since the node was assigned. Expected: `OneOwner`.
-- `FelixdPlacementNoBound`: `ClaimFirst` disabled while any assignment exists. Expected:
-  `FreeIsClaimed`, on the ungrouped workload with its assignee crashed.
-- `FelixdPlacementMoveRunning`: `AssignGroup` may move a running member. Expected:
-  `SplitStays`.
+Two known splits (#247, #248) break `GroupTogether` wherever they can happen, and a configuration
+that expects them can say nothing about a third. So each claim records two ghosts: whether the
+claimer's view held a record other than the one in force (#248), and whether the claimer was
+judged silent while up or claims while an input the scheduler has yet to act on leaves it silent
+(#247), which a lapse also sets on what a live node holds. The second covers a node judged silent
+while down that restarts and claims before its next fact is folded. A node's silent mark lasts
+until it crashes, so some later claims of such a node are not checked.
+`GroupTogetherFresh` checks the rest, in every pass configuration and the nightly walk, and
+`FelixdPlacementNoBarrierFresh` shows it is not empty.
 
-Left out on purpose: the `workloads` writer change, the grant rows and the any-node writer to
-`wl.scheduler.out`, which are access control rather than protocol, and the size of facts.
+`FelixdPlacementNoSplitGuard` does not break `GroupTogether`: the record it writes keeps every
+member where the facts show it running, so the members claimed after it agree with one record.
+What it breaks is that a split made past the bound becomes the placement.
+
+A known gap (#248): a restarted agent reads `wl.scheduler.out` a page at a time and runs `turn` on
+whatever its view holds, and the group path follows the record in view whatever the scheduler's
+health. A node that died holding no member restarts with the old record in view, claims under it
+before the bound, while the node the group moved to claims the rest under the new one.
+`FelixdPlacementRestartLag` pins it.
+
+A known gap (#247): a live node judged silent by `sys.facts` time keeps the member it holds, since
+nothing stops its agent, while `running()` skips silent nodes and `place_groups` moves the group
+to nodes that are takers. The rest of the group is claimed there before the bound, and the group
+runs split. `FelixdPlacementSilentHolder` pins it. A node that crashed and was judged silent while
+down does the same: it restarts, `write_facts` runs beside the claim loop with nothing ordering
+them, so it can claim under the record in force before its next fact lands, and the scheduler
+moves the group off it. `FelixdPlacement` and `FelixdPlacementCrashLease` reach this one.
+
+What the model leaves out: ungrouped workloads and the `assign`, grace and bound paths of `turn`;
+`table` records, which hold the same group placements as the records before them; the skip past a
+trimmed range in `read_new` (`crates/agent/src/assignments.rs`), which for one group leaves the
+record in force at an earlier offset until a later record or the table is folded, the same as an
+agent whose view lags, which the model has; a member's spec
+stopping, so a group never becomes incomplete again and is never withdrawn; two groups under one
+name; the claim delay, which only orders claims; and the epoch fence and exactly-once of
+`wl.scheduler.out`, which `Felixd.tla` checks.
+
+For the scheduler, "running" is as its facts say: a member on a node the facts call silent does
+not count, so the scheduler can place it again elsewhere while its old holder still has the lease.
+No second holder can claim that member until its lease lapses, but the rest of its group can move
+(#247). design.md's "no assignment moves a running member" holds only in the facts' sense.
+
+The other promises in the placement rules (one authority per claim, status offsets, liveness when
+agents disagree about the scheduler) are not modelled yet.
 
 ## Not modelled
 
@@ -661,8 +681,7 @@ Left out on purpose: the `workloads` writer change, the grant rows and the any-n
   only for at most `--assignment-bound-ms` from when it first saw the workload free, whatever the
   assignment does meanwhile, then claims as before, so a free workload is still claimed. The
   scheduler itself is a workload with two inputs, which `Felixd.tla` and `FelixdMerge.tla` already
-  cover. The placement rules' own promises (#100) need a model of their own, sketched in
-  [Placement (proposed)](#placement-proposed).
+  cover. [Placement groups](#placement-groups) models groups.
 - The retry limit in `OutputLog::append`.
 - Nondeterministic workloads, and the instance-history effects of design review finding 1.
 
