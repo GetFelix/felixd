@@ -187,6 +187,9 @@ struct Standing {
     /// The next nonce. It starts from the clock so a restarted agent does
     /// not reuse one an earlier run left on `wl.scheduler.out`.
     next_relist: AtomicU64,
+    /// Bumped on every change of `draining`, so a claim decided before a
+    /// drain and lift is not made on that decision.
+    drain_changes: AtomicU64,
 }
 
 impl Standing {
@@ -204,6 +207,7 @@ impl Standing {
             announce_now: Notify::new(),
             relist: AtomicU64::new(seed),
             next_relist: AtomicU64::new(seed.wrapping_add(1).max(1)),
+            drain_changes: AtomicU64::new(0),
         }
     }
 
@@ -218,9 +222,21 @@ impl Standing {
                 let next = self.next_relist.fetch_add(1, Ordering::SeqCst).max(1);
                 self.relist.store(next, Ordering::SeqCst);
             }
+            self.drain_changes.fetch_add(1, Ordering::SeqCst);
             *now = marked;
             true
         })
+    }
+
+    /// How often `draining` has changed, for [`Standing::drained_since`].
+    fn drain_changes(&self) -> u64 {
+        self.drain_changes.load(Ordering::SeqCst)
+    }
+
+    /// Whether `draining` has changed since [`Standing::drain_changes`]
+    /// said `decided`.
+    fn drained_since(&self, decided: u64) -> bool {
+        self.drain_changes() != decided
     }
 
     /// Whether this node has been relisted: `holds` says whether its view
@@ -817,7 +833,7 @@ async fn own(
                 _ = stop.wait_for(|stop| *stop) => return,
             }
         }
-        let Some(authority) = node
+        let Some((authority, decided)) = node
             .wait_for_chance(&id, spec.record, spec.group.as_ref(), &mut lease, &mut stop)
             .await
         else {
@@ -892,6 +908,11 @@ async fn own(
         // much older in a process that was stopped.
         let under_way = ClaimUnderWay::start(&node.standing);
         match node.mark_reads.marked(&node.felix, &node.node_id).await {
+            // A drain and lift since the decision: the scheduler may have
+            // moved the workload's group on the draining fact (#256, #257).
+            Ok(false) if node.standing.drained_since(decided) => {
+                continue;
+            }
             Ok(false) => {}
             Ok(true) => {
                 note_drain(&node, true);
@@ -1162,8 +1183,8 @@ fn placement_record(epoch: u64, authority: Authority) -> PlacementRecord {
 
 impl Node {
     /// Waits until the lease looks free, this node has room and the placement
-    /// policy lets it claim, and returns the authority it claims under.
-    /// `None` means stop.
+    /// policy lets it claim, and returns the authority it claims under and
+    /// the drain changes counted before the decision. `None` means stop.
     async fn wait_for_chance(
         &self,
         id: &str,
@@ -1171,7 +1192,7 @@ impl Node {
         group: Option<&Group>,
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
-    ) -> Option<Authority> {
+    ) -> Option<(Authority, u64)> {
         let mut draining = self.standing.draining.subscribe();
         let mut assignments = self.assignments.changes();
         // When this node first saw the workload free, whatever its
@@ -1225,11 +1246,12 @@ impl Node {
                 }
                 group_since.unwrap_or(since).elapsed()
             });
+            let decided = self.standing.drain_changes();
             let assigned = self.assigned(id, record, group.zip(held), since).await;
             match self.placement.turn(id, &assigned, self.random()) {
                 Turn::Claim(delay, authority) => {
                     match wait_or_change(delay, lease, &mut assignments, stop).await {
-                        Paused::Elapsed => return Some(authority),
+                        Paused::Elapsed => return Some((authority, decided)),
                         Paused::Changed => {}
                         Paused::Stop => return None,
                     }

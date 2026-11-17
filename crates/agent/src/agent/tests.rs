@@ -305,3 +305,19 @@ fn a_lift_takes_a_new_nonce_before_it_shows() {
     assert!(!standing.set_draining(false));
     assert_eq!(fact_of(&standing).relist, before);
 }
+
+#[test]
+fn a_claim_decided_before_a_drain_and_lift_is_not_made() {
+    let standing = Standing::new();
+    let decided = standing.drain_changes();
+    assert!(!standing.drained_since(decided));
+    // A drain and lift between the decision and the claim's own mark read,
+    // which then finds no mark.
+    standing.set_draining(true);
+    standing.set_draining(false);
+    assert!(!*standing.draining.borrow());
+    assert!(standing.drained_since(decided));
+    let decided = standing.drain_changes();
+    assert!(!standing.set_draining(false));
+    assert!(!standing.drained_since(decided));
+}

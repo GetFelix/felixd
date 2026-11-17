@@ -412,7 +412,7 @@ Node facts are on `sys.facts`, one shard, and are the scheduler's second input. 
 nothing changes, `max_workloads`, `held`, how many workloads it holds, `holding`, their ids (at most
 `max_workloads`, left out when empty), and the booleans `draining` and `blocked` (it cannot read
 its drain mark), and `relist`, a nonce the node sends after it starts and after each lift of its
-drain until the scheduler answers it (left out when 0). Those after `max_workloads` default to 0,
+drain, while not draining, until it has read the scheduler's answer (left out when 0). Those after `max_workloads` default to 0,
 empty and false.
 An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
 a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
