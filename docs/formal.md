@@ -584,9 +584,9 @@ did, would make `GroupTogether` hold by construction or say nothing.
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdPlacement` | pass, all but `GroupTogether` (#247, #248) | two nodes of room two, a group of two, three facts or lapses, a takeover with replay, a node crash | TBD | TBD |
+| `FelixdPlacement` | pass, all but `GroupTogether` (#247, #248) | two nodes of room two, a group of two, three facts or lapses, a takeover with replay, a node crash | 70,462,210 | 17 min 46 s |
 | `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 20,020,064 | 5 min 25 s |
-| `FelixdPlacementCrashLease` | pass, all but `GroupTogether` (#247, #248) | a node crash and a lease lost by a live holder, no takeover | TBD | TBD |
+| `FelixdPlacementCrashLease` | pass, all but `GroupTogether` (#247, #248) | a node crash and a lease lost by a live holder, no takeover | 21,866,290 | 9 min 47 s |
 | `FelixdPlacementSilent` | pass, all but `GroupTogether` (#247) | the `FelixdPlacementSilentHolder` model | 662,344 | 19 s |
 | `FelixdPlacementFull` | pass, all but `GroupTogether` (#247, #248; nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
 | `FelixdPlacementSilentHolder` | `GroupTogether` (#247) | a live node judged silent keeps its member while the group moves | 507,730 at the violation | 9 s |
