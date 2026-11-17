@@ -895,10 +895,19 @@ async fn an_undrained_node_takes_its_group_back_well_before_the_bound() {
     scheduler_on(&t, &nodes).await;
     run_in_group(&t, "g9x", "pair=g9x,g9y").await;
     run_in_group(&t, "g9y", "pair=g9x,g9y").await;
+    // The first record may put the members on different nodes, so drain the
+    // other node and wait for the scheduler to join the group on `on`.
     let [on, _] = group_held(&t, "pair", ["g9x", "g9y"]).await;
     let other = nodes.iter().find(|n| **n != on).unwrap();
-    // With no taker left, the record keeps the group on `on`.
     drained(&t, other).await;
+    eventually("the group record to join on one node", SOON, || async {
+        let record = group_record(&t, "pair").await?;
+        record.iter().all(|(_, n)| *n == on).then_some(())
+    })
+    .await;
+    let held = group_held(&t, "pair", ["g9x", "g9y"]).await;
+    assert_eq!(held, [on.clone(), on.clone()]);
+    // With no taker left, the record keeps the group on `on`.
     drained(&t, &on).await;
     let record = group_record(&t, "pair").await.expect("a group record");
     assert!(record.iter().all(|(_, n)| *n == on), "{record:?}");
