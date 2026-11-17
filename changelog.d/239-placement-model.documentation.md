@@ -1,0 +1,1 @@
+- The TLA model covers placement groups: one `group` record or none, the agent holding a member for it until the group bound, a split never placed again, the scheduler fence and replay after a takeover. New `tla-placement` CI job (#239).

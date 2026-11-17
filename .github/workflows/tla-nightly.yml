@@ -1,6 +1,6 @@
 name: TLA nightly
 
-# FelixdFull, FelixdSpecsFull and FelixdMergeFull are too large to check every state, so this
+# FelixdFull, FelixdSpecsFull, FelixdMergeFull and FelixdPlacementFull are too large to check every state, so this
 # walks random behaviours of them instead. The pull request suite checks the
 # smaller configurations exhaustively.
 #
@@ -28,6 +28,7 @@ jobs:
           - { module: Felixd, config: FelixdFull, traces: "" }
           - { module: FelixdSpecs, config: FelixdSpecsFull, traces: "" }
           - { module: FelixdMerge, config: FelixdMergeFull, traces: "750000" }
+          - { module: FelixdPlacement, config: FelixdPlacementFull, traces: "" }
     name: simulate ${{ matrix.config }}
     env:
       TLC_SIMULATE: ${{ inputs.traces || matrix.traces || '3000000' }}

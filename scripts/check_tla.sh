@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-check a module in specs/ under each configuration registered for it
 # below, and hold each to its outcome. `TLA_MODULE` picks the module:
-# Felixd (the default), FelixdTrimming, FelixdIntensity, FelixdSpecs, FelixdMerge or FelixdAdmission.
+# Felixd (the default), FelixdTrimming, FelixdIntensity, FelixdSpecs, FelixdMerge, FelixdAdmission or FelixdPlacement.
 #
 # A configuration expected to pass must pass. One expected to find a
 # violation must find exactly that invariant violated: it turns one mechanism
@@ -12,11 +12,12 @@
 # registered below must pass. `TLA_MODULE=FelixdTrimming` checks the trimming
 # configurations of Felixd. `TLA_MODULE=FelixdSpecs scripts/check_tla.sh`
 # checks the spec history model, `TLA_MODULE=FelixdMerge` the merge log
-# model and `TLA_MODULE=FelixdAdmission` the admission model. `TLC_WORKERS=4` caps TLC's worker threads.
+# model, `TLA_MODULE=FelixdAdmission` the admission model and
+# `TLA_MODULE=FelixdPlacement` the placement groups model. `TLC_WORKERS=4` caps TLC's worker threads.
 #
 # `TLC_SIMULATE=N` walks N random behaviours of up to `TLC_DEPTH` (default
 # 100) steps instead of checking every state. The nightly job runs
-# FelixdFull, FelixdSpecsFull and FelixdMergeFull this way, as they are too
+# FelixdFull, FelixdSpecsFull, FelixdMergeFull and FelixdPlacementFull this way, as they are too
 # large to check exhaustively.
 #
 # Needs Java 11+ on PATH. The TLA+ tools are fetched once, pinned by release
@@ -118,6 +119,15 @@ felixd_admission_expectations=(
   "FelixdAdmissionFoldMemo violates NoRollback"
 )
 
+felixd_placement_expectations=(
+  "FelixdPlacement pass"
+  "FelixdPlacementNoBarrier violates GroupHeld"
+  "FelixdPlacementNoSplitGuard violates SplitNeverKept"
+  "FelixdPlacementPerMember violates GroupWhole"
+  "FelixdPlacementNoFence violates FencedOut"
+  "FelixdPlacementLiveTakers violates ReplaySame"
+)
+
 MODULE="${TLA_MODULE:-Felixd}"
 case "$MODULE" in
   Felixd) expectations=("${felixd_expectations[@]}") ;;
@@ -126,6 +136,7 @@ case "$MODULE" in
   FelixdSpecs) expectations=("${felixd_specs_expectations[@]}") ;;
   FelixdMerge) expectations=("${felixd_merge_expectations[@]}") ;;
   FelixdAdmission) expectations=("${felixd_admission_expectations[@]}") ;;
+  FelixdPlacement) expectations=("${felixd_placement_expectations[@]}") ;;
   *) echo "unknown TLA_MODULE: $MODULE" >&2; exit 1 ;;
 esac
 
