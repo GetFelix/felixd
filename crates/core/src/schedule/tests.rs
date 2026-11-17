@@ -35,6 +35,7 @@ fn fact(node: &str) -> NodeFact {
         holding: BTreeSet::new(),
         draining: false,
         blocked: false,
+        relist: 0,
     }
 }
 
@@ -372,6 +373,7 @@ fn a_fact_never_exceeds_its_worst_case() {
         holding: ids,
         draining: true,
         blocked: true,
+        relist: 0,
     };
     let worst = worst_fact_bytes("node-with-a-long-name", 100);
     assert!(fact.encode().len() <= worst);
@@ -806,4 +808,59 @@ fn a_group_is_not_moved_off_a_blocked_node_that_may_be_claiming_a_member() {
     };
     let out = f.fact(5, draining);
     assert_eq!(out, vec![f.group("g", &[("x", "b"), ("y", "b")])]);
+}
+
+fn relisting(node: &str, relist: u64) -> NodeFact {
+    NodeFact {
+        relist,
+        ..fact(node)
+    }
+}
+
+#[test]
+fn a_relisting_fact_is_answered_after_every_other_output_of_its_step() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    f.run(1, "w");
+    let draining = NodeFact {
+        draining: true,
+        ..fact("a")
+    };
+    assert_eq!(f.fact(2, draining), vec![f.assign("w", Some("b"))]);
+    let relisted = |node: &str, relist| Record {
+        specs: 1,
+        change: Change::Relisted {
+            node: node.into(),
+            relist,
+        },
+    };
+    // b drains too while c relists: the move comes first, so a reader that
+    // has the answer has the move.
+    let draining = NodeFact {
+        draining: true,
+        ..fact("b")
+    };
+    assert_eq!(f.fact(3, draining), vec![]);
+    assert_eq!(
+        f.fact(4, relisting("c", 7)),
+        vec![f.assign("w", Some("c")), relisted("c", 7)]
+    );
+    // A tick answers after its table.
+    let out = f.fact(TABLE_EVERY_MICROS, relisting("c", 8));
+    assert!(matches!(out[0].change, Change::Table { .. }), "{out:?}");
+    assert_eq!(out[1..], [relisted("c", 8)]);
+    // A draining fact, or one with no nonce, is not answered.
+    let draining = NodeFact {
+        draining: true,
+        ..relisting("a", 9)
+    };
+    assert_eq!(f.fact(TABLE_EVERY_MICROS + 1, draining), vec![]);
+    assert_eq!(f.fact(TABLE_EVERY_MICROS + 2, fact("a")), vec![]);
+}
+
+#[test]
+fn a_fact_without_a_nonce_encodes_as_before() {
+    let encoded = String::from_utf8(fact("a").encode()).unwrap();
+    assert!(!encoded.contains("relist"), "{encoded}");
+    let back = NodeFact::decode(&relisting("a", 5).encode()).unwrap();
+    assert_eq!(back.relist, 5);
 }

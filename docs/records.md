@@ -411,7 +411,9 @@ Node facts are on `sys.facts`, one shard, and are the scheduler's second input. 
 `{"format": 1, "value": ...}` with `node`, the node's id, `every_ms`, how often it appends one when
 nothing changes, `max_workloads`, `held`, how many workloads it holds, `holding`, their ids (at most
 `max_workloads`, left out when empty), and the booleans `draining` and `blocked` (it cannot read
-its drain mark). Those after `max_workloads` default to 0, empty and false.
+its drain mark), and `relist`, a nonce the node sends after it starts and after each lift of its
+drain until the scheduler answers it (left out when 0). Those after `max_workloads` default to 0,
+empty and false.
 An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
 a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
 is more than three of the node's `every_ms` past its last fact, and forgets it after thirty.
@@ -431,6 +433,10 @@ stepped, and `kind`:
   A group's members are never in `assign` records or in `table`'s `assignments`. An older agent
   cannot decode it and passes over it.
 - `progress`, with no key: a spec record that changed no assignment.
+- `relisted`, with no key, with `node` and `relist`: the scheduler stepped that node's fact
+  carrying that nonce, which did not say draining. It is the last output of that step, so a reader
+  that has it has every output of every step up to that fact. An older agent cannot decode it and
+  passes over it.
 
 `table` also carries `groups`, an object from group name to its `members` object, left out when
 empty; like `assignments` it replaces every group record before it.

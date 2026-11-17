@@ -230,3 +230,78 @@ fn a_fact_names_every_held_workload_even_past_max_workloads() {
         names.iter().map(|n| (*n).to_owned()).collect()
     );
 }
+
+fn scheduler_output(offset: u64, change: felixd_core::schedule::Change) -> Vec<u8> {
+    use felixd_core::output::{Addressed, OutputHeader, encode_addressed};
+    let payload = felixd_core::schedule::Record { specs: 0, change }.encode();
+    let header = OutputHeader {
+        input_offset: offset,
+        index: 0,
+    };
+    let addressed = Addressed {
+        name: "out",
+        key: None,
+        payload: &payload,
+    };
+    encode_addressed(header, 1, addressed).unwrap()
+}
+
+fn answer(node: &str, relist: u64) -> felixd_core::schedule::Change {
+    felixd_core::schedule::Change::Relisted {
+        node: node.into(),
+        relist,
+    }
+}
+
+#[test]
+fn a_group_member_is_placed_here_only_once_relisted_since_start_and_every_lift() {
+    let assignments = Assignments::new();
+    let standing = Standing::new();
+    let group = Group::new("g", ["x".to_owned(), "y".to_owned()]);
+    let members = [("x".into(), "n".into()), ("y".into(), "n".into())];
+    let record = felixd_core::schedule::Change::Group {
+        group: "g".into(),
+        members: members.into(),
+    };
+    assignments.fold(3, &scheduler_output(0, record));
+    let placed = || group_placed(&assignments, &standing, "n", "x", &group);
+    let here = GroupPlaced::ThisNode {
+        assignment: 3,
+        scheduler_epoch: 1,
+    };
+    // Just started: the scheduler's last fact of n may say it is draining.
+    assert_eq!(placed(), GroupPlaced::Unplaced);
+    let first = fact_of(&standing).relist;
+    assert_ne!(first, 0);
+    assignments.fold(4, &scheduler_output(1, answer("n", first)));
+    assert_eq!(placed(), here);
+    assert_eq!(fact_of(&standing).relist, 0);
+
+    // Drained, then lifted before the scheduler folds a fact of n that is
+    // not draining (#257): the answer to an earlier nonce does not count.
+    assert!(standing.set_draining(true));
+    assert_eq!(fact_of(&standing).relist, 0);
+    assert!(standing.set_draining(false));
+    let again = fact_of(&standing).relist;
+    assert!(again != 0 && again != first);
+    assert_eq!(placed(), GroupPlaced::Unplaced);
+    assignments.fold(5, &scheduler_output(2, answer("o", again)));
+    assert_eq!(placed(), GroupPlaced::Unplaced);
+    assignments.fold(6, &scheduler_output(3, answer("n", again)));
+    assert_eq!(placed(), here);
+}
+
+#[test]
+fn a_lift_takes_a_new_nonce_before_it_shows() {
+    let standing = Standing::new();
+    standing.set_draining(true);
+    let mut lifted = standing.draining.subscribe();
+    let before = standing.next_relist.load(Ordering::SeqCst);
+    standing.set_draining(false);
+    assert!(lifted.has_changed().unwrap());
+    assert!(!*lifted.borrow_and_update());
+    assert_eq!(fact_of(&standing).relist, before);
+    // Setting what is already set takes none.
+    assert!(!standing.set_draining(false));
+    assert_eq!(fact_of(&standing).relist, before);
+}

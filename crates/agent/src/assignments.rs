@@ -51,6 +51,8 @@ pub struct Followed {
     pub table: HashMap<String, Placed>,
     /// The group placements in force, by group name.
     pub groups: HashMap<String, GroupPlacement>,
+    /// The latest relist nonce the scheduler answered, by node.
+    pub relisted: HashMap<String, u64>,
     /// The next `sys.specs` offset the scheduler had not stepped, as of the
     /// last record read.
     pub specs: u64,
@@ -131,6 +133,9 @@ impl Followed {
                         (workload, placed)
                     })
                     .collect();
+            }
+            Change::Relisted { node, relist } => {
+                self.relisted.insert(node, relist);
             }
             Change::Progress => {}
         }
@@ -368,6 +373,17 @@ impl Assignments {
 
     pub(crate) fn scheduler_changes(&self) -> watch::Receiver<bool> {
         self.scheduler.subscribe()
+    }
+
+    /// Whether this node's view holds the scheduler's answer to `relist`,
+    /// and so every output of the steps up to the fact that carried it.
+    pub(crate) fn relisted(&self, node: &str, relist: u64) -> bool {
+        self.lock().relisted.get(node) == Some(&relist)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fold(&self, offset: u64, record: &[u8]) {
+        self.lock().fold(offset, record);
     }
 
     /// `workload`'s assignment, and how far the scheduler has read

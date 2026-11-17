@@ -360,6 +360,11 @@ also what happens for a node of an older build, since it never acknowledges the 
 replace the binary, start it and `felixd undrain node-1`. Do the nodes one at a time, and let
 `ps` show every workload running before you move to the next.
 
+An undrained or restarted node claims a group member placed on it only once the scheduler has
+answered a fact of it that does not say draining. A scheduler module older than the agents never
+answers, so those members wait for `--group-bound-ms`. Upgrade the scheduler with
+`felixd run --id scheduler --upgrade-at <offset> scheduler.wasm` along with the agents.
+
 Builds after 0.1.0-preview.1 leave a workload alone when they meet a record from a newer build,
 instead of failing it. Upgrade every node before you rely on a feature of the new build.
 
