@@ -613,14 +613,17 @@ did, would make `GroupTogether` hold by construction or say nothing.
 | `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | 21,504,874 | 6 min 05 s |
 | `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
 | `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | 5,135,336 | 1 min 54 s |
-| `FelixdPlacementUndrain` | pass | a drain and its lift, the undrained node reading `wl.scheduler.out` afresh and waiting for its lift to be folded, timestamps that tie or step back | TBD | TBD |
-| `FelixdPlacementStamps` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back | 80,320,200 | 23 min 47 s |
+| `FelixdPlacementUndrain` | pass | a drain and its lift with room for six facts (the two admitted ones, the draining fact, the fact that lifts it, a claim after the fold and the fact that relists the node), the undrained node reading `wl.scheduler.out` afresh and waiting for its lift to be folded; timestamps strictly increasing | TBD | TBD |
+| `FelixdPlacementStampsN1Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes before the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementStampsN1Placed` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes after the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementStampsN2Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 2 crashes before the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementStampsN2Placed` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 2 crashes after the first group record, or no node crashes | TBD | TBD |
 | `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, blocked facts, a drain, dead nodes forgotten, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
 | `FelixdPlacementNoRecordHold` | `GroupTogether` | `FelixdPlacementSilentHolder` with `running()` counting only facts | about 9,500,000 | 2 min 32 s |
 | `FelixdPlacementNoTailGate` | `GroupTogether` | `FelixdPlacementRestartLag` with a reader that shows each record as it folds it | about 1,200,000 | 19 s |
 | `FelixdPlacementForgetRestart` | `GroupTogether` (#251) | `FelixdPlacementRestartLag` where a forgotten node may restart while the record in force still names it | about 1,800,000 | 30 s |
-| `FelixdPlacementUndrainStale` | `GroupTogether` (#256) | `FelixdPlacementUndrain` with one more input, where the undrained node claims on its view from before the drain | TBD | TBD |
-| `FelixdPlacementUndrainRelist` | `GroupTogether` (#257) | `FelixdPlacementUndrain` where the undrained node claims before its lift is folded | about 10,000,000 | 3 min 28 s |
+| `FelixdPlacementUndrainStale` | `GroupTogether` (#256) | `FelixdPlacementUndrain` where the undrained node claims on its view from before the drain | TBD | TBD |
+| `FelixdPlacementUndrainRelist` | `GroupTogether` (#257) | `FelixdPlacementUndrain` where the undrained node claims before its lift is folded | TBD | TBD |
 | `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | about 16 | under 3 s |
 | `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | about 85,000 | under 3 s |
 | `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | about 180 | under 3 s |
@@ -629,7 +632,14 @@ did, would make `GroupTogether` hold by construction or say nothing.
 
 The pass configurations start with the whole group admitted. The `tla-placement` job checks each
 pass configuration in its own leg, and the twins in another. `FelixdPlacement` does not finish in
-one leg, so the job checks it as the eight `FelixdPlacementCrashN*E*` configurations instead. A run
+one leg, so the job checks it as the eight `FelixdPlacementCrashN*E*` configurations instead.
+`FelixdPlacementCrashLease` with timestamps does not finish in one leg either, so the four
+`FelixdPlacementStampsN*` configurations split it the same way, by node and by before or after the
+first `group` record. It has one scheduler epoch, so the epoch constant needs no split. A run with no
+crash is in all four and a run with one crash in exactly one, so together they check every state the
+unsplit run reaches. `FelixdPlacementUndrain`, `FelixdPlacementUndrainStale` and
+`FelixdPlacementUndrainRelist` differ in one constant each (`UndrainRace`, `RelistRace`) and set no
+timestamps (`Stamps = {}`), to fit six facts in the time limit; the stamps legs cover ties. A run
 of `FelixdPlacement` has at most one node crash, and each split allows it on one node, in one
 scheduler epoch, and only before or only after the first `group` record is on
 `wl.scheduler.out`. Every run with no crash is in all eight. A state of `FelixdPlacement` is

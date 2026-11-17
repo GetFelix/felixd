@@ -199,7 +199,8 @@ jobs:
 
   # specs/FelixdPlacement.tla, placement groups and the agent's barrier. One leg
   # per pass config, so a slow one cannot keep the twins from running. The
-  # crash legs together are FelixdPlacement, which one leg cannot finish.
+  # crash legs together are FelixdPlacement, which one leg cannot finish; the
+  # stamps legs split FelixdPlacementCrashLease with timestamps the same way.
   tla-placement:
     name: tla-placement (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -221,7 +222,10 @@ jobs:
           - { name: silent-holder, configs: FelixdPlacementSilentHolder }
           - { name: restart-lag, configs: FelixdPlacementRestartLag }
           - { name: undrain, configs: FelixdPlacementUndrain }
-          - { name: stamps, configs: FelixdPlacementStamps }
+          - { name: stamps-n1-unplaced, configs: FelixdPlacementStampsN1Unplaced }
+          - { name: stamps-n1-placed, configs: FelixdPlacementStampsN1Placed }
+          - { name: stamps-n2-unplaced, configs: FelixdPlacementStampsN2Unplaced }
+          - { name: stamps-n2-placed, configs: FelixdPlacementStampsN2Placed }
           - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementUndrainStale FelixdPlacementUndrainRelist" }
     steps:
       - uses: actions/checkout@v4
