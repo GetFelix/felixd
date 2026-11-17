@@ -40,6 +40,8 @@
 (* that could not move the group. The time-only release of felixd #251, *)
 (* pinned by its own config. UndrainRace lets an undrained node claim on  *)
 (* the view it had before its drain (felixd #256), pinned the same way.   *)
+(* RelistRace lets it claim while the scheduler still folds its draining *)
+(* fact as its last (felixd #257).                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -63,6 +65,7 @@ CONSTANTS
     MaxDrain,     \* drain marks set
     Undrain,      \* whether a drain mark may be lifted (`felixd undrain`)
     UndrainRace,  \* whether an undrained node acts on its view from before the drain
+    RelistRace,   \* whether an undrained node claims before its lift is folded
     Stamps,       \* broker timestamps a fact may carry; {} for strictly increasing ones
     Barrier, SplitGuard, OneRecord, Fence, FactTakers, RecordHold, TailGate
 
@@ -339,9 +342,19 @@ SeeHeld(n, m) ==
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
 
+\* Every draining fact of n is followed by one that is not, and the
+\* scheduler has folded it. Until then the scheduler may still move a group
+\* off n on the strength of n's promise to claim nothing (felixd #257).
+Relisted(n) ==
+    \A j \in 1..Len(inputs) :
+        (inputs[j].k = "fact" /\ inputs[j].n = n /\ inputs[j].draining) =>
+            \E l \in (j + 1)..pos : inputs[l].k = "fact" /\ inputs[l].n = n /\ ~inputs[l].draining
+
 \* The claim path reads the drain mark and claims nothing while it is set.
+\* Without RelistRace an undrained node also waits for its lift to be folded.
 Claim(n, m) ==
     /\ nup[n] /\ ~marked[n] /\ lease[m] = None /\ m \in admitted
+    /\ RelistRace \/ Relisted(n)
     /\ Cardinality(Holding(n)) < Cap
     /\ \/ ~Barrier
        \/ PlacesHere(view[n], m, n)

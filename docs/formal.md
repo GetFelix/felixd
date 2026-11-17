@@ -613,13 +613,14 @@ did, would make `GroupTogether` hold by construction or say nothing.
 | `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | 21,504,874 | 6 min 05 s |
 | `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
 | `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | 5,135,336 | 1 min 54 s |
-| `FelixdPlacementUndrain` | pass | a drain and its lift, the undrained node reading `wl.scheduler.out` afresh, timestamps that tie or step back | TBD | TBD |
-| `FelixdPlacementStamps` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back | TBD | TBD |
+| `FelixdPlacementUndrain` | pass | a drain and its lift, the undrained node reading `wl.scheduler.out` afresh and waiting for its lift to be folded, timestamps that tie or step back | TBD | TBD |
+| `FelixdPlacementStamps` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back | 80,320,200 | 23 min 47 s |
 | `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, blocked facts, a drain, dead nodes forgotten, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
 | `FelixdPlacementNoRecordHold` | `GroupTogether` | `FelixdPlacementSilentHolder` with `running()` counting only facts | about 9,500,000 | 2 min 32 s |
 | `FelixdPlacementNoTailGate` | `GroupTogether` | `FelixdPlacementRestartLag` with a reader that shows each record as it folds it | about 1,200,000 | 19 s |
 | `FelixdPlacementForgetRestart` | `GroupTogether` (#251) | `FelixdPlacementRestartLag` where a forgotten node may restart while the record in force still names it | about 1,800,000 | 30 s |
-| `FelixdPlacementUndrainStale` | `GroupTogether` (#256) | `FelixdPlacementUndrain` where the undrained node claims on its view from before the drain | TBD | TBD |
+| `FelixdPlacementUndrainStale` | `GroupTogether` (#256) | `FelixdPlacementUndrain` with one more input, where the undrained node claims on its view from before the drain | TBD | TBD |
+| `FelixdPlacementUndrainRelist` | `GroupTogether` (#257) | `FelixdPlacementUndrain` where the undrained node claims before its lift is folded | about 10,000,000 | 3 min 28 s |
 | `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | about 16 | under 3 s |
 | `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | about 85,000 | under 3 s |
 | `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | about 180 | under 3 s |
@@ -662,6 +663,15 @@ holding the group drains and releases it, the scheduler moves the group, the new
 member, and the drain is lifted before the undrained node's view folds the new record: it claims
 the other member under the old one. `FelixdPlacementUndrainStale` pins it; the pass
 configurations have an undrained node read `wl.scheduler.out` afresh before it acts.
+
+A third (#257): an undrained node claims before the scheduler folds its lift. A node holding the
+group drains, releases it and says it is draining; the drain is lifted before the scheduler folds
+that fact, and the node, reading the record still in force, claims one member. The scheduler then
+folds the draining fact, finds no hold on the node (a draining node that is not silent releases
+it) and moves the group to another node, which claims the other member. Reading
+`wl.scheduler.out` afresh does not help: the record was current when the node claimed.
+`FelixdPlacementUndrainRelist` pins it; in the pass configurations a node that has said it is
+draining claims nothing until the scheduler has folded a later fact of it that is not.
 Forgetting a live node whose facts fail is not modeled (#250 design call 1).
 
 What the model leaves out: ungrouped workloads and the `assign`, grace and bound paths of `turn`;

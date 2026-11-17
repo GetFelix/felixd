@@ -149,6 +149,9 @@ felixd_placement_expectations=(
   # A known gap, felixd #256: an undrained node claims on its view from
   # before the drain while the group moved.
   "FelixdPlacementUndrainStale violates GroupTogether"
+  # A known gap, felixd #257: an undrained node claims before the scheduler
+  # folds its lift, and the scheduler moves the group on its draining fact.
+  "FelixdPlacementUndrainRelist violates GroupTogether"
 )
 # Checked only when named: FelixdPlacementFull is too large for every state
 # and the nightly walks it; FelixdPlacement is the union of the splits above.

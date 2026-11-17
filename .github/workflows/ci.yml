@@ -222,7 +222,7 @@ jobs:
           - { name: restart-lag, configs: FelixdPlacementRestartLag }
           - { name: undrain, configs: FelixdPlacementUndrain }
           - { name: stamps, configs: FelixdPlacementStamps }
-          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementUndrainStale" }
+          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementUndrainStale FelixdPlacementUndrainRelist" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
