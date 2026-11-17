@@ -595,23 +595,37 @@ did, would make `GroupTogether` hold by construction or say nothing.
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdPlacement` | pass | two nodes of room two, a group of two, a takeover with replay, a node crash | TBD | TBD |
-| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | TBD | TBD |
-| `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | TBD | TBD |
-| `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | TBD | TBD |
-| `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | TBD | TBD |
+| `FelixdPlacement` | pass (named only) | two nodes of room two, a group of two, a takeover with replay, a node crash | over 67,000,000 | over 30 min |
+| `FelixdPlacementCrashN1E1Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, before the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN1E1Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, after the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN1E2Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, before the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN1E2Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, after the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN2E1Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, before the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN2E1Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, after the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN2E2Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, before the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementCrashN2E2Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, after the first group record, or no node crashes | TBD | TBD |
+| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 26,473,728 | 9 min 07 s |
+| `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | 21,504,874 | 6 min 05 s |
+| `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
+| `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | 5,135,336 | 1 min 54 s |
 | `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, blocked facts, a drain, dead nodes forgotten, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
-| `FelixdPlacementNoRecordHold` | `GroupTogether` | `FelixdPlacementSilentHolder` with `running()` counting only facts | TBD | TBD |
-| `FelixdPlacementNoTailGate` | `GroupTogether` | `FelixdPlacementRestartLag` with a reader that shows each record as it folds it | TBD | TBD |
-| `FelixdPlacementForgetRestart` | `GroupTogether` (#251) | `FelixdPlacementRestartLag` where a forgotten node may restart while the record in force still names it | TBD | TBD |
-| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | TBD | TBD |
-| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | TBD | TBD |
-| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | TBD | TBD |
-| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | TBD | TBD |
-| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | TBD | TBD |
+| `FelixdPlacementNoRecordHold` | `GroupTogether` | `FelixdPlacementSilentHolder` with `running()` counting only facts | about 9,500,000 | 2 min 32 s |
+| `FelixdPlacementNoTailGate` | `GroupTogether` | `FelixdPlacementRestartLag` with a reader that shows each record as it folds it | about 1,200,000 | 19 s |
+| `FelixdPlacementForgetRestart` | `GroupTogether` (#251) | `FelixdPlacementRestartLag` where a forgotten node may restart while the record in force still names it | about 1,800,000 | 30 s |
+| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | about 16 | under 3 s |
+| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | about 85,000 | under 3 s |
+| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | about 180 | under 3 s |
+| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | about 31,000 | under 3 s |
+| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | about 3,000 | under 3 s |
 
 The pass configurations start with the whole group admitted. The `tla-placement` job checks each
-pass configuration in its own leg, and the twins in another. `GroupTogether` is checked in every
+pass configuration in its own leg, and the twins in another. `FelixdPlacement` does not finish in
+one leg, so the job checks it as the eight `FelixdPlacementCrashN*E*` configurations instead. A run
+of `FelixdPlacement` has at most one node crash, and each split allows it on one node, in one
+scheduler epoch, and only before or only after the first `group` record is on
+`wl.scheduler.out`. Every run with no crash is in all eight. A state of `FelixdPlacement` is
+reached by a run with no crash or with one crash, which falls in exactly one split, so together
+they check every state `FelixdPlacement` reaches. The split constants only gate `NodeCrash`. `GroupTogether` is checked in every
 pass configuration and the nightly walk.
 
 `FelixdPlacementNoSplitGuard` does not break `GroupTogether`: the record it writes keeps every

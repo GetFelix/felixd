@@ -120,7 +120,15 @@ felixd_admission_expectations=(
 )
 
 felixd_placement_expectations=(
-  "FelixdPlacement pass"
+  # FelixdPlacement split by where its node crash falls; it is checked only when named.
+  "FelixdPlacementCrashN1E1Unplaced pass"
+  "FelixdPlacementCrashN1E1Placed pass"
+  "FelixdPlacementCrashN1E2Unplaced pass"
+  "FelixdPlacementCrashN1E2Placed pass"
+  "FelixdPlacementCrashN2E1Unplaced pass"
+  "FelixdPlacementCrashN2E1Placed pass"
+  "FelixdPlacementCrashN2E2Unplaced pass"
+  "FelixdPlacementCrashN2E2Placed pass"
   "FelixdPlacementLease pass"
   "FelixdPlacementCrashLease pass"
   "FelixdPlacementSilentHolder pass"
@@ -137,8 +145,10 @@ felixd_placement_expectations=(
   # record that still names it while the scheduler moves the group.
   "FelixdPlacementForgetRestart violates GroupTogether"
 )
-# Checked only when named, as the nightly walks them: too large for every state.
+# Checked only when named: FelixdPlacementFull is too large for every state
+# and the nightly walks it; FelixdPlacement is the union of the splits above.
 felixd_placement_named=(
+  "FelixdPlacement pass"
   "FelixdPlacementFull pass"
 )
 

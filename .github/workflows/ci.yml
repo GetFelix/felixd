@@ -198,7 +198,8 @@ jobs:
       - run: TLA_MODULE=FelixdAdmission TLC_WORKERS=4 scripts/check_tla.sh
 
   # specs/FelixdPlacement.tla, placement groups and the agent's barrier. One leg
-  # per pass config, so a slow one cannot keep the twins from running.
+  # per pass config, so a slow one cannot keep the twins from running. The
+  # crash legs together are FelixdPlacement, which one leg cannot finish.
   tla-placement:
     name: tla-placement (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -207,7 +208,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: crash, configs: FelixdPlacement }
+          - { name: crash-n1-e1-unplaced, configs: FelixdPlacementCrashN1E1Unplaced }
+          - { name: crash-n1-e1-placed, configs: FelixdPlacementCrashN1E1Placed }
+          - { name: crash-n1-e2-unplaced, configs: FelixdPlacementCrashN1E2Unplaced }
+          - { name: crash-n1-e2-placed, configs: FelixdPlacementCrashN1E2Placed }
+          - { name: crash-n2-e1-unplaced, configs: FelixdPlacementCrashN2E1Unplaced }
+          - { name: crash-n2-e1-placed, configs: FelixdPlacementCrashN2E1Placed }
+          - { name: crash-n2-e2-unplaced, configs: FelixdPlacementCrashN2E2Unplaced }
+          - { name: crash-n2-e2-placed, configs: FelixdPlacementCrashN2E2Placed }
           - { name: lease, configs: FelixdPlacementLease }
           - { name: crash-lease, configs: FelixdPlacementCrashLease }
           - { name: silent-holder, configs: FelixdPlacementSilentHolder }

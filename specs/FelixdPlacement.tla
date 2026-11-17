@@ -51,6 +51,9 @@ CONSTANTS
     MaxIn,        \* inputs to the scheduler
     MaxEpoch,     \* scheduler epochs (takeovers + 1)
     MaxNodeCrash, \* node crashes
+    CrashNodes,   \* the nodes that may crash
+    CrashEpochs,  \* the scheduler epochs a node may crash in
+    CrashPlaced,  \* whether a node may crash before (FALSE) or after (TRUE) the first group record
     MaxExpire,    \* leases lost by a live holder
     LapseLive,    \* whether a live node may be judged silent
     ForgetDown,   \* whether a node that is down may be forgotten
@@ -366,8 +369,12 @@ Release(m) ==
     /\ AgentUnchanged
     /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
 
+\* CrashNodes, CrashEpochs and CrashPlaced only split a run's crash space
+\* into configs whose union is the unsplit one.
 NodeCrash(n) ==
     /\ nup[n] /\ nodeCrashes < MaxNodeCrash
+    /\ n \in CrashNodes /\ epoch \in CrashEpochs
+    /\ (\E j \in 1..Len(out) : out[j].k = "group") \in CrashPlaced
     /\ nup' = [nup EXCEPT ![n] = FALSE]
     /\ nodeCrashes' = nodeCrashes + 1
     /\ AgentUnchanged
