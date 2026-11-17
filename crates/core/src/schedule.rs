@@ -47,7 +47,8 @@ pub struct NodeFact {
     /// How many it holds, however it claimed them.
     #[serde(default)]
     pub held: usize,
-    /// The ids of the workloads it holds, at most `max_workloads` of them.
+    /// The ids of the workloads it holds, all of them. A node claims only
+    /// within `max_workloads`, so there are at most that many.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub holding: BTreeSet<String>,
     /// It is draining and takes no work.
