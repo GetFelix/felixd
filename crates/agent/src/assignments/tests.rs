@@ -412,6 +412,7 @@ fn a_fact_is_written_when_it_changes_or_the_interval_passes() {
         holding: Default::default(),
         draining: false,
         blocked: false,
+        relist: 0,
     };
     let every = Duration::from_secs(60);
     assert!(due(None, &fact, every));

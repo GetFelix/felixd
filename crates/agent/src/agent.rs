@@ -179,17 +179,77 @@ struct Standing {
     blocked: AtomicBool,
     /// Notified when what this node writes to `nodes` should change now.
     announce_now: Notify,
+    /// The nonce this node's facts carry until the scheduler answers it, or
+    /// 0 once it has. Set at start and on every lift of a drain: until then
+    /// the scheduler's last fact of this node may say it is draining, and a
+    /// group move made on that fact may be missing from this node's view.
+    relist: AtomicU64,
+    /// The next nonce. It starts from the clock so a restarted agent does
+    /// not reuse one an earlier run left on `wl.scheduler.out`.
+    next_relist: AtomicU64,
+    /// Bumped on every change of `draining`, so a claim decided before a
+    /// drain and lift is not made on that decision.
+    drain_changes: AtomicU64,
 }
 
 impl Standing {
     fn new() -> Standing {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+            | 1;
         Standing {
             draining: watch::channel(false).0,
             claiming: AtomicUsize::new(0),
             holding: std::sync::Mutex::new(BTreeSet::new()),
             blocked: AtomicBool::new(false),
             announce_now: Notify::new(),
+            relist: AtomicU64::new(seed),
+            next_relist: AtomicU64::new(seed.wrapping_add(1).max(1)),
+            drain_changes: AtomicU64::new(0),
         }
+    }
+
+    /// Sets `draining`. Lifting a drain takes a new relist nonce before
+    /// anything can see the lift. Returns whether it changed.
+    fn set_draining(&self, marked: bool) -> bool {
+        self.draining.send_if_modified(|now| {
+            if *now == marked {
+                return false;
+            }
+            if !marked {
+                let next = self.next_relist.fetch_add(1, Ordering::SeqCst).max(1);
+                self.relist.store(next, Ordering::SeqCst);
+            }
+            self.drain_changes.fetch_add(1, Ordering::SeqCst);
+            *now = marked;
+            true
+        })
+    }
+
+    /// How often `draining` has changed, for [`Standing::drained_since`].
+    fn drain_changes(&self) -> u64 {
+        self.drain_changes.load(Ordering::SeqCst)
+    }
+
+    /// Whether `draining` has changed since [`Standing::drain_changes`]
+    /// said `decided`.
+    fn drained_since(&self, decided: u64) -> bool {
+        self.drain_changes() != decided
+    }
+
+    /// Whether this node has been relisted: `holds` says whether its view
+    /// holds the scheduler's answer to the nonce. Clears the nonce once it
+    /// has, unless a new lift replaced it meanwhile.
+    fn relisted(&self, holds: impl FnOnce(u64) -> bool) -> bool {
+        let relist = self.relist.load(Ordering::SeqCst);
+        relist == 0
+            || (holds(relist)
+                && self
+                    .relist
+                    .compare_exchange(relist, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok())
     }
 
     /// The scheduler takes a draining fact as proof that the node claims
@@ -207,7 +267,13 @@ impl Standing {
         max_workloads: usize,
         held: &AtomicUsize,
     ) -> NodeFact {
-        let draining = *self.draining.borrow() && self.claiming.load(Ordering::SeqCst) == 0;
+        let marked = *self.draining.borrow();
+        let draining = marked && self.claiming.load(Ordering::SeqCst) == 0;
+        // Read after the mark: a lift takes its nonce before it shows.
+        let relist = match marked {
+            true => 0,
+            false => self.relist.load(Ordering::SeqCst),
+        };
         NodeFact {
             node: node_id.to_owned(),
             every_ms: u64::try_from(facts_every.as_millis()).unwrap_or(u64::MAX),
@@ -222,6 +288,7 @@ impl Standing {
                 .collect(),
             draining,
             blocked: self.blocked.load(Ordering::SeqCst),
+            relist,
         }
     }
 }
@@ -581,6 +648,8 @@ async fn follow_drain(node: Arc<Node>) {
 /// changes.
 async fn write_facts(node: Arc<Node>) {
     let fact = || {
+        // So a node relisted with no group member to claim stops asking.
+        node.relisted();
         node.standing.fact(
             &node.node_id,
             node.facts_every,
@@ -595,11 +664,7 @@ const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming 
                                 until it can (a node needs read on the drains cache)";
 
 fn note_drain(node: &Node, marked: bool) {
-    if node
-        .standing
-        .draining
-        .send_if_modified(|now| std::mem::replace(now, marked) != marked)
-    {
+    if node.standing.set_draining(marked) {
         match marked {
             true => tracing::info!("draining: releasing every lease and claiming nothing"),
             false => tracing::info!("no longer draining"),
@@ -768,7 +833,7 @@ async fn own(
                 _ = stop.wait_for(|stop| *stop) => return,
             }
         }
-        let Some(authority) = node
+        let Some((authority, decided)) = node
             .wait_for_chance(&id, spec.record, spec.group.as_ref(), &mut lease, &mut stop)
             .await
         else {
@@ -843,6 +908,11 @@ async fn own(
         // much older in a process that was stopped.
         let under_way = ClaimUnderWay::start(&node.standing);
         match node.mark_reads.marked(&node.felix, &node.node_id).await {
+            // A drain and lift since the decision: the scheduler may have
+            // moved the workload's group on the draining fact (#256, #257).
+            Ok(false) if node.standing.drained_since(decided) => {
+                continue;
+            }
             Ok(false) => {}
             Ok(true) => {
                 note_drain(&node, true);
@@ -1113,8 +1183,8 @@ fn placement_record(epoch: u64, authority: Authority) -> PlacementRecord {
 
 impl Node {
     /// Waits until the lease looks free, this node has room and the placement
-    /// policy lets it claim, and returns the authority it claims under.
-    /// `None` means stop.
+    /// policy lets it claim, and returns the authority it claims under and
+    /// the drain changes counted before the decision. `None` means stop.
     async fn wait_for_chance(
         &self,
         id: &str,
@@ -1122,7 +1192,7 @@ impl Node {
         group: Option<&Group>,
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
-    ) -> Option<Authority> {
+    ) -> Option<(Authority, u64)> {
         let mut draining = self.standing.draining.subscribe();
         let mut assignments = self.assignments.changes();
         // When this node first saw the workload free, whatever its
@@ -1176,11 +1246,12 @@ impl Node {
                 }
                 group_since.unwrap_or(since).elapsed()
             });
+            let decided = self.standing.drain_changes();
             let assigned = self.assigned(id, record, group.zip(held), since).await;
             match self.placement.turn(id, &assigned, self.random()) {
                 Turn::Claim(delay, authority) => {
                     match wait_or_change(delay, lease, &mut assignments, stop).await {
-                        Paused::Elapsed => return Some(authority),
+                        Paused::Elapsed => return Some((authority, decided)),
                         Paused::Changed => {}
                         Paused::Stop => return None,
                     }
@@ -1215,14 +1286,7 @@ impl Node {
         // A group member follows its group's record whatever the scheduler's
         // health, so the group does not split when the scheduler stops.
         let group = group.map(|(group, held)| GroupHold {
-            placed: match self.assignments.group_placed(id, group) {
-                Some(p) if p.node == self.node_id => GroupPlaced::ThisNode {
-                    assignment: p.offset,
-                    scheduler_epoch: p.epoch,
-                },
-                Some(_) => GroupPlaced::Elsewhere,
-                None => GroupPlaced::Unplaced,
-            },
+            placed: group_placed(&self.assignments, &self.standing, &self.node_id, id, group),
             held,
         });
         if !self.assignments.healthy(&self.timing, now_millis()) {
@@ -1250,6 +1314,13 @@ impl Node {
             waited: since.elapsed(),
             group,
         }
+    }
+
+    /// Whether this node's view holds the scheduler's answer to its relist
+    /// nonce, so it holds every group move made on a fact of this node from
+    /// before its last start or lift.
+    fn relisted(&self) -> bool {
+        relisted(&self.assignments, &self.standing, &self.node_id)
     }
 
     /// Whether `node`'s entry in `nodes` says it would claim one more
@@ -1315,6 +1386,38 @@ impl Node {
         x ^= x << 17;
         self.random.store(x, Ordering::Relaxed);
         (x >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+fn relisted(assignments: &Assignments, standing: &Standing, node_id: &str) -> bool {
+    standing.relisted(|relist| assignments.relisted(node_id, relist))
+}
+
+/// Where the `group` record in this node's view places `member`. This is
+/// the only place a group member is placed on this node.
+fn group_placed(
+    assignments: &Assignments,
+    standing: &Standing,
+    node_id: &str,
+    member: &str,
+    group: &Group,
+) -> GroupPlaced {
+    // The record and the relist answer come from one view: from two, an
+    // old record placing the member here could pass on a newer view's
+    // answer while that view moves the member away.
+    let (placed, relisted) =
+        assignments.group_placed(member, group, node_id, |holds| standing.relisted(holds));
+    match placed {
+        // Until relisted, a record placing the member here may be replaced
+        // by one this view lacks, so it places nothing and the member waits
+        // for the group bound at most (#256, #257).
+        Some(p) if p.node == node_id && !relisted => GroupPlaced::Unplaced,
+        Some(p) if p.node == node_id => GroupPlaced::ThisNode {
+            assignment: p.offset,
+            scheduler_epoch: p.epoch,
+        },
+        Some(_) => GroupPlaced::Elsewhere,
+        None => GroupPlaced::Unplaced,
     }
 }
 

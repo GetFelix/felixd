@@ -57,6 +57,16 @@ pub struct NodeFact {
     /// It cannot claim now, such as when it cannot read its drain mark.
     #[serde(default)]
     pub blocked: bool,
+    /// Nonzero while the node waits to be relisted after it started or
+    /// stopped draining: the scheduler answers a fact that is not draining
+    /// with a [`Change::Relisted`] carrying it, after the rest of that
+    /// step's output.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub relist: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The most bytes the fact of node `node` can take while it holds
@@ -71,6 +81,7 @@ pub fn worst_fact_bytes(node: &str, max_workloads: usize) -> usize {
         holding: BTreeSet::new(),
         draining: true,
         blocked: true,
+        relist: u64::MAX,
     };
     (bare.encode().len() + r#","holding":[]"#.len())
         .saturating_add(max_workloads.saturating_mul(names::MAX_ID_LEN + 3))
@@ -143,6 +154,11 @@ pub enum Change {
     },
     /// A spec record that changed no assignment.
     Progress,
+    /// `node`'s fact carrying `relist` has been stepped. It is the last
+    /// output of that step, so a reader that has it has every output of
+    /// every step up to that fact. An older agent cannot decode it and
+    /// passes over it.
+    Relisted { node: String, relist: u64 },
 }
 
 impl Record {
@@ -234,6 +250,7 @@ impl Scheduler {
         let mut wanted_changed = false;
         let mut spec_step = false;
         let mut tick = false;
+        let mut relisted = None;
         match stream {
             names::SPECS => {
                 self.specs = self.specs.max(offset.saturating_add(1));
@@ -259,6 +276,12 @@ impl Scheduler {
             }
             names::FACTS => {
                 let fact = NodeFact::decode(payload).map_err(Refused::Fact)?;
+                if fact.relist != 0 && !fact.draining {
+                    relisted = Some(Change::Relisted {
+                        node: fact.node.clone(),
+                        relist: fact.relist,
+                    });
+                }
                 tick = self.ticks(timestamp_micros);
                 self.facts_seen = true;
                 self.facts_micros = self.facts_micros.max(timestamp_micros);
@@ -284,19 +307,23 @@ impl Scheduler {
             };
         let specs = self.specs;
         let record = |change| Record { specs, change };
-        if tick {
+        let mut out: Vec<Record> = if tick {
             // The table holds every change of this step too.
             let assignments = self.assigned.clone();
             let groups = self.groups.clone();
-            return Ok(vec![record(Change::Table {
+            vec![record(Change::Table {
                 assignments,
                 groups,
-            })]);
-        }
-        if changes.is_empty() && spec_step {
-            return Ok(vec![record(Change::Progress)]);
-        }
-        Ok(changes.into_iter().map(record).collect())
+            })]
+        } else if changes.is_empty() && spec_step {
+            vec![record(Change::Progress)]
+        } else {
+            changes.into_iter().map(record).collect()
+        };
+        // Last, so it follows every output a reader must hold before it
+        // acts on its view (#257).
+        out.extend(relisted.map(record));
+        Ok(out)
     }
 
     /// Whether a fact appended at `at_micros` is a tick: the first fact, or

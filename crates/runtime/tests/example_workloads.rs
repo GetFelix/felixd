@@ -155,6 +155,7 @@ fn scheduler_inputs() -> Vec<(&'static str, u64, u64, Vec<u8>)> {
         holding: Default::default(),
         draining,
         blocked: false,
+        relist: 0,
     };
     let spec = |id: &str, state| {
         let spec = WorkloadSpec {

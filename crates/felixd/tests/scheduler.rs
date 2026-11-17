@@ -18,6 +18,7 @@ use bytes::Bytes;
 use common::{Agent, INPUT, LEASE_TTL, TestFelix, eventually, replication_factor, test_felix};
 use felixd_agent::admin::{StreamKind, ensure_stream};
 use felixd_agent::assignments::{self, Placed};
+use felixd_agent::drain;
 use felixd_agent::felix::Felix;
 use felixd_core::names;
 use felixd_core::node::NodeInfo;
@@ -160,6 +161,7 @@ async fn fake_fact(t: &TestFelix, node: &str) {
         holding: Default::default(),
         draining: false,
         blocked: false,
+        relist: 0,
     };
     t.felix.publish(names::FACTS, fact.encode()).await.unwrap();
     facts_from(t, &[node]).await;
@@ -862,4 +864,63 @@ async fn a_group_record_survives_a_scheduler_crash_and_replays() {
     assert!(ok, "felixd check found problems:\n{report}");
     let (ok, diffed) = t.replay(&["--id", names::SCHEDULER, "--diff"]);
     assert!(ok, "felixd replay --diff: {diffed}");
+}
+
+/// Marks `node` as draining and waits until it holds nothing.
+async fn drained(t: &TestFelix, node: &str) {
+    drain::mark(&t.settings, node, replication_factor())
+        .await
+        .unwrap();
+    eventually(&format!("{node} to drain"), SOON, || async {
+        let progress = drain::progress(&t.felix, node).await.ok()?;
+        progress.done().then_some(())
+    })
+    .await;
+}
+
+/// A node lifted from a drain waits for the scheduler to answer its relist
+/// nonce before it claims a group member its record places on it (#257),
+/// and that answer comes: the members come back long before the bound.
+#[tokio::test]
+async fn an_undrained_node_takes_its_group_back_well_before_the_bound() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g9-a", "g9-b"];
+    let more = group_args("300000");
+    let _agents: Vec<Agent> = nodes
+        .iter()
+        .map(|n| start_with(&t, n, Duration::from_secs(300), "", &more))
+        .collect();
+    scheduler_on(&t, &nodes).await;
+    run_in_group(&t, "g9x", "pair=g9x,g9y").await;
+    run_in_group(&t, "g9y", "pair=g9x,g9y").await;
+    // The first record may put the members on different nodes, so drain the
+    // other node and wait for the scheduler to join the group on `on`.
+    let [on, _] = group_held(&t, "pair", ["g9x", "g9y"]).await;
+    let other = nodes.iter().find(|n| **n != on).unwrap();
+    drained(&t, other).await;
+    eventually("the group record to join on one node", SOON, || async {
+        let record = group_record(&t, "pair").await?;
+        record.iter().all(|(_, n)| *n == on).then_some(())
+    })
+    .await;
+    let held = group_held(&t, "pair", ["g9x", "g9y"]).await;
+    assert_eq!(held, [on.clone(), on.clone()]);
+    // With no taker left, the record keeps the group on `on`.
+    drained(&t, &on).await;
+    let record = group_record(&t, "pair").await.expect("a group record");
+    assert!(record.iter().all(|(_, n)| *n == on), "{record:?}");
+
+    // SOON is well under the bound.
+    assert!(drain::lift(&t.settings, &on).await.unwrap());
+    let held = group_held(&t, "pair", ["g9x", "g9y"]).await;
+    assert_eq!(held, [on.clone(), on.clone()]);
+    for id in ["g9x", "g9y"] {
+        let epoch = epoch_of(&t, id).await;
+        assert!(matches!(
+            placement_of(&t, id, epoch).await,
+            Authority::Assigned { .. }
+        ));
+    }
 }

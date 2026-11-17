@@ -2263,6 +2263,19 @@ until the node is forgotten (15 min at the default `--facts-every-ms`), which
 is longer than `--group-bound-ms`. So the member waits up to the bound and is
 then claimed `group-bound`, and the group runs split until no member runs.
 
+A node's own view has the mirror problem after a drain is lifted (#256,
+#257). Until the scheduler steps a fact of the node that does not say
+draining, its last fact of the node may still say so, and with another taker
+up it moves the group off the node, since a draining node holds nothing. The
+node's view may also predate a move made on that fact. So a node claims no
+member that its group's record places on it until its view holds the
+scheduler's `relisted` answer to the nonce in its facts. It takes a new
+nonce when it starts, since it cannot know what its last fact said, and on
+every lift, before anything sees the lift. The scheduler writes the answer
+after every other output of the step that read the fact, so a view that has
+it has every move made on the node's draining fact. Until then the member
+waits as if unplaced, so with no scheduler it waits for the bound at most.
+
 A race the agents handle the same way: a member is claimed `group-bound`, and
 then a `group` record lands. The other members are claimed as `assigned` to
 that record, on the nodes it names, and the claimed member stays where it is.
