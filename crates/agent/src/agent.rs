@@ -196,6 +196,10 @@ impl Standing {
     /// nothing it does not list. So, as in `announce`, draining is read
     /// before the claims under way and said only when there are none, and
     /// what it holds is read last: a won claim is named before it ends.
+    ///
+    /// Every held name is listed: the scheduler ends its hold on a member a
+    /// fact omits. A `Holds` is only made under a `Slot`, so the names stay
+    /// within `max_workloads`, which `check_fact_fits` sizes the record for.
     fn fact(
         &self,
         node_id: &str,
@@ -214,7 +218,6 @@ impl Standing {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .take(max_workloads)
                 .cloned()
                 .collect(),
             draining,

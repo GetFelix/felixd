@@ -218,3 +218,15 @@ fn a_won_claim_is_held_by_the_time_the_claim_ends() {
     assert!(fact_of(&standing).draining);
     drop(holds);
 }
+
+#[test]
+fn a_fact_names_every_held_workload_even_past_max_workloads() {
+    let standing = Standing::new();
+    let names = ["a", "b", "c"];
+    let _holds: Vec<_> = names.iter().map(|n| Holds::start(&standing, n)).collect();
+    let fact = standing.fact("n", Duration::from_secs(1), 2, &AtomicUsize::new(3));
+    assert_eq!(
+        fact.holding,
+        names.iter().map(|n| (*n).to_owned()).collect()
+    );
+}

@@ -1,0 +1,1 @@
+- A node's fact now names every workload it holds. It was cut to `--max-workloads` names, and since a fact that omits a member ends the scheduler's hold on it, a cut could free a member the node was running (#252).
