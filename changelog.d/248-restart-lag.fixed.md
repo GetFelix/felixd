@@ -1,0 +1,1 @@
+- A restarted agent no longer claims a group member or an assigned workload on a scheduler record that a later one, already in `wl.scheduler.out`, replaces (#248). A read of the scheduler's output now changes the node's view only once it reaches the tail it saw when it started, so a group can no longer run split across a restart before its bound.

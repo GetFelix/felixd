@@ -183,6 +183,65 @@ async fn a_reader_starts_at_the_latest_table_and_never_reads_a_page_twice() {
     assert_eq!(f.specs, 2099);
 }
 
+fn group(specs: u64, node: &str) -> Record {
+    Record {
+        specs,
+        change: Change::Group {
+            group: "g".into(),
+            members: BTreeMap::from([("m1".into(), node.into()), ("m2".into(), node.into())]),
+        },
+    }
+}
+
+/// A node restarts behind a backlog many pages long that places a group and
+/// a workload on it, then moves both. It must not act on the first records
+/// before reading the later ones (#248).
+#[tokio::test]
+async fn a_restarted_reader_shows_nothing_until_it_reaches_the_tail() {
+    let mut payloads = vec![out(0, &table(0, &[]))];
+    let filler = |payloads: &mut Vec<Vec<u8>>, n: u64| {
+        for _ in 0..n {
+            let i = payloads.len() as u64;
+            payloads.push(out(i, &assign(i, &format!("f{i}"), Some("n-3"))));
+        }
+    };
+    filler(&mut payloads, 30);
+    payloads.push(out(31, &group(31, "n-1")));
+    payloads.push(out(32, &assign(32, "w", Some("n-1"))));
+    filler(&mut payloads, 30);
+    payloads.push(out(63, &group(63, "n-2")));
+    payloads.push(out(64, &assign(64, "w", Some("n-2"))));
+    filler(&mut payloads, 30);
+    let tail = payloads.len() as u64;
+    let memory = Memory::new(payloads);
+    let g = Group {
+        name: "g".into(),
+        members: vec!["m1".into(), "m2".into()],
+    };
+    let mut f = Followed::default();
+    let mut views = Vec::new();
+    let mut tries = 0;
+    while read_new(&memory, &mut f, |now| views.push(now.clone()))
+        .await
+        .is_err()
+    {
+        tries += 1;
+        assert!(tries < 100, "never caught up");
+    }
+    assert!(tries > 0, "the read never failed part way");
+    assert_eq!(views.len(), 1, "a view before the tail was shown");
+    let view = &views[0];
+    assert_eq!(view.next, Some(tail));
+    assert_eq!(view.group_placed("m1", &g), Some(placed("n-2", 63)));
+    assert_eq!(view.table["w"], placed("n-2", 64));
+    // Nothing new: nothing to show.
+    while read_new(&memory, &mut f, |now| views.push(now.clone()))
+        .await
+        .is_err()
+    {}
+    assert_eq!(views.len(), 1);
+}
+
 #[tokio::test]
 async fn without_a_table_a_reader_starts_at_the_beginning() {
     let payloads = (0..10)

@@ -2081,7 +2081,10 @@ never whether output is correct. A scheduler outside felixd is not planned.
   so `wl.scheduler.out` can be trimmed below it (#19).
 - **Agents.** Each agent reads `wl.scheduler.out` a page at a time every half
   second, starting from the latest table, and keeps its place across failed
-  reads and across the scheduler stopping and starting. A node follows
+  reads and across the scheduler stopping and starting. A read changes the
+  node's view only once it reaches the tail it saw when it started, so a node
+  restarted behind a backlog never claims on a record a later one, already
+  written, replaces (#248). A node follows
   assignments only while the scheduler is healthy: its spec says `running`
   and its holder renewed the lease lately: within the freshness window W, one
   renewal interval (TTL/3) plus 1 s for the renewal's round trip, watch delay

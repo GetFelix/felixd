@@ -58,6 +58,9 @@ pub struct Followed {
     next: Option<u64>,
     /// While looking back for the latest table: where the next window ends.
     back: Option<u64>,
+    /// Pages were folded that `changed` has not been given yet, kept across
+    /// a failed read.
+    unseen: bool,
 }
 
 impl Followed {
@@ -212,7 +215,9 @@ async fn within<T>(call: impl Future<Output = Result<T>>) -> Result<T> {
 /// Reads what is new into `followed`, a page at a time. The first read looks
 /// back from the tail for the latest table and starts there, so nothing
 /// before it is read. Progress is kept in `followed` whenever a read fails,
-/// so the next call carries on from there; `changed` runs after each page.
+/// so the next call carries on from there. `changed` runs only once the
+/// read reaches the tail it saw when it started, so nothing acts on a view
+/// that holds a record a later one, already written, replaces.
 pub(crate) async fn read_new(
     source: &impl Source,
     followed: &mut Followed,
@@ -253,6 +258,9 @@ pub(crate) async fn read_new(
         }
         next = after;
         followed.next = Some(next);
+        followed.unseen = true;
+    }
+    if std::mem::take(&mut followed.unseen) {
         changed(followed);
     }
     Ok(())
