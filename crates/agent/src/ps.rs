@@ -118,6 +118,10 @@ pub struct Workload {
     /// Who placed the holder's claim, while a scheduler runs and the
     /// workload is held.
     pub placed: Option<PlacedBy>,
+    /// The claim the holder holds the workload at: its epoch and the
+    /// assignment it acted on. Read from the placement record, so it is what
+    /// was recorded, not what the node believes now.
+    pub held_at: Option<HeldAt>,
     /// The output stream's next offset.
     pub outputs: u64,
     /// The epoch of the last record on the output stream.
@@ -133,6 +137,34 @@ pub struct Workload {
     pub steps: Option<Position>,
     /// Why some of the above could not be read.
     pub unread: Option<String>,
+}
+
+/// The claim a workload is held at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldAt {
+    pub epoch: u64,
+    /// The `wl.scheduler.out` offset the claim was placed by, when the
+    /// scheduler placed it.
+    pub assignment: Option<u64>,
+}
+
+impl HeldAt {
+    /// The claim at `epoch` as `placed` recorded it.
+    pub(crate) fn of(epoch: u64, placed: &PlacedBy) -> HeldAt {
+        let assignment = match placed {
+            PlacedBy::Recorded(Authority::Assigned { assignment, .. }) => Some(*assignment),
+            _ => None,
+        };
+        HeldAt { epoch, assignment }
+    }
+
+    /// How many scheduler output records the claim's assignment is behind
+    /// the one now in force for the workload. `None` when the claim was not
+    /// placed by an assignment or no assignment is in force, so there is
+    /// nothing to compare.
+    pub fn assignment_lag(&self, in_force: Option<&Placed>) -> Option<u64> {
+        Some(in_force?.offset.saturating_sub(self.assignment?))
+    }
 }
 
 /// What `wl.<id>.placed` says about the holder's claim.
@@ -232,6 +264,7 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
             state: None,
             assigned,
             placed: None,
+            held_at: None,
             holder,
             holder_draining,
             outputs: 0,
@@ -249,7 +282,10 @@ pub async fn ps(settings: &Settings, ids: &[String]) -> Result<Report> {
                 let epoch = workload.holder.as_ref().map_or(0, |l| l.epoch);
                 if scheduled && epoch > 0 {
                     match placement(&felix, &workload.id, epoch).await {
-                        Ok(placed) => workload.placed = Some(placed),
+                        Ok(placed) => {
+                            workload.held_at = Some(HeldAt::of(epoch, &placed));
+                            workload.placed = Some(placed);
+                        }
                         Err(error) if workload.unread.is_none() => {
                             workload.unread = Some(format!("{error:#}"));
                         }

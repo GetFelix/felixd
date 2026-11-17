@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use felixd_agent::ps::{PlacedBy, Report};
+use felixd_agent::ps::{HeldAt, PlacedBy, Report};
 use felixd_core::placement::Authority;
 use felixd_core::status::State;
 
@@ -10,7 +10,9 @@ use felixd_core::status::State;
 /// details that do not fit in a column. While a scheduler runs, the
 /// workloads table has an ASSIGNED column: the node the scheduler assigned
 /// and the offset of that assignment on its output stream, and a PLACED
-/// column: who placed the holder's claim.
+/// column: who placed the holder's claim. HELD_AT is the claim's epoch and
+/// the assignment it acted on, and ASSIGN_LAG how many scheduler records that
+/// assignment is behind the one in force (0 when current).
 pub(crate) fn render(report: &Report) -> String {
     let mut out = String::new();
     let mut header = row(&[
@@ -22,6 +24,8 @@ pub(crate) fn render(report: &Report) -> String {
         header.insert(3, "ASSIGNED".to_owned());
         header.insert(4, "PLACED".to_owned());
         leading += 2;
+        header.push("HELD_AT".to_owned());
+        header.push("ASSIGN_LAG".to_owned());
     }
     let mut rows = vec![header];
     let mut details = Vec::new();
@@ -63,6 +67,14 @@ pub(crate) fn render(report: &Report) -> String {
             cells.insert(4, placed_word(w.placed.as_ref()));
         }
         cells.extend(first);
+        if report.scheduled {
+            cells.push(held_word(w.held_at.as_ref()));
+            cells.push(
+                w.held_at
+                    .and_then(|h| h.assignment_lag(w.assigned.as_ref()))
+                    .map_or("-".to_owned(), |l| l.to_string()),
+            );
+        }
         rows.push(cells);
         for more in lines {
             let mut cells = vec![String::new(); leading];
@@ -166,6 +178,19 @@ fn placed_word(placed: Option<&PlacedBy>) -> String {
         }
         Some(PlacedBy::Recorded(Authority::Unknown)) => "newer-build".to_owned(),
         Some(PlacedBy::Unknown) => "unknown".to_owned(),
+        None => "-".to_owned(),
+    }
+}
+
+/// `<epoch>` for a claim, `<epoch>@<assignment>` when an assignment placed
+/// it, `-` when nothing holds the workload.
+fn held_word(held: Option<&HeldAt>) -> String {
+    match held {
+        Some(HeldAt {
+            epoch,
+            assignment: Some(a),
+        }) => format!("{epoch}@{a}"),
+        Some(HeldAt { epoch, .. }) => epoch.to_string(),
         None => "-".to_owned(),
     }
 }

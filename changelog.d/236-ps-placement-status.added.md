@@ -1,0 +1,1 @@
+- `felixd ps` shows HELD_AT (the holder's claim epoch and the assignment offset that placed it) and ASSIGN_LAG (how far that assignment is behind the one in force) while a scheduler runs, read from the placement record and the scheduler's output (#236).

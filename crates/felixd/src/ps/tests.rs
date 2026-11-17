@@ -1,4 +1,4 @@
-use felixd_agent::ps::{Node, PlacedBy, Position, Report, Workload};
+use felixd_agent::ps::{HeldAt, Node, PlacedBy, Position, Report, Workload};
 use felixd_core::class::{ErrorClass, Failure};
 use felixd_core::lease::Lease;
 use felixd_core::node::{Drain, NodeInfo};
@@ -15,6 +15,7 @@ fn workload(id: &str, state: State, holder: Option<Lease>) -> Workload {
         holder_draining: false,
         assigned: None,
         placed: None,
+        held_at: None,
         outputs: 0,
         last_epoch: None,
         divergence: None,
@@ -373,4 +374,39 @@ fn a_placement_from_a_newer_build_is_printed_plainly() {
         super::placed_word(Some(&PlacedBy::Recorded(Authority::Unknown))),
         "newer-build"
     );
+}
+
+#[test]
+fn a_scheduled_report_shows_where_each_claim_is_held_and_how_far_behind() {
+    let mut behind = workload("wl", State::Running, Some(Lease::held("n-2", 3)));
+    behind.assigned = Some(felixd_agent::assignments::Placed {
+        node: "n-2".into(),
+        offset: 920,
+        epoch: 4,
+    });
+    behind.held_at = Some(HeldAt {
+        epoch: 3,
+        assignment: Some(912),
+    });
+    let mut first = workload("fc", State::Running, Some(Lease::held("n-2", 2)));
+    first.held_at = Some(HeldAt {
+        epoch: 2,
+        assignment: None,
+    });
+    let report = Report {
+        workloads: vec![behind, first, workload("new", State::Waiting, None)],
+        nodes: vec![node("n-2", true, false, 2)],
+        scheduled: true,
+        groups: Vec::new(),
+    };
+    let printed = render(&report);
+    let lines: Vec<Vec<&str>> = printed
+        .lines()
+        .take(4)
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(lines[0][lines[0].len() - 2..], ["HELD_AT", "ASSIGN_LAG"]);
+    assert_eq!(lines[1][lines[1].len() - 2..], ["3@912", "8"]);
+    assert_eq!(lines[2][lines[2].len() - 2..], ["2", "-"]);
+    assert_eq!(lines[3][lines[3].len() - 2..], ["-", "-"]);
 }

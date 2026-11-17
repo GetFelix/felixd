@@ -1,4 +1,4 @@
-use crate::assignments::{Followed, GroupPlacement};
+use crate::assignments::{Followed, GroupPlacement, Placed};
 use felixd_core::placement::{Authority, PlacementRecord, Reason};
 
 use super::*;
@@ -98,4 +98,31 @@ fn a_group_is_split_with_a_member_free_or_held_off_its_record() {
     let all = [held("x", Some("a")), held("y", Some("c"))];
     let record = BTreeMap::from([("x".into(), "a".into()), ("y".into(), "b".into())]);
     assert_eq!(group_status(&all, Some(&record)), GroupStatus::Split);
+}
+
+#[test]
+fn an_assignment_claim_is_behind_by_the_records_since() {
+    let placed = |offset| Placed {
+        node: "n".into(),
+        offset,
+        epoch: 1,
+    };
+    let held = HeldAt::of(
+        2,
+        &PlacedBy::Recorded(Authority::Assigned {
+            assignment: 10,
+            scheduler_epoch: 1,
+        }),
+    );
+    assert_eq!(held.assignment_lag(Some(&placed(10))), Some(0));
+    assert_eq!(held.assignment_lag(Some(&placed(25))), Some(15));
+    assert_eq!(held.assignment_lag(None), None);
+    let first = HeldAt::of(
+        3,
+        &PlacedBy::Recorded(Authority::FirstClaim {
+            reason: Reason::Grace,
+        }),
+    );
+    assert_eq!(first.assignment_lag(Some(&placed(25))), None);
+    assert_eq!(HeldAt::of(4, &PlacedBy::Unknown).assignment, None);
 }
