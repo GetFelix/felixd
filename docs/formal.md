@@ -558,10 +558,27 @@ One group of `K` members and `N` nodes. The scheduler is the fold of its input l
 and node facts) by `Scheduler::step` and `place_groups` (`crates/core/src/schedule.rs`). Its
 holder can crash, or be paused past its lease while it still has an output to append; the next
 holder claims `wl.scheduler.out` at the next epoch and replays from any snapshot it took. A node
-judged silent by `sys.facts` time is a `lapse` input, which a later fact from the node undoes.
+judged silent by `sys.facts` time is a `lapse` input, which a later fact from the node undoes, and
+a node forgotten after `FORGET_INTERVALS` of silence is dropped by another node's fact, in the
+same fold, as `forget_silent` runs only when a fact is folded; only a node that is down is forgotten.
+`running()` counts a member where a known node's newest fact holds it, silent or not, and where
+the record in force places it on a known node that is silent or blocked: such a node may land a
+claim no fact shows. A taker, or a draining node that is not silent, releases that hold. Facts
+carry `blocked` and `draining` as `Standing::fact` writes them. Blocked is the drain mark read in
+`follow_drain` failing; the claim path reads the mark itself, so blocked stops no claim, and the
+model picks it per fact. Draining is said only with no claim under way and a won claim is named
+before its guard drops, so with a claim as one step a draining fact lists every lease the node
+holds. A drained node claims nothing and releases its leases. `felixd undrain` lifts the mark
+(`drain::lift`), and `wait_for_chance` goes on with the view of `wl.scheduler.out` it has, which
+can be from before the drain. A fact carries the broker's timestamp, which can tie (a broker
+without timestamps gives every record 0) or step back; `running()` takes the strictly newer fact
+and a tie goes to the lowest node id. The model picks each fact's timestamp from `Stamps`, or
+gives facts strictly increasing ones when `Stamps` is empty.
 Agents follow `turn` (`crates/core/src/placement.rs`) as `wait_for_chance` and `assigned` call it
 (`crates/agent/src/agent.rs`), reading the scheduler's output through `Followed::fold` and
-`group_placement` (`crates/agent/src/assignments.rs`). The group bound is counted in a node's own
+`group_placement` (`crates/agent/src/assignments.rs`). `read_new` folds a record at a time but
+shows the view only once it reaches the tail it saw when the read began, a target it keeps across
+failed reads. The group bound is counted in a node's own
 steps, from when it first saw the member free with the group complete, or free at all while it is
 not. As in `wait_for_chance`, a node starts its clocks over only when its lease watch shows the
 member held with time left, which a watch may skip by going from free to free; an agent restart
@@ -577,58 +594,107 @@ did, would make `GroupTogether` hold by construction or say nothing.
 |---|---|
 | `GroupWhole` | Every `group` record names every member, or none (a withdrawal). |
 | `GroupTogether` | Before the bound a group never runs split: one whole `group` record places every member that runs on an up node and was claimed before its claimer's bound, on the node that runs it. |
-| `GroupTogetherFresh` | `GroupTogether` for the members neither known split marks: not claimed under a record no longer in force (#248), and not held or claimed by a live node judged silent (#247). |
 | `SplitNeverKept` | A record that replaces a whole record never places a member on the node the facts it answers show running it off the record it replaces. |
 | `ReplaySame` | Once a holder has caught up with what was written, from whichever snapshot it replayed, the record in force on `wl.scheduler.out` is its own placement. |
 | `StaleNeverApplied` | No agent claims a member on a `group` record whose epoch is lower than a claim of `wl.scheduler.out` before it. |
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdPlacement` | pass, all but `GroupTogether` (#247, #248) | two nodes of room two, a group of two, three facts or lapses, a takeover with replay, a node crash | 70,462,210 | 17 min 46 s |
-| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 20,020,064 | 5 min 25 s |
-| `FelixdPlacementCrashLease` | pass, all but `GroupTogether` (#247, #248) | a node crash and a lease lost by a live holder, no takeover | 21,866,290 | 9 min 47 s |
-| `FelixdPlacementSilent` | pass, all but `GroupTogether` (#247) | the `FelixdPlacementSilentHolder` model | 662,344 | 19 s |
-| `FelixdPlacementFull` | pass, all but `GroupTogether` (#247, #248; nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
-| `FelixdPlacementSilentHolder` | `GroupTogether` (#247) | a live node judged silent keeps its member while the group moves | 507,730 at the violation | 9 s |
-| `FelixdPlacementRestartLag` | `GroupTogether` (#248) | a restarted node claims on the record in its view after the group moved | 2,160,254 at the violation | 31 s |
-| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | 16 at the violation | 1 s |
-| `FelixdPlacementNoBarrierFresh` | `GroupTogetherFresh` | `FelixdPlacementNoBarrier`: the ghosts for #247 and #248 do not hide another split | 16 at the violation | under 1 s |
-| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | 191,668 at the violation | 3 s |
-| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | 181 at the violation | under 1 s |
-| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | 18,454 at the violation | 1 s |
-| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | 2,564 at the violation | under 1 s |
+| `FelixdPlacement` | pass (named only) | two nodes of room two, a group of two, a takeover with replay, a node crash | over 67,000,000 | over 30 min |
+| `FelixdPlacementCrashN1E1Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, before the first group record, or no node crashes | 29,944,984 | 14 min 13 s |
+| `FelixdPlacementCrashN1E1Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 1, after the first group record, or no node crashes | 27,671,984 | 9 min 12 s |
+| `FelixdPlacementCrashN1E2Unplaced` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, before the first group record, or no node crashes | 11,237,612 | 5 min 25 s |
+| `FelixdPlacementCrashN1E2Placed` | pass | `FelixdPlacement` where node 1 crashes in epoch 2, after the first group record, or no node crashes | 25,655,664 | 12 min 32 s |
+| `FelixdPlacementCrashN2E1Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, before the first group record, or no node crashes | 29,944,984 | 8 min 41 s |
+| `FelixdPlacementCrashN2E1Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 1, after the first group record, or no node crashes | 27,671,984 | 8 min 36 s |
+| `FelixdPlacementCrashN2E2Unplaced` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, before the first group record, or no node crashes | 11,237,612 | 5 min 18 s |
+| `FelixdPlacementCrashN2E2Placed` | pass | `FelixdPlacement` where node 2 crashes in epoch 2, after the first group record, or no node crashes | 25,655,664 | 12 min 19 s |
+| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 26,473,728 | 9 min 07 s |
+| `FelixdPlacementCrashLease` | pass | a node crash, the dead node forgotten, and a lease lost by a live holder, no takeover | 21,504,874 | 6 min 05 s |
+| `FelixdPlacementSilentHolder` | pass | live nodes judged silent, blocked facts, a drain (#247) | 27,051,680 | 10 min 20 s |
+| `FelixdPlacementRestartLag` | pass | a node crashes, is forgotten, the group moves and the node restarts (#248) | 5,135,336 | 1 min 54 s |
+| `FelixdPlacementUndrain` | pass | a drain and its lift with room for six facts (the two admitted ones, the draining fact, the fact that lifts it, a claim after the fold and the fact that relists the node), the undrained node waiting until the scheduler has folded a fact of it that is not draining and its view holds every record written up to that fold; timestamps strictly increasing | 51,343,136 | 28 min 15 s |
+| `FelixdPlacementUndrainN1Unplaced` | pass | `FelixdPlacementUndrain` where node 1 is drained before the first group record, or no node drains | 18,355,696 | 10 min 34 s |
+| `FelixdPlacementUndrainN1Placed` | pass | `FelixdPlacementUndrain` where node 1 is drained after the first group record, or no node drains | 19,962,832 | 10 min 42 s |
+| `FelixdPlacementUndrainN2Unplaced` | pass | `FelixdPlacementUndrain` where node 2 is drained before the first group record, or no node drains | 18,355,696 | 7 min 11 s |
+| `FelixdPlacementUndrainN2Placed` | pass | `FelixdPlacementUndrain` where node 2 is drained after the first group record, or no node drains | 19,962,832 | 8 min 8 s |
+| `FelixdPlacementStampsN1Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes before the first group record, or no node crashes | 32,200,960 | 11 min 06 s |
+| `FelixdPlacementStampsN1Placed` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 1 crashes after the first group record, or no node crashes | 31,351,946 | 12 min 56 s |
+| `FelixdPlacementStampsN2Unplaced` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 2 crashes before the first group record, or no node crashes | 32,200,960 | 12 min 41 s |
+| `FelixdPlacementStampsN2Placed` | pass | `FelixdPlacementCrashLease` with timestamps that tie or step back, where node 2 crashes after the first group record, or no node crashes | 31,351,946 | 11 min 12 s |
+| `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, blocked facts, a drain, dead nodes forgotten, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
+| `FelixdPlacementNoRecordHold` | `GroupTogether` | `FelixdPlacementSilentHolder` with `running()` counting only facts | about 9,500,000 | 2 min 32 s |
+| `FelixdPlacementNoTailGate` | `GroupTogether` | `FelixdPlacementRestartLag` with a reader that shows each record as it folds it | about 1,200,000 | 19 s |
+| `FelixdPlacementForgetRestart` | `GroupTogether` (#251) | `FelixdPlacementRestartLag` where a forgotten node may restart while the record in force still names it | about 1,800,000 | 30 s |
+| `FelixdPlacementUndrainStale` | `GroupTogether` (#256) | `FelixdPlacementUndrain` where the undrained node claims on its view from before the drain | about 16,700,000 | 5 min 22 s |
+| `FelixdPlacementUndrainRelist` | `GroupTogether` (#257) | `FelixdPlacementUndrain` where the undrained node claims before its lift is folded | about 10,100,000 | 3 min 06 s |
+| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | about 16 | under 3 s |
+| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | about 85,000 | under 3 s |
+| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | about 180 | under 3 s |
+| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | about 31,000 | under 3 s |
+| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | about 3,000 | under 3 s |
 
-The pass configurations start with the whole group admitted and leave three inputs for facts and
-lapses, enough for a second group record: re-placing a member a dead node held. The
-`tla-placement` job checks each pass configuration in its own leg, and the twins in another.
-
-Two known splits (#247, #248) break `GroupTogether` wherever they can happen, and a configuration
-that expects them can say nothing about a third. So each claim records two ghosts: whether the
-claimer's view held a record other than the one in force (#248), and whether the claimer was
-judged silent while up or claims while an input the scheduler has yet to act on leaves it silent
-(#247), which a lapse also sets on what a live node holds. The second covers a node judged silent
-while down that restarts and claims before its next fact is folded. A node's silent mark lasts
-until it crashes, so some later claims of such a node are not checked.
-`GroupTogetherFresh` checks the rest, in every pass configuration and the nightly walk, and
-`FelixdPlacementNoBarrierFresh` shows it is not empty.
+The pass configurations start with the whole group admitted. The `tla-placement` job checks each
+pass configuration in its own leg, and the twins in another. `FelixdPlacement` does not finish in
+one leg, so the job checks it as the eight `FelixdPlacementCrashN*E*` configurations instead.
+`FelixdPlacementCrashLease` with timestamps does not finish in one leg either, so the four
+`FelixdPlacementStampsN*` configurations split it the same way, by node and by before or after the
+first `group` record. It has one scheduler epoch, so the epoch constant needs no split. A run with no
+crash is in all four and a run with one crash in exactly one, so together they check every state the
+unsplit run reaches. `FelixdPlacementUndrain` (51,343,136 states, 28 min 15 s, run 44098661076) is too long for one leg, so the job checks it as the four
+`FelixdPlacementUndrainN*` configurations, split by the drained node (`DrainNodes`) and by whether the drain comes before or after the
+first `group` record (`DrainPlaced`). A run drains at most one node, so it is in exactly one part and together they check every state
+of the unsplit run. The unsplit config stays as the reference and is not in the matrix. `FelixdPlacementUndrainStale` and
+`FelixdPlacementUndrainRelist` stay unsplit and differ from it in one constant each (`UndrainRace`, `RelistRace`); they stop at their
+first violation. All of them set no
+timestamps (`Stamps = {}`), to fit six facts in the time limit; the stamps legs cover ties. A run
+of `FelixdPlacement` has at most one node crash, and each split allows it on one node, in one
+scheduler epoch, and only before or only after the first `group` record is on
+`wl.scheduler.out`. Every run with no crash is in all eight. A state of `FelixdPlacement` is
+reached by a run with no crash or with one crash, which falls in exactly one split, so together
+they check every state `FelixdPlacement` reaches. The split constants only gate `NodeCrash`. `GroupTogether` is checked in every
+pass configuration and the nightly walk.
 
 `FelixdPlacementNoSplitGuard` does not break `GroupTogether`: the record it writes keeps every
 member where the facts show it running, so the members claimed after it agree with one record.
 What it breaks is that a split made past the bound becomes the placement.
 
-A known gap (#248): a restarted agent reads `wl.scheduler.out` a page at a time and runs `turn` on
-whatever its view holds, and the group path follows the record in view whatever the scheduler's
-health. A node that died holding no member restarts with the old record in view, claims under it
-before the bound, while the node the group moved to claims the rest under the new one.
-`FelixdPlacementRestartLag` pins it.
+`FelixdPlacementNoRecordHold` shows why `running()` holds the record's members on a silent or
+blocked node (#247): the node claims under the record after its last fact, it is judged silent or
+says it is blocked, the group moves, and the rest is claimed on the new node before the bound.
+`FelixdPlacementNoTailGate` shows why the reader waits for its tail (#248): a restarted node shows
+the old record before the one that moved the group, and claims under it.
 
-A known gap (#247): a live node judged silent by `sys.facts` time keeps the member it holds, since
-nothing stops its agent, while `running()` skips silent nodes and `place_groups` moves the group
-to nodes that are takers. The rest of the group is claimed there before the bound, and the group
-runs split. `FelixdPlacementSilentHolder` pins it. A node that crashed and was judged silent while
-down does the same: it restarts, `write_facts` runs beside the claim loop with nothing ordering
-them, so it can claim under the record in force before its next fact lands, and the scheduler
-moves the group off it. `FelixdPlacement` and `FelixdPlacementCrashLease` reach this one.
+A known gap (#251): forgetting is the one release of a hold that rests on time. A node down for
+`FORGET_INTERVALS` restarts, reads `wl.scheduler.out` to its tail and claims a member under the
+record in force, before its first fact lands, while the scheduler forgets it and moves the group.
+`turn` claims on a group record that places a member here without asking whether the scheduler
+still knows this node. The record still names the node when the restart reads before the forget is
+folded, or when the fold that forgets it has no taker to move the group to, so the group moves
+only on a later fact. `FelixdPlacementForgetRestart` pins it. The pass configurations do not
+restart a node while a forget of it is pending and a group record may name it (one on
+`wl.scheduler.out`, a deposed holder's, or one the scheduler can write while the node is still a
+taker to it), nor once it is forgotten while the last group record names it.
+
+A second known gap (#256): an undrained node claims on a record from before its drain. A node
+holding the group drains and releases it, the scheduler moves the group, the new node claims one
+member, and the drain is lifted before the undrained node's view folds the new record: it claims
+the other member under the old one. `FelixdPlacementUndrainStale` pins it. Reading `wl.scheduler.out` afresh at the lift is not
+enough on its own: the scheduler can fold the draining fact and move the group after that read.
+In the pass configurations the undrained node's view holds every record the scheduler wrote up to
+its fold of the node's first fact that is not draining.
+
+A third (#257): an undrained node claims before the scheduler folds its lift. A node holding the
+group drains, releases it and says it is draining; the drain is lifted before the scheduler folds
+that fact, and the node, reading the record still in force, claims one member. The scheduler then
+folds the draining fact, finds no hold on the node (a draining node that is not silent releases
+it) and moves the group to another node, which claims the other member. Reading
+`wl.scheduler.out` afresh does not help: the record was current when the node claimed.
+`FelixdPlacementUndrainRelist` pins it; in the pass configurations a node that has said it is
+draining claims nothing until the scheduler has folded a later fact of it that is not. A fix that
+publishes the offset the scheduler has folded must also have the node read `wl.scheduler.out` past
+that fold before it claims, or it meets #256 again.
+Forgetting a live node whose facts fail is not modeled (#250 design call 1).
 
 What the model leaves out: ungrouped workloads and the `assign`, grace and bound paths of `turn`;
 `table` records, which hold the same group placements as the records before them; the skip past a
@@ -639,10 +705,9 @@ stopping, so a group never becomes incomplete again and is never withdrawn; two 
 name; the claim delay, which only orders claims; and the epoch fence and exactly-once of
 `wl.scheduler.out`, which `Felixd.tla` checks.
 
-For the scheduler, "running" is as its facts say: a member on a node the facts call silent does
-not count, so the scheduler can place it again elsewhere while its old holder still has the lease.
-No second holder can claim that member until its lease lapses, but the rest of its group can move
-(#247). design.md's "no assignment moves a running member" holds only in the facts' sense.
+For the scheduler, "running" is what its facts say plus the record's members on a node that is
+silent or blocked, until that node takes work again, says it is draining while not silent, or is
+forgotten. design.md's "no assignment moves a running member" holds in that sense.
 
 The other promises in the placement rules (one authority per claim, status offsets, liveness when
 agents disagree about the scheduler) are not modelled yet.
@@ -673,7 +738,8 @@ agents disagree about the scheduler) are not modelled yet.
 - `felixd check` beyond which spec each input ran under.
 - Drain as an action of its own. A drained holder stops and then deletes its lease, which the model
   already covers as `Crash` followed at once by `Expire`, with the holder's requests still in flight.
-  Claiming nothing while drained is placement, which the model leaves out.
+  Claiming nothing while drained is placement, which the model leaves out. [Placement
+  groups](#placement-groups) models a drain and its lift.
 - Placement, `max_workloads`, the claim delay and the scheduler's assignments: any idle node may
   claim at any time. Assignments (#60) only narrow which node tries first and when, and every
   claim still goes through `Claim`, `TakeEpoch` and the marker, so they remove behaviours and add

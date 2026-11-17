@@ -198,7 +198,9 @@ jobs:
       - run: TLA_MODULE=FelixdAdmission TLC_WORKERS=4 scripts/check_tla.sh
 
   # specs/FelixdPlacement.tla, placement groups and the agent's barrier. One leg
-  # per pass config, so a slow one cannot keep the twins from running.
+  # per pass config, so a slow one cannot keep the twins from running. The
+  # crash legs together are FelixdPlacement, which one leg cannot finish; the
+  # stamps legs split FelixdPlacementCrashLease with timestamps the same way.
   tla-placement:
     name: tla-placement (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -207,18 +209,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: crash, configs: FelixdPlacement }
+          - { name: crash-n1-e1-unplaced, configs: FelixdPlacementCrashN1E1Unplaced }
+          - { name: crash-n1-e1-placed, configs: FelixdPlacementCrashN1E1Placed }
+          - { name: crash-n1-e2-unplaced, configs: FelixdPlacementCrashN1E2Unplaced }
+          - { name: crash-n1-e2-placed, configs: FelixdPlacementCrashN1E2Placed }
+          - { name: crash-n2-e1-unplaced, configs: FelixdPlacementCrashN2E1Unplaced }
+          - { name: crash-n2-e1-placed, configs: FelixdPlacementCrashN2E1Placed }
+          - { name: crash-n2-e2-unplaced, configs: FelixdPlacementCrashN2E2Unplaced }
+          - { name: crash-n2-e2-placed, configs: FelixdPlacementCrashN2E2Placed }
           - { name: lease, configs: FelixdPlacementLease }
           - { name: crash-lease, configs: FelixdPlacementCrashLease }
-          - { name: silent, configs: FelixdPlacementSilent }
-          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoBarrierFresh FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementSilentHolder FelixdPlacementRestartLag" }
+          - { name: silent-holder, configs: FelixdPlacementSilentHolder }
+          - { name: restart-lag, configs: FelixdPlacementRestartLag }
+          - { name: undrain-n1-unplaced, configs: FelixdPlacementUndrainN1Unplaced }
+          - { name: undrain-n1-placed, configs: FelixdPlacementUndrainN1Placed }
+          - { name: undrain-n2-unplaced, configs: FelixdPlacementUndrainN2Unplaced }
+          - { name: undrain-n2-placed, configs: FelixdPlacementUndrainN2Placed }
+          - { name: stamps-n1-unplaced, configs: FelixdPlacementStampsN1Unplaced }
+          - { name: stamps-n1-placed, configs: FelixdPlacementStampsN1Placed }
+          - { name: stamps-n2-unplaced, configs: FelixdPlacementStampsN2Unplaced }
+          - { name: stamps-n2-placed, configs: FelixdPlacementStampsN2Placed }
+          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementUndrainStale FelixdPlacementUndrainRelist" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      - run: TLA_MODULE=FelixdPlacement TLC_WORKERS=4 scripts/check_tla.sh ${{ matrix.configs }}
+      - run: TLA_MODULE=FelixdPlacement TLA_TRACE_DIR=tla-traces TLC_WORKERS=4 scripts/check_tla.sh ${{ matrix.configs }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tla-placement-${{ matrix.name }}
+          path: tla-traces/
 
   # Cheap: python only. Catches a misnamed or empty fragment before the release does.
   changelog:
