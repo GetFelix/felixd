@@ -151,29 +151,76 @@ struct Node {
     /// Notified when a workload ends here, so a full node looks again.
     room: Notify,
     random: AtomicU64,
-    /// Whether this node is marked in `drains`, as last read.
-    draining: watch::Sender<bool>,
     mark_reads: drain::MarkReads,
-    /// Tasks between their read of the drain mark and the end of their
-    /// lease claim. A claim that read the mark before it was written can
-    /// still land, so the node says it is draining only when this is 0.
-    claiming: AtomicUsize,
     /// One permit per claim under way; see [`CLAIMS_AT_ONCE`].
     claims: Semaphore,
     /// How this node's renewals are doing. New claims wait while they are slow.
     strain: Strain,
-    /// Notified when what this node writes to `nodes` should change now.
-    announce_now: Notify,
+    standing: Standing,
     assignments: Assignments,
-    /// It cannot read its drain mark, so it claims nothing.
-    blocked: AtomicBool,
     facts_every: Duration,
     stuck_after: Duration,
     degraded_backoff: Duration,
-    /// The workloads this node holds, for its facts.
-    holding: std::sync::Mutex<BTreeSet<String>>,
     /// What this node last read of each assignee's `nodes` entry.
     entries: std::sync::Mutex<HashMap<String, Entry>>,
+}
+
+/// What this node says about itself in its facts and `nodes` entry.
+struct Standing {
+    /// Whether this node is marked in `drains`, as last read.
+    draining: watch::Sender<bool>,
+    /// Tasks between their read of the drain mark and the end of their
+    /// lease claim. A claim that read the mark before it was written can
+    /// still land, so the node says it is draining only when this is 0.
+    claiming: AtomicUsize,
+    /// The workloads this node holds.
+    holding: std::sync::Mutex<BTreeSet<String>>,
+    /// It cannot read its drain mark, so it claims nothing.
+    blocked: AtomicBool,
+    /// Notified when what this node writes to `nodes` should change now.
+    announce_now: Notify,
+}
+
+impl Standing {
+    fn new() -> Standing {
+        Standing {
+            draining: watch::channel(false).0,
+            claiming: AtomicUsize::new(0),
+            holding: std::sync::Mutex::new(BTreeSet::new()),
+            blocked: AtomicBool::new(false),
+            announce_now: Notify::new(),
+        }
+    }
+
+    /// The scheduler takes a draining fact as proof that the node claims
+    /// nothing it does not list. So, as in `announce`, draining is read
+    /// before the claims under way and said only when there are none, and
+    /// what it holds is read last: a won claim is named before it ends.
+    fn fact(
+        &self,
+        node_id: &str,
+        facts_every: Duration,
+        max_workloads: usize,
+        held: &AtomicUsize,
+    ) -> NodeFact {
+        let draining = *self.draining.borrow() && self.claiming.load(Ordering::SeqCst) == 0;
+        NodeFact {
+            node: node_id.to_owned(),
+            every_ms: u64::try_from(facts_every.as_millis()).unwrap_or(u64::MAX),
+            max_workloads,
+            held: held.load(Ordering::SeqCst),
+            holding: self
+                .holding
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .take(max_workloads)
+                .cloned()
+                .collect(),
+            draining,
+            blocked: self.blocked.load(Ordering::SeqCst),
+        }
+    }
 }
 
 /// A `nodes` entry as read: its version, when that version was first read,
@@ -185,13 +232,13 @@ struct Entry {
 }
 
 /// A workload this node holds, named in its facts while this lives.
-struct Holds<'a>(&'a Node, String);
+struct Holds<'a>(&'a Standing, String);
 
 impl<'a> Holds<'a> {
-    fn start(node: &'a Node, id: &str) -> Holds<'a> {
-        let mut holding = node.holding.lock().unwrap_or_else(|e| e.into_inner());
+    fn start(standing: &'a Standing, id: &str) -> Holds<'a> {
+        let mut holding = standing.holding.lock().unwrap_or_else(|e| e.into_inner());
         holding.insert(id.to_owned());
-        Holds(node, id.to_owned())
+        Holds(standing, id.to_owned())
     }
 }
 
@@ -281,18 +328,14 @@ pub async fn run(
         held: AtomicUsize::new(0),
         room: Notify::new(),
         random: AtomicU64::new(seed | 1),
-        draining: watch::channel(false).0,
         mark_reads: drain::MarkReads::default(),
-        claiming: AtomicUsize::new(0),
         claims: Semaphore::new(CLAIMS_AT_ONCE),
         strain: Strain::default(),
-        announce_now: Notify::new(),
+        standing: Standing::new(),
         assignments: Assignments::new(),
-        blocked: AtomicBool::new(false),
         facts_every: config.facts_every,
         stuck_after: config.stuck_after,
         degraded_backoff: config.degraded_backoff,
-        holding: std::sync::Mutex::new(BTreeSet::new()),
         entries: std::sync::Mutex::new(HashMap::new()),
     });
     tracing::info!(node = %node.node_id, "agent started");
@@ -475,15 +518,15 @@ async fn announce(node: Arc<Node>) {
     loop {
         // Draining is read before the claims under way, so a claim that
         // starts after both reads finds the mark itself.
-        let draining = *node.draining.borrow();
+        let draining = *node.standing.draining.borrow();
         let info = NodeInfo {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             max_workloads: node.max_workloads,
             held: node.held.load(Ordering::Relaxed),
-            draining: (draining && node.claiming.load(Ordering::SeqCst) == 0)
+            draining: (draining && node.standing.claiming.load(Ordering::SeqCst) == 0)
                 .then(|| node.mark_reads.nonce())
                 .flatten(),
-            blocked: node.blocked.load(Ordering::SeqCst),
+            blocked: node.standing.blocked.load(Ordering::SeqCst),
         };
         let put = node
             .felix
@@ -499,7 +542,7 @@ async fn announce(node: Arc<Node>) {
         }
         tokio::select! {
             () = tokio::time::sleep(node.timing.renew_after()) => {}
-            () = node.announce_now.notified() => {}
+            () = node.standing.announce_now.notified() => {}
         }
     }
 }
@@ -523,8 +566,8 @@ async fn follow_drain(node: Arc<Node>) {
         }
         // A claim reads the mark too, so a node that cannot read it says it
         // takes no work, and nobody waits for it.
-        if node.blocked.swap(failing, Ordering::SeqCst) != failing {
-            node.announce_now.notify_one();
+        if node.standing.blocked.swap(failing, Ordering::SeqCst) != failing {
+            node.standing.announce_now.notify_one();
         }
         tokio::time::sleep(READ_DRAIN_EVERY).await;
     }
@@ -535,27 +578,12 @@ async fn follow_drain(node: Arc<Node>) {
 /// changes.
 async fn write_facts(node: Arc<Node>) {
     let fact = || {
-        // The scheduler takes a draining fact as proof that the node claims
-        // nothing it does not list. So, as in `announce`, draining is read
-        // before the claims under way and said only when there are none, and
-        // what it holds is read last: a won claim is named before it ends.
-        let draining = *node.draining.borrow() && node.claiming.load(Ordering::SeqCst) == 0;
-        NodeFact {
-            node: node.node_id.clone(),
-            every_ms: u64::try_from(node.facts_every.as_millis()).unwrap_or(u64::MAX),
-            max_workloads: node.max_workloads,
-            held: node.held.load(Ordering::SeqCst),
-            holding: node
-                .holding
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .take(node.max_workloads)
-                .cloned()
-                .collect(),
-            draining,
-            blocked: node.blocked.load(Ordering::SeqCst),
-        }
+        node.standing.fact(
+            &node.node_id,
+            node.facts_every,
+            node.max_workloads,
+            &node.held,
+        )
     };
     assignments::write_facts(&node.felix, &node.assignments, node.facts_every, fact).await;
 }
@@ -565,6 +593,7 @@ const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming 
 
 fn note_drain(node: &Node, marked: bool) {
     if node
+        .standing
         .draining
         .send_if_modified(|now| std::mem::replace(now, marked) != marked)
     {
@@ -572,18 +601,18 @@ fn note_drain(node: &Node, marked: bool) {
             true => tracing::info!("draining: releasing every lease and claiming nothing"),
             false => tracing::info!("no longer draining"),
         }
-        node.announce_now.notify_one();
+        node.standing.announce_now.notify_one();
     }
     metrics::draining(marked);
 }
 
 /// A task between its read of the drain mark and the end of its claim.
-struct ClaimUnderWay<'a>(&'a Node);
+struct ClaimUnderWay<'a>(&'a Standing);
 
 impl<'a> ClaimUnderWay<'a> {
-    fn start(node: &'a Node) -> ClaimUnderWay<'a> {
-        node.claiming.fetch_add(1, Ordering::SeqCst);
-        ClaimUnderWay(node)
+    fn start(standing: &'a Standing) -> ClaimUnderWay<'a> {
+        standing.claiming.fetch_add(1, Ordering::SeqCst);
+        ClaimUnderWay(standing)
     }
 }
 
@@ -809,7 +838,7 @@ async fn own(
         }
         // Read again here: the last regular read can be a second old, or
         // much older in a process that was stopped.
-        let under_way = ClaimUnderWay::start(&node);
+        let under_way = ClaimUnderWay::start(&node.standing);
         match node.mark_reads.marked(&node.felix, &node.node_id).await {
             Ok(false) => {}
             Ok(true) => {
@@ -833,7 +862,7 @@ async fn own(
         let claimed = lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await;
         // A lease it won is in the cache, and named in its facts, before the
         // node can say it is draining.
-        let named = matches!(claimed, Ok(Some(_))).then(|| Holds::start(&node, &id));
+        let named = matches!(claimed, Ok(Some(_))).then(|| Holds::start(&node.standing, &id));
         drop(under_way);
         drop(permit);
         match claimed {
@@ -1091,7 +1120,7 @@ impl Node {
         lease: &mut watch::Receiver<Seen>,
         stop: &mut watch::Receiver<bool>,
     ) -> Option<Authority> {
-        let mut draining = self.draining.subscribe();
+        let mut draining = self.standing.draining.subscribe();
         let mut assignments = self.assignments.changes();
         // When this node first saw the workload free, whatever its
         // assignment, so assignments that keep changing cannot defer it for
@@ -1390,7 +1419,7 @@ async fn run_held(
         }
     }));
     let epoch = held.epoch;
-    let mut draining = node.draining.subscribe();
+    let mut draining = node.standing.draining.subscribe();
     let workload_metrics = metrics::workload(id);
     let _sampler = workload_metrics.as_ref().map(|(w, shared)| {
         w.set_inputs(&spec.inputs, *shared);

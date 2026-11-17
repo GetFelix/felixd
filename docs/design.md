@@ -2248,9 +2248,10 @@ fact while not silent, or when it is forgotten after thirty intervals. An
 agent says it is draining in its facts only once no claim is under way, and
 reads what it holds after that, so a draining fact lists everything the
 node runs and the node claims nothing more. A blocked node gives no such
-proof: it cannot read its drain mark, but a claim reads the mark itself and
-can still land. A node that comes back and goes silent again is held again.
-Moving the group sooner would let the new node claim the free members while
+proof: it cannot read its drain mark, and a claim that read the mark just
+before the node went blocked can still land. A claim that starts while it is
+blocked fails at its own read of the mark, so no new one begins. A node
+that comes back and goes silent again is held again. Moving the group sooner would let the new node claim the free members while
 the old one keeps or lands its own, running the group split before the bound.
 
 The cost is on a node death. A member on a dead node is not placed again
