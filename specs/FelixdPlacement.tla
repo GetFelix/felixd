@@ -13,7 +13,7 @@
 (* `out` are Felixd.tla's: here the claim is one record and an append     *)
 (* lands only behind its writer's own claim. Silence by `sys.facts` time  *)
 (* is abstracted as a `lapse` input that marks a node silent until its    *)
-(* next fact.                                                             *)
+(* next fact, and forgetting as a `forget` input for a node that is down. *)
 (*                                                                         *)
 (* Agents follow `turn` in crates/core/src/placement.rs: claim a member   *)
 (* the group record in their view places on them, or past the bound. The *)
@@ -30,6 +30,12 @@
 (*   Fence       an append lands only behind its writer's own claim.     *)
 (*   FactTakers  the scheduler's takers come from recorded facts, not     *)
 (*               from which nodes are up at the moment it steps.          *)
+(*   RecordHold  running() counts the record's members on a node that is  *)
+(*               silent or blocked (#247).                                *)
+(*   TailGate    the reader shows its view only once it reaches the tail  *)
+(*               it saw when the read began (#248).                       *)
+(* ForgetRace lets a forgotten node restart and claim before the          *)
+(* scheduler folds its forget, a known gap pinned by its own config.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -44,7 +50,11 @@ CONSTANTS
     MaxNodeCrash, \* node crashes
     MaxExpire,    \* leases lost by a live holder
     LapseLive,    \* whether a live node may be judged silent
-    Barrier, SplitGuard, OneRecord, Fence, FactTakers
+    ForgetDown,   \* whether a node that is down may be forgotten
+    ForgetRace,   \* whether it may restart before the scheduler folds that
+    Blocking,     \* whether a fact may say its node is blocked
+    MaxDrain,     \* drain marks set
+    Barrier, SplitGuard, OneRecord, Fence, FactTakers, RecordHold, TailGate
 
 Nodes == 1..N
 Members == 1..K
@@ -56,37 +66,50 @@ VARIABLES
     inputs, admitted,                         \* scheduler inputs, `workloads` cache
     st, pos, written, hist,               \* scheduler state and its snapshots
     epoch, up, stale, out,                \* holder, a paused deposed holder, `out`
-    lease, early, nup, view, since, gsince,\* agents
+    lease, early, nup, since, gsince,     \* agents
+    view, rd, tgt,                        \* each agent's reader
+    marked, drains,                       \* drain marks
     nodeCrashes, expires,
-    applied,                              \* history: records agents claimed on
-    lagged, silentHeld, judged            \* ghosts for the two known splits
+    applied                               \* history: records agents claimed on
 
 vars == <<inputs, admitted, st, pos, written, hist, epoch, up, stale, out,
-          lease, early, nup, view, since, gsince, nodeCrashes, expires,
-          applied, lagged, silentHeld, judged>>
+          lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
+          nodeCrashes, expires, applied>>
 
-\* The ghosts only Claim, Lapse and NodeCrash change.
-ghosts == <<lagged, silentHeld, judged>>
+\* What only agents change.
+agentVars == <<lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
+               nodeCrashes, expires, applied>>
 
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 (***************************************************************************)
 (* The scheduler, as Scheduler::step and place_groups.                    *)
 (***************************************************************************)
-SInit == [heard |-> [n \in Nodes |-> {}], live |-> {}, declared |-> {}, groups |-> NoMap]
+\* `known` is the scheduler's `nodes`: heard from and not forgotten. `at` is
+\* the input that carried a node's last fact, standing in for its time.
+SInit == [heard |-> [n \in Nodes |-> {}], at |-> [n \in Nodes |-> 0], known |-> {},
+          live |-> {}, blocked |-> {}, draining |-> {}, declared |-> {}, groups |-> NoMap]
 
-Live(s) == IF FactTakers THEN s.live ELSE {n \in Nodes : nup[n]}
+\* takers(): heard from, not silent, neither draining nor blocked.
+Live(s) == IF FactTakers THEN s.live \ (s.blocked \cup s.draining) ELSE {n \in Nodes : nup[n]}
 
-\* takers(): what a node holds is part of its entry, so a new fact changes it.
+\* What a node holds is part of its entry, so a new fact changes it.
 Takers(s) == [n \in Live(s) |-> s.heard[n]]
 
 Complete(s) == s.declared = Members
 
-\* running(): the node each member runs on, by facts of nodes not silent;
-\* the lowest id wins.
+\* running(): where a known node's last fact holds a member, silent or not,
+\* the newest fact winning. Then, with RecordHold, a member the record in
+\* force places on a known node that is silent or blocked: it may land a
+\* claim no fact shows. A taker, or a draining node not silent, releases it.
 Running(s) ==
-    LET on(m) == {n \in s.live : m \in s.heard[n]}
-    IN [m \in {m \in Members : on(m) # {}} |-> Min(on(m))]
+    LET on(m) == {n \in s.known : m \in s.heard[n]}
+        newest(m) == CHOOSE n \in on(m) : \A o \in on(m) : s.at[o] <= s.at[n]
+        held(m) == /\ RecordHold /\ s.groups # NoMap
+                   /\ s.groups[m] \in s.known
+                   /\ s.groups[m] \notin s.live \/ s.groups[m] \in s.blocked
+    IN [m \in {m \in Members : on(m) # {} \/ held(m)} |->
+            IF on(m) # {} THEN newest(m) ELSE s.groups[m]]
 
 GroupsRunning(s) == IF Complete(s) THEN {Running(s)} ELSE {}
 
@@ -131,10 +154,17 @@ PlaceGroups(s) ==
                  ELSE [st |-> [s EXCEPT !.groups = placed],
                        ch |-> [kind |-> "group", map |-> placed]]
 
-StepIn(s, x) ==
+\* Folds input p, which is x.
+StepIn(s, x, p) ==
     LET s1 == CASE x.k = "spec"  -> [s EXCEPT !.declared = @ \cup {x.m}]
-                [] x.k = "fact"  -> [s EXCEPT !.heard[x.n] = x.hold, !.live = @ \cup {x.n}]
+                [] x.k = "fact"  -> [s EXCEPT !.heard[x.n] = x.hold, !.at[x.n] = p,
+                                       !.known = @ \cup {x.n}, !.live = @ \cup {x.n},
+                                       !.blocked = IF x.blocked THEN @ \cup {x.n} ELSE @ \ {x.n},
+                                       !.draining = IF x.draining THEN @ \cup {x.n} ELSE @ \ {x.n}]
                 [] x.k = "lapse" -> [s EXCEPT !.live = @ \ {x.n}]
+                [] x.k = "forget" -> [s EXCEPT !.heard[x.n] = {}, !.at[x.n] = 0,
+                                        !.known = @ \ {x.n}, !.live = @ \ {x.n},
+                                        !.blocked = @ \ {x.n}, !.draining = @ \ {x.n}]
         trigger == (x.k = "spec" /\ x.m \notin s.declared)
                    \/ Takers(s1) # Takers(s)
                    \/ GroupsRunning(s1) # GroupsRunning(s)
@@ -155,24 +185,21 @@ Appends(ch, e, p) ==
 
 SchedStep ==
     /\ up /\ pos < Len(inputs)
-    /\ LET r == StepIn(st, inputs[pos + 1]) IN
+    /\ LET r == StepIn(st, inputs[pos + 1], pos + 1) IN
        IF pos + 1 > written
        THEN /\ out' = out \o Appends(r.ch, epoch, pos + 1)
             /\ written' = pos + 1
             /\ hist' = Append(hist, r.st)
        ELSE \* Replay: the guard writes nothing.
             UNCHANGED <<out, written, hist>>
-    /\ st' = StepIn(st, inputs[pos + 1]).st
+    /\ st' = StepIn(st, inputs[pos + 1], pos + 1).st
     /\ pos' = pos + 1
-    /\ UNCHANGED <<inputs, admitted, epoch, up, stale, lease, early, nup, view, since, gsince,
-                   nodeCrashes, expires, applied, ghosts>>
+    /\ UNCHANGED <<inputs, admitted, epoch, up, stale, agentVars>>
 
 SchedCrash ==
     /\ up /\ epoch < MaxEpoch
     /\ up' = FALSE
-    /\ UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, stale, out,
-                   lease, early, nup, view, since, gsince, nodeCrashes, expires,
-                   applied, ghosts>>
+    /\ UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, stale, out, agentVars>>
 
 \* The holder's lease expired: it crashed, or it is paused and keeps its
 \* next output to append later. The new holder claims `out` and restores the
@@ -183,14 +210,13 @@ SchedTakeover ==
         /\ st' = IF k = 0 THEN SInit ELSE hist[k]
         /\ pos' = k
     /\ stale' = IF up /\ pos < Len(inputs)
-                THEN LET ch == StepIn(st, inputs[pos + 1]).ch
+                THEN LET ch == StepIn(st, inputs[pos + 1], pos + 1).ch
                      IN IF ch.kind = "none" THEN NoStale ELSE [e |-> epoch, map |-> ch.map, p |-> pos + 1]
                 ELSE NoStale
     /\ epoch' = epoch + 1
     /\ up' = TRUE
     /\ out' = Append(out, ClaimRec(epoch + 1))
-    /\ UNCHANGED <<inputs, admitted, written, hist, lease, early, nup, view, since, gsince,
-                   nodeCrashes, expires, applied, ghosts>>
+    /\ UNCHANGED <<inputs, admitted, written, hist, agentVars>>
 
 \* The deposed holder's append: the fence refuses it behind a later claim.
 StaleWrite ==
@@ -198,38 +224,46 @@ StaleWrite ==
     /\ out' = IF ~Fence \/ LastClaim(out) = stale.e
               THEN Append(out, GroupRec(stale.map, stale.e, stale.p)) ELSE out
     /\ stale' = NoStale
-    /\ UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, up,
-                   lease, early, nup, view, since, gsince, nodeCrashes, expires,
-                   applied, ghosts>>
+    /\ UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, up, agentVars>>
 
 (***************************************************************************)
 (* Inputs: admission and node facts.                                       *)
 (***************************************************************************)
 Holding(n) == {m \in Members : lease[m] = n}
 
-InputUnchanged == UNCHANGED <<st, pos, written, hist, epoch, up, stale, out,
-                              lease, early, nup, view, since, gsince, nodeCrashes, expires,
-                              applied>>
+InputUnchanged == UNCHANGED <<st, pos, written, hist, epoch, up, stale, out, agentVars>>
 
 Admit(m) ==
     /\ m \notin admitted /\ Len(inputs) < MaxIn
     /\ admitted' = admitted \cup {m}
     /\ inputs' = Append(inputs, [k |-> "spec", m |-> m])
-    /\ InputUnchanged /\ UNCHANGED ghosts
+    /\ InputUnchanged
 
+\* Standing::fact. `blocked` is follow_drain's last read of the drain mark
+\* failing. The claim path reads the mark itself, so blocked stops no claim
+\* and shows only in facts: the model picks it per fact. Draining is said
+\* only with no claim under way and a won claim is named before its guard
+\* drops, so with Claim one step a draining fact lists every lease held.
 Fact(n) ==
     /\ nup[n] /\ Len(inputs) < MaxIn
-    /\ inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n)])
-    /\ UNCHANGED <<admitted, ghosts>> /\ InputUnchanged
+    /\ \E b \in IF Blocking THEN BOOLEAN ELSE {FALSE} :
+        inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n),
+                                  blocked |-> b, draining |-> marked[n]])
+    /\ UNCHANGED admitted /\ InputUnchanged
 
 Lapse(n) ==
     /\ LapseLive \/ ~nup[n]
     /\ Len(inputs) < MaxIn
     /\ inputs' = Append(inputs, [k |-> "lapse", n |-> n])
-    \* Ghosts for #247: a node judged silent while up, and what it holds.
-    /\ judged' = IF nup[n] THEN [judged EXCEPT ![n] = TRUE] ELSE judged
-    /\ silentHeld' = IF nup[n] THEN [m \in Members |-> silentHeld[m] \/ lease[m] = n] ELSE silentHeld
-    /\ UNCHANGED <<admitted, lagged>> /\ InputUnchanged
+    /\ UNCHANGED admitted /\ InputUnchanged
+
+\* FORGET_INTERVALS of silence. Only a node that is down: forgetting a live
+\* node whose facts fail is not modeled.
+Forget(n) ==
+    /\ ForgetDown /\ ~nup[n]
+    /\ Len(inputs) < MaxIn
+    /\ inputs' = Append(inputs, [k |-> "forget", n |-> n])
+    /\ UNCHANGED admitted /\ InputUnchanged
 
 (***************************************************************************)
 (* Agents: Followed::fold and group_placement, wait_for_chance and turn.  *)
@@ -246,24 +280,21 @@ PlacesHere(v, m, n) == LET j == InForce(v) IN j # None /\ out[j].map[m] = n
 
 Held(n, m) == IF admitted = Members THEN gsince[n][m] ELSE since[n][m]
 
-\* Ghost for #247: the scheduler has yet to act on a fold in which n is
-\* silent, its last fact or lapse a lapse. A node that crashed, was judged
-\* silent while down and restarted claims as a live node judged silent.
-LapsedAt(p, n) ==
-    LET mine == {j \in 1..p : inputs[j].k \in {"fact", "lapse"} /\ inputs[j].n = n}
-    IN mine # {} /\ inputs[Max(mine)].k = "lapse"
-SilentAhead(n) ==
-    \E p \in (IF written < Len(inputs) THEN written + 1 ELSE written)..Len(inputs) :
-        LapsedAt(p, n)
-
 AgentUnchanged == UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, up, stale,
                               out>>
 
+\* read_new folds one record of `out`. A read takes the tail as its target
+\* when it starts and keeps it across failed reads; with TailGate the view
+\* the node acts on changes only once the read reaches that target.
 Read(n) ==
-    /\ nup[n] /\ view[n] < Len(out)
-    /\ view' = [view EXCEPT ![n] = @ + 1]
+    /\ nup[n] /\ rd[n] < Len(out)
+    /\ LET t == IF tgt[n] = 0 THEN Len(out) ELSE tgt[n]
+           done == ~TailGate \/ rd[n] + 1 = t
+       IN /\ rd' = [rd EXCEPT ![n] = @ + 1]
+          /\ view' = IF done THEN [view EXCEPT ![n] = rd[n] + 1] ELSE view
+          /\ tgt' = [tgt EXCEPT ![n] = IF done THEN 0 ELSE t]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, since, gsince, nodeCrashes, expires, applied, ghosts>>
+    /\ UNCHANGED <<lease, early, nup, since, gsince, marked, drains, nodeCrashes, expires, applied>>
 
 \* One of the node's own steps for an admitted member. A clock starts only
 \* while the member is free, then runs until the node sees it held.
@@ -275,7 +306,7 @@ Tick(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = IF @ < Bound THEN @ + 1 ELSE @]
     /\ gsince' = [gsince EXCEPT ![n][m] = IF admitted = Members /\ @ < Bound THEN @ + 1 ELSE @]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, view, nodeCrashes, expires, applied, ghosts>>
+    /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
 
 \* The node's lease watch shows the member held with time left, and
 \* wait_for_chance starts its clocks over. A watch may skip from one free
@@ -286,10 +317,11 @@ SeeHeld(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, view, nodeCrashes, expires, applied, ghosts>>
+    /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
 
+\* The claim path reads the drain mark and claims nothing while it is set.
 Claim(n, m) ==
-    /\ nup[n] /\ lease[m] = None /\ m \in admitted
+    /\ nup[n] /\ ~marked[n] /\ lease[m] = None /\ m \in admitted
     /\ Cardinality(Holding(n)) < Cap
     /\ \/ ~Barrier
        \/ PlacesHere(view[n], m, n)
@@ -297,15 +329,11 @@ Claim(n, m) ==
     /\ lease' = [lease EXCEPT ![m] = n]
     /\ early' = [early EXCEPT ![m] = Held(n, m) < Bound]
     /\ applied' = IF PlacesHere(view[n], m, n) THEN applied \cup {InForce(view[n])} ELSE applied
-    \* Ghosts for the known splits: claimed under a record no longer in force
-    \* (#248), or by a live node judged silent (#247).
-    /\ lagged' = [lagged EXCEPT ![m] = InForce(view[n]) # InForce(Len(out))]
-    /\ silentHeld' = [silentHeld EXCEPT ![m] = judged[n] \/ SilentAhead(n)]
     \* The claimer waits afresh once it lets the member go.
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<nup, view, nodeCrashes, expires, judged>>
+    /\ UNCHANGED <<nup, view, rd, tgt, marked, drains, nodeCrashes, expires>>
 
 \* A lease lapses: its holder is down, or lost it while alive and stops.
 Expire(m) ==
@@ -314,26 +342,44 @@ Expire(m) ==
     /\ expires' = IF nup[lease[m]] THEN expires + 1 ELSE expires
     /\ lease' = [lease EXCEPT ![m] = None]
     /\ AgentUnchanged
-    /\ UNCHANGED <<early, nup, view, since, gsince, nodeCrashes, applied, ghosts>>
+    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, applied>>
+
+\* The operator marks a node in `drains`.
+Drain(n) ==
+    /\ ~marked[n] /\ drains < MaxDrain
+    /\ marked' = [marked EXCEPT ![n] = TRUE]
+    /\ drains' = drains + 1
+    /\ AgentUnchanged
+    /\ UNCHANGED <<lease, early, nup, since, gsince, view, rd, tgt, nodeCrashes, expires, applied>>
+
+\* A drained node's task stops and releases its lease.
+Release(m) ==
+    /\ lease[m] # None /\ nup[lease[m]] /\ marked[lease[m]]
+    /\ lease' = [lease EXCEPT ![m] = None]
+    /\ AgentUnchanged
+    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
 
 NodeCrash(n) ==
     /\ nup[n] /\ nodeCrashes < MaxNodeCrash
     /\ nup' = [nup EXCEPT ![n] = FALSE]
     /\ nodeCrashes' = nodeCrashes + 1
-    \* Down, it is judged silent rightly: a restart starts afresh.
-    /\ judged' = [judged EXCEPT ![n] = FALSE]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, view, since, gsince, expires, applied, lagged, silentHeld>>
+    /\ UNCHANGED <<lease, early, view, rd, tgt, since, gsince, marked, drains, expires, applied>>
 
-\* A restarted agent reads `out` again and its clocks start over.
+\* A restarted agent reads `out` again and its clocks start over. Without
+\* ForgetRace it waits until every forget of it has been folded.
 NodeRestart(n) ==
     /\ ~nup[n] /\ Holding(n) = {}
+    /\ ForgetRace \/ \A j \in (written + 1)..Len(inputs) :
+                        ~(inputs[j].k = "forget" /\ inputs[j].n = n)
     /\ nup' = [nup EXCEPT ![n] = TRUE]
     /\ view' = [view EXCEPT ![n] = 0]
+    /\ rd' = [rd EXCEPT ![n] = 0]
+    /\ tgt' = [tgt EXCEPT ![n] = 0]
     /\ since' = [since EXCEPT ![n] = [m \in Members |-> 0]]
     /\ gsince' = [gsince EXCEPT ![n] = [m \in Members |-> 0]]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nodeCrashes, expires, applied, ghosts>>
+    /\ UNCHANGED <<lease, early, marked, drains, nodeCrashes, expires, applied>>
 
 Init ==
     /\ inputs = [i \in 1..Cardinality(InitAdmitted) |-> [k |-> "spec", m |-> SeqOf(InitAdmitted)[i]]]
@@ -344,18 +390,20 @@ Init ==
     /\ early = [m \in Members |-> FALSE]
     /\ nup = [n \in Nodes |-> TRUE]
     /\ view = [n \in Nodes |-> 0]
+    /\ rd = [n \in Nodes |-> 0]
+    /\ tgt = [n \in Nodes |-> 0]
+    /\ marked = [n \in Nodes |-> FALSE]
+    /\ drains = 0
     /\ since = [n \in Nodes |-> [m \in Members |-> 0]]
     /\ gsince = [n \in Nodes |-> [m \in Members |-> 0]]
     /\ nodeCrashes = 0 /\ expires = 0
     /\ applied = {}
-    /\ lagged = [m \in Members |-> FALSE]
-    /\ silentHeld = [m \in Members |-> FALSE]
-    /\ judged = [n \in Nodes |-> FALSE]
 
 Next ==
     \/ SchedStep \/ SchedCrash \/ SchedTakeover \/ StaleWrite
-    \/ \E m \in Members : Admit(m) \/ Expire(m)
-    \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Read(n) \/ NodeCrash(n) \/ NodeRestart(n)
+    \/ \E m \in Members : Admit(m) \/ Expire(m) \/ Release(m)
+    \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Forget(n) \/ Read(n) \/ Drain(n)
+                        \/ NodeCrash(n) \/ NodeRestart(n)
     \/ \E n \in Nodes, m \in Members : Tick(n, m) \/ SeeHeld(n, m) \/ Claim(n, m)
 
 Spec == Init /\ [][Next]_vars
@@ -385,11 +433,6 @@ TogetherOn(S) ==
 \* hold by construction.
 GroupTogether == TogetherOn(EarlyRunning)
 
-\* GroupTogether for the members neither known split (#247, #248) marks, so
-\* a new way to split is still found where those splits can happen.
-GroupTogetherFresh ==
-    TogetherOn({m \in EarlyRunning : ~lagged[m] /\ ~silentHeld[m]})
-
 \* What `sys.facts` say after the first p inputs: each node's holdings and
 \* which nodes are not silent.
 RECURSIVE FactsAt(_)
@@ -399,6 +442,7 @@ FactsAt(p) ==
              x == inputs[p]
          IN CASE x.k = "fact"  -> [heard |-> [f.heard EXCEPT ![x.n] = x.hold], live |-> f.live \cup {x.n}]
               [] x.k = "lapse" -> [f EXCEPT !.live = @ \ {x.n}]
+              [] x.k = "forget" -> [heard |-> [f.heard EXCEPT ![x.n] = {}], live |-> f.live \ {x.n}]
               [] OTHER         -> f
 
 \* A split is never kept: a whole record that replaces a whole record never

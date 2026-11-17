@@ -123,20 +123,19 @@ felixd_placement_expectations=(
   "FelixdPlacement pass"
   "FelixdPlacementLease pass"
   "FelixdPlacementCrashLease pass"
-  "FelixdPlacementSilent pass"
+  "FelixdPlacementSilentHolder pass"
+  "FelixdPlacementRestartLag pass"
   "FelixdPlacementNoBarrier violates GroupTogether"
-  # GroupTogetherFresh leaves out the members the known splits mark; this
-  # shows it still finds a split from another cause.
-  "FelixdPlacementNoBarrierFresh violates GroupTogetherFresh"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
   "FelixdPlacementNoFence violates StaleNeverApplied"
   "FelixdPlacementLiveTakers violates ReplaySame"
-  # A known gap, felixd #247: a live holder judged silent keeps its member
-  # while the rest of the group moves.
-  "FelixdPlacementSilentHolder violates GroupTogether"
-  # felixd #248: a restarted agent claims on a record its reader has passed.
-  "FelixdPlacementRestartLag violates GroupTogether"
+  # Without the record hold (felixd #247) or the reader's tail gate (#248).
+  "FelixdPlacementNoRecordHold violates GroupTogether"
+  "FelixdPlacementNoTailGate violates GroupTogether"
+  # A known gap, felixd #FORGET: a forgotten node restarts and claims before
+  # the scheduler folds its forget.
+  "FelixdPlacementForgetRestart violates GroupTogether"
 )
 # Checked only when named, as the nightly walks them: too large for every state.
 felixd_placement_named=(
