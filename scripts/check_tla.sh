@@ -120,26 +120,49 @@ felixd_admission_expectations=(
 )
 
 felixd_placement_expectations=(
-  "FelixdPlacement pass"
+  # FelixdPlacement split by where its node crash falls; it is checked only when named.
+  "FelixdPlacementCrashN1E1Unplaced pass"
+  "FelixdPlacementCrashN1E1Placed pass"
+  "FelixdPlacementCrashN1E2Unplaced pass"
+  "FelixdPlacementCrashN1E2Placed pass"
+  "FelixdPlacementCrashN2E1Unplaced pass"
+  "FelixdPlacementCrashN2E1Placed pass"
+  "FelixdPlacementCrashN2E2Unplaced pass"
+  "FelixdPlacementCrashN2E2Placed pass"
   "FelixdPlacementLease pass"
   "FelixdPlacementCrashLease pass"
-  "FelixdPlacementSilent pass"
+  "FelixdPlacementSilentHolder pass"
+  "FelixdPlacementRestartLag pass"
+  "FelixdPlacementUndrainN1Unplaced pass"
+  "FelixdPlacementUndrainN1Placed pass"
+  "FelixdPlacementUndrainN2Unplaced pass"
+  "FelixdPlacementUndrainN2Placed pass"
+  "FelixdPlacementStampsN1Unplaced pass"
+  "FelixdPlacementStampsN1Placed pass"
+  "FelixdPlacementStampsN2Unplaced pass"
+  "FelixdPlacementStampsN2Placed pass"
   "FelixdPlacementNoBarrier violates GroupTogether"
-  # GroupTogetherFresh leaves out the members the known splits mark; this
-  # shows it still finds a split from another cause.
-  "FelixdPlacementNoBarrierFresh violates GroupTogetherFresh"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
   "FelixdPlacementNoFence violates StaleNeverApplied"
   "FelixdPlacementLiveTakers violates ReplaySame"
-  # A known gap, felixd #247: a live holder judged silent keeps its member
-  # while the rest of the group moves.
-  "FelixdPlacementSilentHolder violates GroupTogether"
-  # felixd #248: a restarted agent claims on a record its reader has passed.
-  "FelixdPlacementRestartLag violates GroupTogether"
+  # Without the record hold (felixd #247) or the reader's tail gate (#248).
+  "FelixdPlacementNoRecordHold violates GroupTogether"
+  "FelixdPlacementNoTailGate violates GroupTogether"
+  # A known gap, felixd #251: a forgotten node restarts and claims on a
+  # record that still names it while the scheduler moves the group.
+  "FelixdPlacementForgetRestart violates GroupTogether"
+  # A known gap, felixd #256: an undrained node claims on its view from
+  # before the drain while the group moved.
+  "FelixdPlacementUndrainStale violates GroupTogether"
+  # A known gap, felixd #257: an undrained node claims before the scheduler
+  # folds its lift, and the scheduler moves the group on its draining fact.
+  "FelixdPlacementUndrainRelist violates GroupTogether"
 )
-# Checked only when named, as the nightly walks them: too large for every state.
+# Checked only when named: FelixdPlacementFull is too large for every state
+# and the nightly walks it; FelixdPlacement is the union of the splits above.
 felixd_placement_named=(
+  "FelixdPlacement pass"
   "FelixdPlacementFull pass"
 )
 
@@ -200,13 +223,22 @@ for entry in "${selected[@]}"; do
     | tee "$scratch/tlc.log" | grep --line-buffered -E "^Progress\(" || true
   status="$(cat "$scratch/status")"
   output="$(cat "$scratch/tlc.log")"
+  # CI uploads this directory, so a failing pass config keeps its whole trace.
+  if [ -n "${TLA_TRACE_DIR:-}" ]; then
+    mkdir -p "$TLA_TRACE_DIR"
+    cp "$scratch/tlc.log" "$TLA_TRACE_DIR/$cfg.log"
+  fi
   rm -rf "$scratch"
   echo "$output" | grep -E "states generated|distinct states|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
   case "$expect" in
     pass)
       if [ "$status" -ne 0 ] || grep -qE "is violated" <<<"$output"; then
         echo "   FAIL: expected no violation"
-        echo "$output" | tail -120
+        if grep -qE "is violated" <<<"$output"; then
+          echo "$output" | sed -n '/is violated/,/^[0-9]* states generated/p'
+        else
+          echo "$output" | tail -120
+        fi
         failed=1
       fi
       ;;
