@@ -577,26 +577,26 @@ did, would make `GroupTogether` hold by construction or say nothing.
 |---|---|
 | `GroupWhole` | Every `group` record names every member, or none (a withdrawal). |
 | `GroupTogether` | Before the bound a group never runs split: one whole `group` record places every member that runs on an up node and was claimed before its claimer's bound, on the node that runs it. |
-| `GroupTogetherFresh` | `GroupTogether` for the members neither known split marks: not claimed under a record no longer in force (#248), and not held or claimed by a node judged silent while up (#247). |
+| `GroupTogetherFresh` | `GroupTogether` for the members neither known split marks: not claimed under a record no longer in force (#248), and not held or claimed by a live node judged silent (#247). |
 | `SplitNeverKept` | A record that replaces a whole record never places a member on the node the facts it answers show running it off the record it replaces. |
 | `ReplaySame` | Once a holder has caught up with what was written, from whichever snapshot it replayed, the record in force on `wl.scheduler.out` is its own placement. |
 | `StaleNeverApplied` | No agent claims a member on a `group` record whose epoch is lower than a claim of `wl.scheduler.out` before it. |
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdPlacement` | pass, all but `GroupTogether` (#248) | two nodes of room two, a group of two, three facts or lapses, a takeover with replay, a node crash | TBD | TBD |
-| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | TBD | TBD |
-| `FelixdPlacementCrashLease` | pass, all but `GroupTogether` (#248) | a node crash and a lease lost by a live holder, no takeover | TBD | TBD |
-| `FelixdPlacementSilent` | pass, all but `GroupTogether` (#247) | the `FelixdPlacementSilentHolder` model | TBD | TBD |
-| `FelixdPlacementFull` | pass, all but `GroupTogether` (#247, #248; nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | TBD | TBD |
-| `FelixdPlacementSilentHolder` | `GroupTogether` (#247) | a live node judged silent keeps its member while the group moves | TBD | TBD |
-| `FelixdPlacementRestartLag` | `GroupTogether` (#248) | a restarted node claims on the record in its view after the group moved | TBD | TBD |
-| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | TBD | TBD |
-| `FelixdPlacementNoBarrierFresh` | `GroupTogetherFresh` | `FelixdPlacementNoBarrier`: the ghosts for #247 and #248 do not hide another split | TBD | TBD |
-| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | TBD | TBD |
-| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | TBD | TBD |
-| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | TBD | TBD |
-| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | TBD | TBD |
+| `FelixdPlacement` | pass, all but `GroupTogether` (#247, #248) | two nodes of room two, a group of two, three facts or lapses, a takeover with replay, a node crash | TBD | TBD |
+| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | 20,020,064 | 5 min 25 s |
+| `FelixdPlacementCrashLease` | pass, all but `GroupTogether` (#247, #248) | a node crash and a lease lost by a live holder, no takeover | TBD | TBD |
+| `FelixdPlacementSilent` | pass, all but `GroupTogether` (#247) | the `FelixdPlacementSilentHolder` model | 662,344 | 19 s |
+| `FelixdPlacementFull` | pass, all but `GroupTogether` (#247, #248; nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | random behaviours, not exhaustive | nightly |
+| `FelixdPlacementSilentHolder` | `GroupTogether` (#247) | a live node judged silent keeps its member while the group moves | 507,730 at the violation | 9 s |
+| `FelixdPlacementRestartLag` | `GroupTogether` (#248) | a restarted node claims on the record in its view after the group moved | 2,160,254 at the violation | 31 s |
+| `FelixdPlacementNoBarrier` | `GroupTogether` | the agent claims a member without looking for its record | 16 at the violation | 1 s |
+| `FelixdPlacementNoBarrierFresh` | `GroupTogetherFresh` | `FelixdPlacementNoBarrier`: the ghosts for #247 and #248 do not hide another split | 16 at the violation | under 1 s |
+| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | 191,668 at the violation | 3 s |
+| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | 181 at the violation | under 1 s |
+| `FelixdPlacementNoFence` | `StaleNeverApplied` | a deposed holder's append not fenced, and an agent claims on it | 18,454 at the violation | 1 s |
+| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | 2,564 at the violation | under 1 s |
 
 The pass configurations start with the whole group admitted and leave three inputs for facts and
 lapses, enough for a second group record: re-placing a member a dead node held. The
@@ -604,9 +604,11 @@ lapses, enough for a second group record: re-placing a member a dead node held. 
 
 Two known splits (#247, #248) break `GroupTogether` wherever they can happen, and a configuration
 that expects them can say nothing about a third. So each claim records two ghosts: whether the
-claimer's view held a record other than the one in force (#248), and whether the claimer had been
-judged silent while up (#247), which a lapse also sets on what a live node holds. A node's silent
-mark lasts until it crashes, so some later claims of such a node are not checked.
+claimer's view held a record other than the one in force (#248), and whether the claimer was
+judged silent while up or claims while an input the scheduler has yet to act on leaves it silent
+(#247), which a lapse also sets on what a live node holds. The second covers a node judged silent
+while down that restarts and claims before its next fact is folded. A node's silent mark lasts
+until it crashes, so some later claims of such a node are not checked.
 `GroupTogetherFresh` checks the rest, in every pass configuration and the nightly walk, and
 `FelixdPlacementNoBarrierFresh` shows it is not empty.
 
@@ -623,7 +625,10 @@ before the bound, while the node the group moved to claims the rest under the ne
 A known gap (#247): a live node judged silent by `sys.facts` time keeps the member it holds, since
 nothing stops its agent, while `running()` skips silent nodes and `place_groups` moves the group
 to nodes that are takers. The rest of the group is claimed there before the bound, and the group
-runs split. `FelixdPlacementSilentHolder` pins it.
+runs split. `FelixdPlacementSilentHolder` pins it. A node that crashed and was judged silent while
+down does the same: it restarts, `write_facts` runs beside the claim loop with nothing ordering
+them, so it can claim under the record in force before its next fact lands, and the scheduler
+moves the group off it. `FelixdPlacement` and `FelixdPlacementCrashLease` reach this one.
 
 What the model leaves out: ungrouped workloads and the `assign`, grace and bound paths of `turn`;
 `table` records, which hold the same group placements as the records before them; the skip past a

@@ -246,6 +246,16 @@ PlacesHere(v, m, n) == LET j == InForce(v) IN j # None /\ out[j].map[m] = n
 
 Held(n, m) == IF admitted = Members THEN gsince[n][m] ELSE since[n][m]
 
+\* Ghost for #247: the scheduler has yet to act on a fold in which n is
+\* silent, its last fact or lapse a lapse. A node that crashed, was judged
+\* silent while down and restarted claims as a live node judged silent.
+LapsedAt(p, n) ==
+    LET mine == {j \in 1..p : inputs[j].k \in {"fact", "lapse"} /\ inputs[j].n = n}
+    IN mine # {} /\ inputs[Max(mine)].k = "lapse"
+SilentAhead(n) ==
+    \E p \in (IF written < Len(inputs) THEN written + 1 ELSE written)..Len(inputs) :
+        LapsedAt(p, n)
+
 AgentUnchanged == UNCHANGED <<inputs, admitted, st, pos, written, hist, epoch, up, stale,
                               out>>
 
@@ -288,9 +298,9 @@ Claim(n, m) ==
     /\ early' = [early EXCEPT ![m] = Held(n, m) < Bound]
     /\ applied' = IF PlacesHere(view[n], m, n) THEN applied \cup {InForce(view[n])} ELSE applied
     \* Ghosts for the known splits: claimed under a record no longer in force
-    \* (#248), or by a node judged silent while up (#247).
+    \* (#248), or by a live node judged silent (#247).
     /\ lagged' = [lagged EXCEPT ![m] = InForce(view[n]) # InForce(Len(out))]
-    /\ silentHeld' = [silentHeld EXCEPT ![m] = judged[n]]
+    /\ silentHeld' = [silentHeld EXCEPT ![m] = judged[n] \/ SilentAhead(n)]
     \* The claimer waits afresh once it lets the member go.
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
