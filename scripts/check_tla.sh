@@ -220,13 +220,22 @@ for entry in "${selected[@]}"; do
     | tee "$scratch/tlc.log" | grep --line-buffered -E "^Progress\(" || true
   status="$(cat "$scratch/status")"
   output="$(cat "$scratch/tlc.log")"
+  # CI uploads this directory, so a failing pass config keeps its whole trace.
+  if [ -n "${TLA_TRACE_DIR:-}" ]; then
+    mkdir -p "$TLA_TRACE_DIR"
+    cp "$scratch/tlc.log" "$TLA_TRACE_DIR/$cfg.log"
+  fi
   rm -rf "$scratch"
   echo "$output" | grep -E "states generated|distinct states|depth of the complete|^Error:|is violated|Finished in" | tail -5 || true
   case "$expect" in
     pass)
       if [ "$status" -ne 0 ] || grep -qE "is violated" <<<"$output"; then
         echo "   FAIL: expected no violation"
-        echo "$output" | tail -120
+        if grep -qE "is violated" <<<"$output"; then
+          echo "$output" | sed -n '/is violated/,/^[0-9]* states generated/p'
+        else
+          echo "$output" | tail -120
+        fi
         failed=1
       fi
       ;;

@@ -233,7 +233,12 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: TLA_MODULE=FelixdPlacement TLC_WORKERS=4 scripts/check_tla.sh ${{ matrix.configs }}
+      - run: TLA_MODULE=FelixdPlacement TLA_TRACE_DIR=tla-traces TLC_WORKERS=4 scripts/check_tla.sh ${{ matrix.configs }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tla-placement-${{ matrix.name }}
+          path: tla-traces/
 
   # Cheap: python only. Catches a misnamed or empty fragment before the release does.
   changelog:
