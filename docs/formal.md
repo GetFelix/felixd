@@ -575,14 +575,14 @@ not; a claim of the lease and an agent restart start it over.
 
 | Configuration | Expected | Model | Distinct states | Time |
 |---|---|---|---|---|
-| `FelixdPlacement` | pass | two nodes of room two, a group of two admitted one after the other, a takeover with replay, a node crash | TBD | TBD |
-| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | TBD | TBD |
+| `FelixdPlacement` | pass | two nodes of room two, a group of two admitted one after the other, a takeover with replay, a node crash | about 27.7 million | about 7 min |
+| `FelixdPlacementLease` | pass | `FelixdPlacement` with a lease lost by a live holder instead of the node crash | about 7.1 million | about 2 min |
 | `FelixdPlacementFull` | pass (nightly, random behaviours) | three nodes of room one, live nodes judged silent, two takeovers, a bound of two steps | n/a | n/a |
-| `FelixdPlacementNoBarrier` | `GroupHeld` | the agent claims a member without looking for its record | TBD | TBD |
-| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | TBD | TBD |
-| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | TBD | TBD |
-| `FelixdPlacementNoFence` | `FencedOut` | a deposed holder's append not fenced | TBD | TBD |
-| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | TBD | TBD |
+| `FelixdPlacementNoBarrier` | `GroupHeld` | the agent claims a member without looking for its record | 16 | under 5 s |
+| `FelixdPlacementNoSplitGuard` | `SplitNeverKept` | the split check in `place_groups` off | about 182,000 | under 5 s |
+| `FelixdPlacementPerMember` | `GroupWhole` | a group written one record per member | 214 | under 5 s |
+| `FelixdPlacementNoFence` | `FencedOut` | a deposed holder's append not fenced | about 1,000 | under 5 s |
+| `FelixdPlacementLiveTakers` | `ReplaySame` | takers read from which nodes are up when the scheduler steps, not from recorded facts | about 3,500 | under 5 s |
 
 The crash and the lost lease are separate configurations because together they did not finish
 inside the job; the `tla-placement` job checks each in its own leg, and the twins in a third.
