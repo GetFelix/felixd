@@ -608,6 +608,53 @@ fn a_silent_node_that_comes_back_without_the_member_frees_it() {
     assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
 }
 
+#[test]
+fn a_silent_node_that_comes_back_taking_work_is_held_again_when_silent() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    f.fact(3, holding("a", &["x"]));
+    f.fact(4, holding("b", &["y"]));
+    assert_eq!(f.fact(7 * SECOND, holding("a", &["x"])), vec![]);
+    // b speaks again without y but takes work, so the record stands, and
+    // b may still claim y under it.
+    assert_eq!(f.fact(7 * SECOND + 1, fact("b")), vec![]);
+    // b goes silent again: y stays put until b is forgotten.
+    assert_eq!(f.fact(14 * SECOND, holding("a", &["x"])), vec![]);
+    assert_eq!(f.s.groups()["g"]["y"], "b");
+    let out = f.fact(68 * SECOND, holding("a", &["x"]));
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
+}
+
+#[test]
+fn the_newer_fact_wins_a_member_two_nodes_say_they_hold() {
+    let mut f = Feed::hearing(&["a", "b"]);
+    let slow = NodeFact {
+        every_ms: 100_000,
+        ..fact("c")
+    };
+    f.fact(0, slow.clone());
+    let g = pair("g", "x", "y");
+    f.run_in(1, "x", &g);
+    f.run_in(2, "y", &g);
+    // c held x once and writes rarely; a claimed x after it.
+    f.fact(
+        SECOND,
+        NodeFact {
+            holding: ["x".to_owned()].into(),
+            held: 1,
+            ..slow
+        },
+    );
+    f.fact(2 * SECOND, holding("a", &["x"]));
+    f.spec(3 * SECOND, "y", WorkloadState::Stopped);
+    // a is silent and c is not, but a's fact is the newer.
+    f.fact(10 * SECOND, fact("b"));
+    let out = f.run_in(10 * SECOND + 1, "y", &g);
+    assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "b")])]);
+}
+
 /// The group record of #247: both members on a, then b joins.
 fn both_on_a() -> Feed {
     let mut f = Feed::hearing(&["a"]);
@@ -739,4 +786,24 @@ fn the_table_carries_the_groups() {
         panic!("{out:?}");
     };
     assert_eq!(groups["g"]["x"], "a");
+}
+
+#[test]
+fn a_group_is_not_moved_off_a_blocked_node_that_may_be_claiming_a_member() {
+    let mut f = both_on_a();
+    // a's claim of x is under way when it cannot read its drain mark: its
+    // fact says blocked and does not name x yet.
+    let blocked = NodeFact {
+        blocked: true,
+        ..fact("a")
+    };
+    assert_eq!(f.fact(4, blocked), vec![]);
+    assert_eq!(f.s.groups()["g"]["x"], "a");
+    // A draining fact is said only with no claim under way, so it frees both.
+    let draining = NodeFact {
+        draining: true,
+        ..fact("a")
+    };
+    let out = f.fact(5, draining);
+    assert_eq!(out, vec![f.group("g", &[("x", "b"), ("y", "b")])]);
 }

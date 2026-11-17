@@ -534,21 +534,28 @@ async fn follow_drain(node: Arc<Node>) {
 /// `facts_every`, and soon after what it holds or whether it can take work
 /// changes.
 async fn write_facts(node: Arc<Node>) {
-    let fact = || NodeFact {
-        node: node.node_id.clone(),
-        every_ms: u64::try_from(node.facts_every.as_millis()).unwrap_or(u64::MAX),
-        max_workloads: node.max_workloads,
-        held: node.held.load(Ordering::SeqCst),
-        holding: node
-            .holding
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .take(node.max_workloads)
-            .cloned()
-            .collect(),
-        draining: *node.draining.borrow(),
-        blocked: node.blocked.load(Ordering::SeqCst),
+    let fact = || {
+        // The scheduler takes a draining fact as proof that the node claims
+        // nothing it does not list. So, as in `announce`, draining is read
+        // before the claims under way and said only when there are none, and
+        // what it holds is read last: a won claim is named before it ends.
+        let draining = *node.draining.borrow() && node.claiming.load(Ordering::SeqCst) == 0;
+        NodeFact {
+            node: node.node_id.clone(),
+            every_ms: u64::try_from(node.facts_every.as_millis()).unwrap_or(u64::MAX),
+            max_workloads: node.max_workloads,
+            held: node.held.load(Ordering::SeqCst),
+            holding: node
+                .holding
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .take(node.max_workloads)
+                .cloned()
+                .collect(),
+            draining,
+            blocked: node.blocked.load(Ordering::SeqCst),
+        }
     };
     assignments::write_facts(&node.felix, &node.assignments, node.facts_every, fact).await;
 }
@@ -824,8 +831,9 @@ async fn own(
         let output_tail = std::sync::Mutex::new(None);
         let floor = written_epoch(&node.felix, &id, &spec.output, &output_tail);
         let claimed = lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await;
-        // A lease it won is in the cache before the node can say it is
-        // draining.
+        // A lease it won is in the cache, and named in its facts, before the
+        // node can say it is draining.
+        let named = matches!(claimed, Ok(Some(_))).then(|| Holds::start(&node, &id));
         drop(under_way);
         drop(permit);
         match claimed {
@@ -833,7 +841,7 @@ async fn own(
                 metrics::claim(Claim::Won);
                 let won_at = tokio::time::Instant::now();
                 let holding = metrics::Holding::start(&metrics::workload(&id));
-                let _named = Holds::start(&node, &id);
+                let _named = named;
                 tracing::info!(workload = %id, epoch = held.epoch, "claimed");
                 let claim_from = output_tail.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let run = Run {

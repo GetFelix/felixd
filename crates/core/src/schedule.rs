@@ -466,25 +466,29 @@ impl Scheduler {
             .collect()
     }
 
-    /// The node each member of `group` may run on. A node not silent runs
-    /// what its latest fact says. A silent node may still hold what its last
-    /// fact says and what the group's record places on it, since silence
-    /// does not end a lease and its claims may not have reached a fact;
-    /// moving the group off such a member would split it (#247). That hold
-    /// ends when the node's own fact drops it, a node not silent reports the
-    /// member, or the node is forgotten. A node not silent wins, then the
-    /// lowest id.
+    /// The node each member of `group` may run on, so no group move takes a
+    /// member off a node that may still run it, or be about to (#247).
+    ///
+    /// A member runs where a node's latest fact says it is held; if two
+    /// say so, the newer fact wins, then the lowest id. Silence does not end
+    /// a lease, so a silent node's last fact still counts. A member the
+    /// group's record places on a node also counts as running there while
+    /// that node is silent or blocked, since a claim under way shows in no
+    /// fact and such a node may still land one. A draining fact from a node
+    /// not silent ends that: an agent says it is draining only once no
+    /// claim is under way. A taker needs no hold, as the record stands while
+    /// its nodes take work. So a node that takes work and then goes silent
+    /// again is held again.
     fn running(&self, group: &Group) -> BTreeMap<String, String> {
-        let mut running: BTreeMap<String, (bool, String)> = BTreeMap::new();
+        let mut running: BTreeMap<String, (u64, String)> = BTreeMap::new();
         for (node, heard) in &self.nodes {
-            let silent = self.silent(heard);
             for member in group.members.iter().filter(|m| heard.holding.contains(*m)) {
-                // Nodes come in id order, so only a silent holder is replaced.
+                // Nodes come in id order, so a tie keeps the lowest id.
                 let best = running
                     .entry(member.clone())
-                    .or_insert_with(|| (silent, node.clone()));
-                if best.0 && !silent {
-                    *best = (false, node.clone());
+                    .or_insert_with(|| (heard.at_micros, node.clone()));
+                if heard.at_micros > best.0 {
+                    *best = (heard.at_micros, node.clone());
                 }
             }
         }
@@ -493,10 +497,15 @@ impl Scheduler {
             .get(&group.name)
             .filter(|r| group.members.iter().eq(r.keys()));
         for (member, node) in record.into_iter().flatten() {
-            if self.nodes.get(node).is_some_and(|h| self.silent(h)) {
+            // Not silent and not blocked means a taker or a settled drain.
+            if self
+                .nodes
+                .get(node)
+                .is_some_and(|h| h.blocked || self.silent(h))
+            {
                 running
                     .entry(member.clone())
-                    .or_insert_with(|| (true, node.clone()));
+                    .or_insert_with(|| (0, node.clone()));
             }
         }
         running
@@ -521,11 +530,12 @@ impl Scheduler {
     /// whose members all stopped running, or never ran, is placed on the
     /// least loaded takers with room, the lowest id first, and only if every
     /// member fits. While members run, a new placement keeps each of them on
-    /// its node, which is how a member freed by a node death is placed again;
-    /// a group with a member running off its placement is split and is not
-    /// placed again until no member runs. A placement whose members all run
-    /// where it says or sit on takers is left alone. The placement of a group
-    /// no longer complete is withdrawn.
+    /// its node, which is how a member freed elsewhere is placed again. A
+    /// member on a dead node is held there until the node is forgotten (see
+    /// [`Self::running`]). A group with a member running off its placement
+    /// is split and is not placed again until no member runs. A placement
+    /// whose members all run where it says or sit on takers is left alone.
+    /// The placement of a group no longer complete is withdrawn.
     fn place_groups(
         &mut self,
         takers: &BTreeMap<String, Taker>,

@@ -2231,17 +2231,27 @@ The scheduler counts the members as load like any first-claim placement, and
 writes a `group` record for a split group again only once no member runs, so
 it joins up once every member has stopped and been freed.
 
-For a group, a member counts as running on a node until that node's hold on
-it is known to be gone, not merely until the node goes silent. Silence is
-measured on `sys.facts`, while the lease is renewed on its own; a live node
-whose facts are slow or paused still holds its members, and may have claimed
-one under the record after its last fact landed. So a silent node counts as
-running what its last fact says it holds and what the group's record places
-on it. That hold ends when the node's own fact drops the member, a node that
-is not silent reports holding it (the lease is exclusive, so the old one is
-gone), or the node is forgotten after thirty intervals. Moving the group
-sooner would let the new node claim the free members while the old holder
-keeps its own, which runs the group split before the bound (#247).
+For a group, no move may take a member off a node that may still run it, or
+be about to claim it under the record (#247). Silence is measured on
+`sys.facts`, while the lease is renewed on its own, and a claim under way
+shows in no fact until it lands. So the scheduler counts a member as running:
+
+- where a node's latest fact says it is held, silent or not. If two nodes say
+  so, the newer fact wins, since the lease is exclusive and the older one is
+  gone;
+- on the node the group's record places it on, while that node does not take
+  work and is not known to be draining: it is silent or blocked.
+
+The second hold ends only when the node takes work again (the record then
+stands, and leaving the member there is safe), when it writes a draining
+fact while not silent, or when it is forgotten after thirty intervals. An
+agent says it is draining in its facts only once no claim is under way, and
+reads what it holds after that, so a draining fact lists everything the
+node runs and the node claims nothing more. A blocked node gives no such
+proof: it cannot read its drain mark, but a claim reads the mark itself and
+can still land. A node that comes back and goes silent again is held again.
+Moving the group sooner would let the new node claim the free members while
+the old one keeps or lands its own, running the group split before the bound.
 
 The cost is on a node death. A member on a dead node is not placed again
 until the node is forgotten (15 min at the default `--facts-every-ms`), which
