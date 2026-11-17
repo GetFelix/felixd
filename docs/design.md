@@ -809,9 +809,16 @@ it. For each workload:
   the workload by first claim wins, or before the assignment changed.
 - **Held at.** With a scheduler, `HELD_AT` is the holder's claim epoch and, when
   an assignment placed the claim, the assignment offset it acted on
-  (`3@912`). `ASSIGN_LAG` is how many records of `wl.scheduler.out` that offset
-  is behind the assignment now in force for the workload, `0` when current and
-  `-` when the claim was not placed by an assignment. Both come from the
+  (`3@912`). `ASSIGN_LAG` is how many offsets of `wl.scheduler.out` that
+  assignment is behind the one now in force for the workload (offsets need not
+  be dense, so it is a difference, not a record count): `0` when current,
+  `ahead` when the held offset is higher than the one in force (a restarted
+  scheduler rebuilt its table from earlier output), `epoch` when the two were
+  written by different scheduler epochs, so no difference is taken, and `-`
+  when the claim was not placed by an assignment or none is in force. In
+  `PLACED` and `HELD_AT`, `?` means the holder has a claim but its placement
+  record could not be read (the line below the table says why), and `-` means
+  nothing holds the workload. Both come from the
   placement record and the scheduler's output, so they show what was recorded,
   not what a node believes. A node's own `assignments` offset is a separate
   fact field, [not built yet](#placement-rules).

@@ -146,24 +146,54 @@ pub struct HeldAt {
     /// The `wl.scheduler.out` offset the claim was placed by, when the
     /// scheduler placed it.
     pub assignment: Option<u64>,
+    /// The scheduler epoch that wrote that assignment.
+    pub scheduler_epoch: Option<u64>,
+}
+
+/// How a claim's assignment compares with the one now in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignmentLag {
+    /// The claim's assignment is this many offsets behind; 0 when current.
+    Behind(u64),
+    /// The claim's assignment is at a higher offset than the one in force,
+    /// as when a restarted scheduler rebuilt its table from earlier output.
+    Ahead,
+    /// The two were written by different scheduler epochs, so an offset
+    /// difference says nothing useful.
+    OtherEpoch,
 }
 
 impl HeldAt {
     /// The claim at `epoch` as `placed` recorded it.
     pub(crate) fn of(epoch: u64, placed: &PlacedBy) -> HeldAt {
-        let assignment = match placed {
-            PlacedBy::Recorded(Authority::Assigned { assignment, .. }) => Some(*assignment),
-            _ => None,
+        let (assignment, scheduler_epoch) = match placed {
+            PlacedBy::Recorded(Authority::Assigned {
+                assignment,
+                scheduler_epoch,
+            }) => (Some(*assignment), Some(*scheduler_epoch)),
+            _ => (None, None),
         };
-        HeldAt { epoch, assignment }
+        HeldAt {
+            epoch,
+            assignment,
+            scheduler_epoch,
+        }
     }
 
-    /// How many scheduler output records the claim's assignment is behind
-    /// the one now in force for the workload. `None` when the claim was not
-    /// placed by an assignment or no assignment is in force, so there is
-    /// nothing to compare.
-    pub fn assignment_lag(&self, in_force: Option<&Placed>) -> Option<u64> {
-        Some(in_force?.offset.saturating_sub(self.assignment?))
+    /// How many offsets of `wl.scheduler.out` the claim's assignment is
+    /// behind the one now in force for the workload. Offsets need not be
+    /// dense, so this is a difference, not a count of records. `None` when
+    /// the claim was not placed by an assignment or none is in force.
+    pub fn assignment_lag(&self, in_force: Option<&Placed>) -> Option<AssignmentLag> {
+        let in_force = in_force?;
+        let held = self.assignment?;
+        if self.scheduler_epoch? != in_force.epoch {
+            return Some(AssignmentLag::OtherEpoch);
+        }
+        Some(match in_force.offset.checked_sub(held) {
+            Some(behind) => AssignmentLag::Behind(behind),
+            None => AssignmentLag::Ahead,
+        })
     }
 }
 

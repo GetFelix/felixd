@@ -114,9 +114,32 @@ fn an_assignment_claim_is_behind_by_the_records_since() {
             scheduler_epoch: 1,
         }),
     );
-    assert_eq!(held.assignment_lag(Some(&placed(10))), Some(0));
-    assert_eq!(held.assignment_lag(Some(&placed(25))), Some(15));
+    assert_eq!(
+        held.assignment_lag(Some(&placed(10))),
+        Some(AssignmentLag::Behind(0))
+    );
+    assert_eq!(
+        held.assignment_lag(Some(&placed(25))),
+        Some(AssignmentLag::Behind(15))
+    );
     assert_eq!(held.assignment_lag(None), None);
+    let ahead = HeldAt::of(
+        2,
+        &PlacedBy::Recorded(Authority::Assigned {
+            assignment: 30,
+            scheduler_epoch: 1,
+        }),
+    );
+    assert_eq!(
+        ahead.assignment_lag(Some(&placed(25))),
+        Some(AssignmentLag::Ahead)
+    );
+    let mut newer = placed(40);
+    newer.epoch = 2;
+    assert_eq!(
+        held.assignment_lag(Some(&newer)),
+        Some(AssignmentLag::OtherEpoch)
+    );
     let first = HeldAt::of(
         3,
         &PlacedBy::Recorded(Authority::FirstClaim {
