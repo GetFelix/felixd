@@ -304,6 +304,22 @@ fn a_gap_with_no_facts_does_not_count_toward_forgetting() {
 }
 
 #[test]
+fn a_node_with_a_long_interval_does_not_turn_the_gap_pause_off() {
+    // "slow" writes every 100x longer, so the gap is inside its silent
+    // window but past the forget window of the others (#251).
+    let mut f = Feed::hearing(&["a", "b"]);
+    let slow = NodeFact {
+        every_ms: 200_000,
+        ..fact("slow")
+    };
+    f.fact(0, slow);
+    let back = 3 * FORGET_INTERVALS * 2 * SECOND;
+    f.fact(back, fact("b"));
+    assert!(f.s.knows("a"));
+    assert!(f.s.knows("slow"));
+}
+
+#[test]
 fn the_whole_table_is_written_again_by_input_time() {
     let mut f = Feed::hearing(&["a"]);
     f.run(1, "w");

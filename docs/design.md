@@ -2260,7 +2260,8 @@ the old one keeps or lands its own, running the group split before the bound.
 
 Forgetting is the one release that rests on time alone, so the agent closes
 it (#251). While a scheduler is wanted, an agent none of whose facts has
-landed for ten of its intervals fences itself: its group members stop and
+landed for ten of its intervals (at least one slow append plus a
+second, and never more than fifteen) fences itself: its group members stop and
 release their leases, and it claims no group member until a fact lands
 again. Ten is a third of the thirty the scheduler waits before it forgets a
 node, so a node that is alive has stopped its members well before they can
@@ -2275,8 +2276,17 @@ count toward forgetting. When no fact has landed for longer than any node's
 silent window, as while no scheduler was wanted and agents sent none, the
 next fact finds every node silent but not nearer to being forgotten. So a
 node is forgotten only after its own facts stop while others' land, which
-is exactly when it fences itself. Agents also stop the fence clock while
-they see no scheduler wanted, since no fact is due then.
+is exactly when it fences itself. Each node goes by its own silent window,
+so one with a long interval does not turn the pause off for the rest. An
+agent pauses its fence clock for a stop of the scheduler only once the stop
+has lasted longer than its silent window, as the scheduler pauses only such
+a gap, and only when a fresh read of the scheduler's spec confirms it, since
+a watch that has fallen behind is no evidence.
+
+One case is left: an agent whose watch has fallen behind and still sees the
+scheduler wanted keeps appending facts while it is stopped, so the
+scheduler finds no gap and may forget the nodes that stopped appending
+(#271).
 
 The cost is on a node death. A member on a dead node is not placed again
 until the node is forgotten (15 min at the default `--facts-every-ms`), which

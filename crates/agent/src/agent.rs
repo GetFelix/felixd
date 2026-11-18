@@ -724,15 +724,31 @@ async fn write_facts(node: Arc<Node>) {
 /// Fences this node while none of its facts land and a scheduler is wanted
 /// (see [`FENCE_INTERVALS`]): the tasks of its group members stop and
 /// release their leases, and it claims no group member until a fact lands.
-/// With no scheduler wanted no fact is due, and the scheduler does not count
-/// that gap toward forgetting a node either.
+/// A stop of the scheduler pauses the clock only once it has lasted longer
+/// than a silent window, as the scheduler pauses only such a gap, and only
+/// on a fresh read, since a stale watch is no evidence.
 async fn fence_self(node: Arc<Node>) {
-    let bound = node.facts_every.saturating_mul(FENCE_INTERVALS);
+    let bound = fence_bound(node.facts_every);
+    let quiet = node
+        .facts_every
+        .saturating_mul(felixd_core::schedule::SILENT_INTERVALS as u32);
     let mut scheduler = node.assignments.scheduler_changes();
+    let mut stopped_since = None;
+    let mut last_read = None;
     loop {
         let now = tokio::time::Instant::now();
-        if !*scheduler.borrow_and_update() {
-            node.standing.facts_due_from(now);
+        if *scheduler.borrow_and_update() {
+            stopped_since = None;
+        } else {
+            let since = *stopped_since.get_or_insert(now);
+            let read_due =
+                last_read.is_none_or(|at| now.saturating_duration_since(at) >= node.facts_every);
+            if now.saturating_duration_since(since) > quiet && read_due {
+                last_read = Some(now);
+                if scheduler_stopped(&node.felix).await {
+                    node.standing.facts_due_from(now);
+                }
+            }
         }
         if node.standing.check_fence(now, bound) {
             match *node.standing.fenced.borrow() {
@@ -747,6 +763,24 @@ async fn fence_self(node: Arc<Node>) {
             () = tokio::time::sleep(CHECK_FENCE_EVERY) => {}
             _ = scheduler.changed() => {}
         }
+    }
+}
+
+/// How long a node runs its group members with no fact landing: at least
+/// [`FENCE_INTERVALS`], and one slow append more where that is shorter, but
+/// never past half the forget window.
+fn fence_bound(every: Duration) -> Duration {
+    let floor = assignments::WITHIN + CHECK_FENCE_EVERY;
+    let most = every.saturating_mul((FORGET_INTERVALS / 2) as u32);
+    floor.clamp(every.saturating_mul(FENCE_INTERVALS), most)
+}
+
+/// Whether a read of the scheduler's spec finds it not running.
+async fn scheduler_stopped(felix: &Felix) -> bool {
+    match felix.cache_get(names::WORKLOADS, names::SCHEDULER).await {
+        Ok(None) => true,
+        Ok(Some(v)) => WorkloadSpec::decode(&v).is_ok_and(|s| s.state != WorkloadState::Running),
+        Err(_) => false,
     }
 }
 

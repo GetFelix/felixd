@@ -364,20 +364,24 @@ impl Scheduler {
         });
     }
 
-    /// After a gap in which no fact landed for longer than any node's silent
-    /// window, such as while no scheduler was wanted, every node counts as
-    /// silent but the gap does not count toward forgetting it. Agents fence
-    /// themselves on time with no fact of their own landing while others'
-    /// do, so only that may forget a node that is alive (#251).
+    /// After a gap in which no fact of any node landed for longer than a
+    /// node's silent window, such as while no scheduler was wanted, that
+    /// node counts as silent but the gap does not count toward forgetting
+    /// it. Each node goes by its own window, so a node with a long interval
+    /// does not turn the pause off for the rest. Agents fence themselves on
+    /// time with no fact of their own landing while others' do, so only
+    /// that may forget a node that is alive (#251).
     fn pause_over_gap(&mut self, at_micros: u64) {
-        let window = |h: &Heard| Self::after(h.every_ms, SILENT_INTERVALS);
-        let longest = self.nodes.values().map(window).max().unwrap_or(0);
-        if !self.facts_seen || at_micros.saturating_sub(self.facts_micros) <= longest {
+        if !self.facts_seen {
             return;
         }
+        let gap = at_micros.saturating_sub(self.facts_micros);
         for h in self.nodes.values_mut() {
-            let edge = at_micros.saturating_sub(window(h)).saturating_sub(1);
-            h.at_micros = h.at_micros.max(edge);
+            let window = Self::after(h.every_ms, SILENT_INTERVALS);
+            if gap > window {
+                let edge = at_micros.saturating_sub(window).saturating_sub(1);
+                h.at_micros = h.at_micros.max(edge);
+            }
         }
     }
 

@@ -23,7 +23,7 @@ use crate::felix::{Felix, Trimmed};
 const READ_EVERY: Duration = Duration::from_millis(500);
 /// How long one read of a page, or one append, may take. A read that takes
 /// longer is tried again from where it was.
-const WITHIN: Duration = Duration::from_secs(10);
+pub(crate) const WITHIN: Duration = Duration::from_secs(10);
 /// How many offsets a reader looks back at once for the latest table.
 const BACK_WINDOW: u64 = 256;
 

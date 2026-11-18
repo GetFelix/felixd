@@ -388,3 +388,14 @@ fn no_fact_is_overdue_while_no_scheduler_is_wanted() {
     }
     assert!(!*standing.fenced.borrow());
 }
+
+#[test]
+fn the_fence_bound_outlasts_a_slow_append_but_not_half_the_forget_window() {
+    let s = Duration::from_secs;
+    assert_eq!(fence_bound(s(30)), s(300));
+    assert_eq!(fence_bound(s(1)), s(11));
+    assert_eq!(
+        fence_bound(Duration::from_millis(100)),
+        Duration::from_millis(1500)
+    );
+}
