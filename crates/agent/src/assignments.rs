@@ -23,7 +23,7 @@ use crate::felix::{Felix, Trimmed};
 const READ_EVERY: Duration = Duration::from_millis(500);
 /// How long one read of a page, or one append, may take. A read that takes
 /// longer is tried again from where it was.
-const WITHIN: Duration = Duration::from_secs(10);
+pub(crate) const WITHIN: Duration = Duration::from_secs(10);
 /// How many offsets a reader looks back at once for the latest table.
 const BACK_WINDOW: u64 = 256;
 
@@ -491,6 +491,7 @@ pub(crate) async fn write_facts(
     assignments: &Assignments,
     every: Duration,
     fact: impl Fn() -> NodeFact,
+    landed: impl Fn(),
 ) {
     let mut scheduler = assignments.scheduler_changes();
     let mut failing = false;
@@ -504,8 +505,15 @@ pub(crate) async fn write_facts(
             // A node the scheduler cannot see, for the tests.
             if due(last.as_ref(), &now, every) && !crate::faults::no_facts() {
                 let record = now.encode();
-                match tokio::time::timeout(WITHIN, felix.publish(names::FACTS, record)).await {
+                let sent = async {
+                    if crate::faults::facts_stopped() {
+                        anyhow::bail!("injected: facts stopped");
+                    }
+                    felix.publish(names::FACTS, record).await
+                };
+                match tokio::time::timeout(WITHIN, sent).await {
                     Ok(Ok(())) => {
+                        landed();
                         failing = false;
                         last = Some((now, Instant::now()));
                     }

@@ -924,3 +924,90 @@ async fn an_undrained_node_takes_its_group_back_well_before_the_bound() {
         ));
     }
 }
+
+/// A node whose facts stop landing while the scheduler runs fences itself
+/// and releases its group members before the scheduler can forget it and
+/// move the group (#251): no member runs there while the record in force
+/// places it elsewhere, and the group is placed again off that node.
+#[tokio::test]
+async fn a_node_whose_facts_stop_landing_releases_its_group_members_before_it_is_forgotten() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g10-a", "g10-b", "g10-c"];
+    let more = group_args("300000");
+    let _agents: Vec<Agent> = nodes
+        .iter()
+        .map(|n| start_with(&t, n, Duration::from_secs(300), "facts-switch=1", &more))
+        .collect();
+    let sched = scheduler_on(&t, &nodes).await;
+    let ids = ["fx", "fy"];
+    run_in_group(&t, ids[0], "pair=fx,fy").await;
+    run_in_group(&t, ids[1], "pair=fx,fy").await;
+    let held = group_held(&t, "pair", ids).await;
+    let victim = held
+        .iter()
+        .find(|n| **n != sched)
+        .unwrap_or(&held[0])
+        .clone();
+    eprintln!("stopping the facts of {victim}, which holds {held:?}");
+    let stopped = Instant::now();
+    t.felix
+        .cache_put(names::WORKLOADS, "stop-facts", Bytes::from(victim.clone()))
+        .await
+        .unwrap();
+
+    let forget = FACTS_EVERY * schedule::FORGET_INTERVALS as u32;
+    let mut released = None;
+    let deadline = stopped + forget + SOON;
+    loop {
+        let record = group_record(&t, "pair").await.unwrap_or_default();
+        let mut on_victim = false;
+        for id in ids {
+            let holds = holder(&t, id).await;
+            on_victim |= holds.as_deref() == Some(victim.as_str());
+            let placed = record.iter().find(|(m, _)| m == id).map(|(_, n)| n);
+            assert!(
+                !(holds.as_deref() == Some(victim.as_str())
+                    && placed.is_some_and(|n| *n != victim)),
+                "{id} runs on {victim} while the record places it on {placed:?}, {:?} after its facts stopped",
+                stopped.elapsed()
+            );
+        }
+        if !on_victim && released.is_none() {
+            released = Some(stopped.elapsed());
+        }
+        let moved = record.len() == ids.len() && record.iter().all(|(_, n)| *n != victim);
+        if moved && !on_victim {
+            let placed: HashMap<_, _> = record.into_iter().collect();
+            let mut all_held = true;
+            for id in ids {
+                all_held &= holder(&t, id).await.as_ref() == placed.get(id);
+            }
+            if all_held {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the group never moved off {victim}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let released = released.expect("released");
+    assert!(
+        released < forget,
+        "{victim} released its members {released:?} after its facts stopped, past the {forget:?} forget window"
+    );
+    for id in ids {
+        let epoch = epoch_of(&t, id).await;
+        assert!(matches!(
+            placement_of(&t, id, epoch).await,
+            Authority::Assigned { .. }
+        ));
+    }
+    t.felix
+        .cache_delete(names::WORKLOADS, "stop-facts")
+        .await
+        .unwrap();
+}

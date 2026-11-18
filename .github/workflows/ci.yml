@@ -229,7 +229,9 @@ jobs:
           - { name: stamps-n1-placed, configs: FelixdPlacementStampsN1Placed }
           - { name: stamps-n2-unplaced, configs: FelixdPlacementStampsN2Unplaced }
           - { name: stamps-n2-placed, configs: FelixdPlacementStampsN2Placed }
-          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementUndrainStale FelixdPlacementUndrainRelist" }
+          - { name: forget-restart-relist, configs: FelixdPlacementForgetRestartRelist }
+          - { name: forget-live, configs: FelixdPlacementForgetLive }
+          - { name: twins, configs: "FelixdPlacementNoBarrier FelixdPlacementNoSplitGuard FelixdPlacementPerMember FelixdPlacementNoFence FelixdPlacementLiveTakers FelixdPlacementNoRecordHold FelixdPlacementNoTailGate FelixdPlacementForgetRestart FelixdPlacementForgetLiveNoFence FelixdPlacementUndrainStale FelixdPlacementUndrainRelist" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0

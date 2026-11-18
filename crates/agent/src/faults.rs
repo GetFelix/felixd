@@ -103,6 +103,10 @@
 //!   claim's read of the drain mark and the claim itself.
 //! - `no-facts=1`: never append this node's facts to `sys.facts`, so the
 //!   scheduler never hears of it.
+//! - `facts-switch=1`: while the workloads cache holds the key `stop-facts`
+//!   with this node's id as its value, this node's facts never reach
+//!   `sys.facts` and the append fails, as when a node is cut off from that
+//!   stream alone. Deleting the key lets them land again.
 //!
 //! Only a build with the `faults` feature reads the variable. The felixd
 //! crate turns it on for its own tests through a dev-dependency, so a binary
@@ -477,8 +481,28 @@ pub(crate) async fn after_drain_read() {
     }
 }
 
+static FACTS_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) fn no_facts() -> bool {
     fault("no-facts") == Some(1)
+}
+
+/// Whether this node's fact appends fail, for `facts-switch`.
+pub(crate) fn facts_stopped() -> bool {
+    FACTS_STOPPED.load(Ordering::SeqCst)
+}
+
+/// Whether the workloads cache change to `key` is the `facts-switch` key,
+/// which is then not a workload. Its value names the node whose facts stop.
+pub(crate) fn facts_switch(node_id: &str, key: &str, value: Option<&[u8]>) -> bool {
+    if key != "stop-facts" || fault("facts-switch") != Some(1) {
+        return false;
+    }
+    let stopped = value == Some(node_id.as_bytes());
+    if FACTS_STOPPED.swap(stopped, Ordering::SeqCst) != stopped {
+        tracing::warn!(stopped, "injected: this node's facts stop landing");
+    }
+    true
 }
 
 pub(crate) fn miss_drain_marks() -> bool {

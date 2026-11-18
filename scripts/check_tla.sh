@@ -141,6 +141,8 @@ felixd_placement_expectations=(
   "FelixdPlacementStampsN1Placed pass"
   "FelixdPlacementStampsN2Unplaced pass"
   "FelixdPlacementStampsN2Placed pass"
+  "FelixdPlacementForgetRestartRelist pass"
+  "FelixdPlacementForgetLive pass"
   "FelixdPlacementNoBarrier violates GroupTogether"
   "FelixdPlacementNoSplitGuard violates SplitNeverKept"
   "FelixdPlacementPerMember violates GroupWhole"
@@ -149,9 +151,13 @@ felixd_placement_expectations=(
   # Without the record hold (felixd #247) or the reader's tail gate (#248).
   "FelixdPlacementNoRecordHold violates GroupTogether"
   "FelixdPlacementNoTailGate violates GroupTogether"
-  # A known gap, felixd #251: a forgotten node restarts and claims on a
-  # record that still names it while the scheduler moves the group.
+  # Without the relist nonce at start (felixd #251): a forgotten node
+  # restarts and claims on a record that still names it while the scheduler
+  # moves the group.
   "FelixdPlacementForgetRestart violates GroupTogether"
+  # Without the self-fence (felixd #251): a live node is forgotten while it
+  # runs a member and the scheduler moves the group.
+  "FelixdPlacementForgetLiveNoFence violates GroupTogether"
   # A known gap, felixd #256: an undrained node claims on its view from
   # before the drain while the group moved.
   "FelixdPlacementUndrainStale violates GroupTogether"
