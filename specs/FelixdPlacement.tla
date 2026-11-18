@@ -37,12 +37,18 @@
 (*               it saw when the read began (#248).                       *)
 (* ForgetRace lets a forgotten node restart while the record in force    *)
 (* may still name it: before its forget is folded, or after a forget     *)
-(* that could not move the group. The time-only release of felixd #251, *)
+(* that could not move the group: felixd #251 without StartRelist,        *)
 (* pinned by its own config. UndrainRace lets an undrained node claim on  *)
 (* a view that misses a move made on its drain (felixd #256), pinned the  *)
 (* same way.                                                              *)
 (* RelistRace lets it claim while the scheduler still folds its draining *)
 (* fact as its last (felixd #257).                                        *)
+(* StartRelist: a restarted node claims only once its view holds the      *)
+(* scheduler's answer to a fact of its own folded after the restart.      *)
+(* ForgetLive lets a fact forget a live node whose facts did not land.    *)
+(* SelfFence: such a node first fences itself, releasing what it holds    *)
+(* and claiming nothing until one of its facts lands; FelixdPlacement-    *)
+(* ForgetLiveNoFence is its twin.                                         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -70,6 +76,9 @@ CONSTANTS
     UndrainRace,  \* whether an undrained node acts on its view from before the drain
     RelistRace,   \* whether an undrained node claims before its lift is folded
     Stamps,       \* broker timestamps a fact may carry; {} for strictly increasing ones
+    StartRelist,  \* whether a restarted node waits for the answer to a fact after its restart
+    ForgetLive,   \* whether a live node may be forgotten
+    SelfFence,    \* whether a node fences itself before it may be forgotten alive
     Barrier, SplitGuard, OneRecord, Fence, FactTakers, RecordHold, TailGate
 
 Nodes == 1..N
@@ -86,15 +95,16 @@ VARIABLES
     view, rd, tgt,                        \* each agent's reader
     marked, drains,                       \* drain marks
     nodeCrashes, expires,
-    applied                               \* history: records agents claimed on
+    applied,                              \* history: records agents claimed on
+    relistFrom, fenced                    \* relist nonce (input count when taken), self-fence
 
 vars == <<inputs, admitted, st, pos, written, hist, epoch, up, stale, out,
           lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
-          nodeCrashes, expires, applied>>
+          nodeCrashes, expires, applied, relistFrom, fenced>>
 
 \* What only agents change.
 agentVars == <<lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
-               nodeCrashes, expires, applied>>
+               nodeCrashes, expires, applied, relistFrom, fenced>>
 
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
@@ -267,19 +277,25 @@ Admit(m) ==
 \* only with no claim under way and a won claim is named before its guard
 \* drops, so with Claim one step a draining fact lists every lease held.
 \* `gone` is a node the fold forgets after FORGET_INTERVALS of silence
-\* (schedule.rs forget_silent): only one that is down, so forgetting a live
-\* node whose facts fail is not modeled. `ts` is the broker's timestamp,
-\* which may tie (a broker without timestamps gives 0) or step back. It
-\* is compared only between facts holding one member, so a fact holding
-\* nothing takes the least.
+\* (schedule.rs forget_silent): one that is down, or with ForgetLive one
+\* that is up but whose facts did not land, which with SelfFence has fenced
+\* itself first. A fact that lands lifts its node's fence. `ts` is the
+\* broker's timestamp, which may tie (a broker without timestamps gives 0)
+\* or step back. It is compared only between facts holding one member, so
+\* a fact holding nothing takes the least.
 Fact(n) ==
     /\ nup[n] /\ Len(inputs) < MaxIn
     /\ \E b \in IF Blocking THEN BOOLEAN ELSE {FALSE},
-          g \in {None} \cup (IF ForgetDown THEN {o \in Nodes \ {n} : ~nup[o]} ELSE {}),
+          g \in {None} \cup (IF ForgetDown THEN {o \in Nodes \ {n} : ~nup[o]} ELSE {})
+                      \cup (IF ForgetLive THEN {o \in Nodes \ {n} : nup[o] /\ (~SelfFence \/ fenced[o])}
+                                          ELSE {}),
           t \in IF Stamps = {} \/ Holding(n) = {} THEN {0} ELSE Stamps :
         inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n), ts |-> t,
                                   blocked |-> b, draining |-> marked[n], gone |-> g])
-    /\ UNCHANGED admitted /\ InputUnchanged
+    /\ fenced' = [fenced EXCEPT ![n] = FALSE]
+    /\ UNCHANGED <<admitted, st, pos, written, hist, epoch, up, stale, out,
+                   lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
+                   nodeCrashes, expires, applied, relistFrom>>
 
 Lapse(n) ==
     /\ LapseLive \/ ~nup[n]
@@ -320,7 +336,8 @@ Read(n) ==
           /\ view' = IF done THEN [view EXCEPT ![n] = rd[n] + 1] ELSE view
           /\ tgt' = [tgt EXCEPT ![n] = IF done THEN 0 ELSE t]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, since, gsince, marked, drains, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, since, gsince, marked, drains, nodeCrashes, expires, applied,
+                   relistFrom, fenced>>
 
 \* One of the node's own steps for an admitted member. A clock starts only
 \* while the member is free, then runs until the node sees it held.
@@ -332,7 +349,8 @@ Tick(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = IF @ < Bound THEN @ + 1 ELSE @]
     /\ gsince' = [gsince EXCEPT ![n][m] = IF admitted = Members /\ @ < Bound THEN @ + 1 ELSE @]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
+                   relistFrom, fenced>>
 
 \* The node's lease watch shows the member held with time left, and
 \* wait_for_chance starts its clocks over. A watch may skip from one free
@@ -343,26 +361,37 @@ SeeHeld(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
+                   relistFrom, fenced>>
+
+\* A fact of n at l that is not draining has been folded, and without
+\* UndrainRace n's view holds every record the scheduler wrote up to it.
+AnsweredAt(n, l) ==
+    /\ l <= pos
+    /\ inputs[l].k = "fact" /\ inputs[l].n = n /\ ~inputs[l].draining
+    /\ UndrainRace \/ \A r \in (view[n] + 1)..Len(out) : out[r].k = "group" => out[r].p > l
 
 \* Every draining fact of n is followed by one that is not, and the
 \* scheduler has folded it. Until then the scheduler may still move a group
 \* off n on the strength of n's promise to claim nothing (felixd #257).
 \* Without UndrainRace n's view also holds every record the scheduler wrote
 \* up to that fold: a move made on the draining fact after n's re-read at
-\* the lift would otherwise stay unseen.
+\* the lift would otherwise stay unseen. A relist nonce taken at a restart
+\* or a fence is answered the same way, by a fact after it (Standing::relisted).
 Relisted(n) ==
-    \A j \in 1..Len(inputs) :
-        (inputs[j].k = "fact" /\ inputs[j].n = n /\ inputs[j].draining) =>
-            \E l \in (j + 1)..pos :
-                /\ inputs[l].k = "fact" /\ inputs[l].n = n /\ ~inputs[l].draining
-                /\ UndrainRace \/ \A r \in (view[n] + 1)..Len(out) : out[r].k = "group" => out[r].p > l
+    /\ \/ RelistRace
+       \/ \A j \in 1..Len(inputs) :
+            (inputs[j].k = "fact" /\ inputs[j].n = n /\ inputs[j].draining) =>
+                \E l \in (j + 1)..pos : AnsweredAt(n, l)
+    /\ relistFrom[n] > 0 => \E l \in (relistFrom[n] + 1)..pos : AnsweredAt(n, l)
 
 \* The claim path reads the drain mark and claims nothing while it is set.
-\* Without RelistRace an undrained node also waits for its lift to be folded.
+\* Without RelistRace an undrained node also waits for its lift to be
+\* folded. A fenced node claims nothing.
 Claim(n, m) ==
     /\ nup[n] /\ ~marked[n] /\ lease[m] = None /\ m \in admitted
-    /\ RelistRace \/ Relisted(n)
+    /\ SelfFence => ~fenced[n]
+    /\ Relisted(n)
     /\ Cardinality(Holding(n)) < Cap
     /\ \/ ~Barrier
        \/ PlacesHere(view[n], m, n)
@@ -374,7 +403,7 @@ Claim(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<nup, view, rd, tgt, marked, drains, nodeCrashes, expires>>
+    /\ UNCHANGED <<nup, view, rd, tgt, marked, drains, nodeCrashes, expires, relistFrom, fenced>>
 
 \* A lease lapses: its holder is down, or lost it while alive and stops.
 Expire(m) ==
@@ -383,7 +412,8 @@ Expire(m) ==
     /\ expires' = IF nup[lease[m]] THEN expires + 1 ELSE expires
     /\ lease' = [lease EXCEPT ![m] = None]
     /\ AgentUnchanged
-    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, applied>>
+    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, applied,
+                   relistFrom, fenced>>
 
 \* The operator marks a node in `drains`. DrainNodes and DrainPlaced only split a
 \* run's drain space into configs whose union is the unsplit one.
@@ -394,7 +424,8 @@ Drain(n) ==
     /\ marked' = [marked EXCEPT ![n] = TRUE]
     /\ drains' = drains + 1
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, since, gsince, view, rd, tgt, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, since, gsince, view, rd, tgt, nodeCrashes, expires, applied,
+                   relistFrom, fenced>>
 
 \* The operator lifts the mark (drain::lift) and wait_for_chance goes on
 \* with the view it has. Without UndrainRace the node reads `out` afresh
@@ -407,12 +438,24 @@ Lift(n) ==
             /\ rd' = [rd EXCEPT ![n] = 0]
             /\ tgt' = [tgt EXCEPT ![n] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, nup, since, gsince, drains, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<lease, early, nup, since, gsince, drains, nodeCrashes, expires, applied,
+                   relistFrom, fenced>>
 
 \* A drained node's task stops and releases its lease.
 Release(m) ==
     /\ lease[m] # None /\ nup[lease[m]] /\ marked[lease[m]]
     /\ lease' = [lease EXCEPT ![m] = None]
+    /\ AgentUnchanged
+    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
+                   relistFrom, fenced>>
+
+\* A live node whose own facts have not landed for a while stops its
+\* workloads, releases every member it holds and takes a new relist nonce.
+FenceSelf(n) ==
+    /\ SelfFence /\ ForgetLive /\ nup[n] /\ ~fenced[n]
+    /\ fenced' = [fenced EXCEPT ![n] = TRUE]
+    /\ lease' = [m \in Members |-> IF lease[m] = n THEN None ELSE lease[m]]
+    /\ relistFrom' = [relistFrom EXCEPT ![n] = Len(inputs)]
     /\ AgentUnchanged
     /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
 
@@ -425,7 +468,8 @@ NodeCrash(n) ==
     /\ nup' = [nup EXCEPT ![n] = FALSE]
     /\ nodeCrashes' = nodeCrashes + 1
     /\ AgentUnchanged
-    /\ UNCHANGED <<lease, early, view, rd, tgt, since, gsince, marked, drains, expires, applied>>
+    /\ UNCHANGED <<lease, early, view, rd, tgt, since, gsince, marked, drains, expires, applied,
+                   relistFrom, fenced>>
 
 Forgets(j, n) == inputs[j].k = "fact" /\ inputs[j].gone = n
 
@@ -449,8 +493,9 @@ MayName(n) ==
 \* A restarted agent reads `out` again and its clocks start over. Without
 \* ForgetRace it does not come back while a forget of it is pending and a
 \* record may name it, nor once forgotten while the last group record
-\* places a member on it. Coming back while still named is the time-only
-\* release, felixd #251.
+\* places a member on it. With StartRelist it takes a relist nonce at start
+\* (Standing::new), so a record that still names it is not claimed on
+\* before the scheduler answers a fact of it folded after the restart.
 NodeRestart(n) ==
     /\ ~nup[n] /\ Holding(n) = {}
     /\ \/ ForgetRace
@@ -462,6 +507,8 @@ NodeRestart(n) ==
     /\ tgt' = [tgt EXCEPT ![n] = 0]
     /\ since' = [since EXCEPT ![n] = [m \in Members |-> 0]]
     /\ gsince' = [gsince EXCEPT ![n] = [m \in Members |-> 0]]
+    /\ relistFrom' = [relistFrom EXCEPT ![n] = IF StartRelist THEN Len(inputs) ELSE 0]
+    /\ fenced' = [fenced EXCEPT ![n] = FALSE]
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, marked, drains, nodeCrashes, expires, applied>>
 
@@ -482,12 +529,14 @@ Init ==
     /\ gsince = [n \in Nodes |-> [m \in Members |-> 0]]
     /\ nodeCrashes = 0 /\ expires = 0
     /\ applied = {}
+    /\ relistFrom = [n \in Nodes |-> 0]
+    /\ fenced = [n \in Nodes |-> FALSE]
 
 Next ==
     \/ SchedStep \/ SchedCrash \/ SchedTakeover \/ StaleWrite
     \/ \E m \in Members : Admit(m) \/ Expire(m) \/ Release(m)
     \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Read(n) \/ Drain(n) \/ Lift(n)
-                        \/ NodeCrash(n) \/ NodeRestart(n)
+                        \/ NodeCrash(n) \/ NodeRestart(n) \/ FenceSelf(n)
     \/ \E n \in Nodes, m \in Members : Tick(n, m) \/ SeeHeld(n, m) \/ Claim(n, m)
 
 Spec == Init /\ [][Next]_vars
@@ -558,4 +607,7 @@ StaleNeverApplied ==
 TypeOK ==
     /\ lease \in [Members -> Nodes \cup {None}]
     /\ pos <= Len(inputs) /\ written <= Len(inputs)
+    /\ relistFrom \in [Nodes -> 0..MaxIn]
+    /\ fenced \in [Nodes -> BOOLEAN]
+    /\ \A n \in Nodes : (SelfFence /\ fenced[n]) => Holding(n) = {}
 =============================================================================

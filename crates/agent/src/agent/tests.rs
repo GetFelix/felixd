@@ -350,3 +350,41 @@ fn a_claim_decided_before_a_drain_and_lift_is_not_made() {
     assert!(!standing.set_draining(false));
     assert!(!standing.drained_since(decided));
 }
+
+#[test]
+fn a_node_whose_facts_stop_landing_fences_itself_and_must_be_relisted() {
+    let standing = Standing::new();
+    let bound = Duration::from_secs(300);
+    let start = tokio::time::Instant::now();
+    standing.facts_due_from(start);
+    assert!(standing.relisted(|_| true));
+    assert!(!standing.check_fence(start + bound, bound));
+    let decided = standing.drain_changes();
+    assert!(standing.check_fence(start + bound + Duration::from_millis(1), bound));
+    assert!(*standing.fenced.borrow());
+    // The scheduler may forget it from here on, so a record placing a member
+    // here waits for an answer to a fact sent after the fence (#251).
+    let relist = fact_of(&standing).relist;
+    assert_ne!(relist, 0);
+    assert!(standing.drained_since(decided));
+    // A fact lands: the fence ends, and the new nonce still needs its answer.
+    let landed = start + 2 * bound;
+    standing.facts_due_from(landed);
+    assert!(standing.check_fence(landed, bound));
+    assert!(!*standing.fenced.borrow());
+    assert_eq!(fact_of(&standing).relist, relist);
+}
+
+#[test]
+fn no_fact_is_overdue_while_no_scheduler_is_wanted() {
+    let standing = Standing::new();
+    let bound = Duration::from_secs(300);
+    let start = tokio::time::Instant::now();
+    // fence_self notes every check with no scheduler wanted as a due point.
+    for step in 1..=10u32 {
+        let now = start + bound * step;
+        standing.facts_due_from(now);
+        assert!(!standing.check_fence(now + bound, bound));
+    }
+    assert!(!*standing.fenced.borrow());
+}

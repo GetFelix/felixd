@@ -79,6 +79,15 @@ impl Feed {
             .unwrap()
     }
 
+    /// Steps `fact` every two seconds from `from` through `to`, so facts keep
+    /// flowing and silence counts toward forgetting.
+    fn flow(&mut self, from: u64, to: u64, fact: NodeFact) -> Vec<Record> {
+        (from..=to)
+            .step_by(2 * SECOND as usize)
+            .flat_map(|at| self.fact(at, fact.clone()))
+            .collect()
+    }
+
     fn spec(&mut self, at: u64, id: &str, state: WorkloadState) -> Vec<Record> {
         self.specs += 1;
         self.s
@@ -262,11 +271,36 @@ fn with_nowhere_to_go_an_assignment_stays() {
 fn a_long_silent_node_is_forgotten() {
     let mut f = Feed::hearing(&["a", "b"]);
     let forget = 2 * FORGET_INTERVALS * SECOND;
+    for at in (0..forget).step_by(2 * SECOND as usize) {
+        f.fact(at, fact("b"));
+    }
     f.fact(forget, fact("b"));
     assert!(f.s.knows("a"));
     f.fact(forget + 1, fact("b"));
     assert!(!f.s.knows("a"));
     assert!(f.s.knows("b"));
+}
+
+#[test]
+fn a_gap_with_no_facts_does_not_count_toward_forgetting() {
+    // No fact lands from anyone for longer than the forget window, as while
+    // no scheduler is wanted. The first fact after it must not forget a
+    // live node that has not written yet (#251).
+    let mut f = Feed::hearing(&["a", "b"]);
+    let forget = 2 * FORGET_INTERVALS * SECOND;
+    let back = 3 * forget;
+    f.fact(back, fact("b"));
+    assert!(f.s.knows("a"));
+    assert!(!f.s.takers().contains_key("a"), "silent after the gap");
+    // The gap counts as its silent window. Facts flowing again for the rest
+    // of the forget window do forget it.
+    let rest = forget - 2 * SILENT_INTERVALS * SECOND;
+    for at in (back..back + rest).step_by(2 * SECOND as usize) {
+        f.fact(at, fact("b"));
+    }
+    assert!(f.s.knows("a"));
+    f.fact(back + rest, fact("b"));
+    assert!(!f.s.knows("a"));
 }
 
 #[test]
@@ -588,7 +622,7 @@ fn a_member_freed_by_a_node_death_is_placed_again_beside_the_ones_still_running(
     // b goes silent, which does not end its lease: y stays put.
     assert_eq!(f.fact(7 * SECOND, holding("a", &["x"])), vec![]);
     // b is forgotten: y is free, x keeps running on a.
-    let out = f.fact(61 * SECOND, holding("a", &["x"]));
+    let out = f.flow(9 * SECOND, 61 * SECOND, holding("a", &["x"]));
     assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
 }
 
@@ -625,7 +659,7 @@ fn a_silent_node_that_comes_back_taking_work_is_held_again_when_silent() {
     // b goes silent again: y stays put until b is forgotten.
     assert_eq!(f.fact(14 * SECOND, holding("a", &["x"])), vec![]);
     assert_eq!(f.s.groups()["g"]["y"], "b");
-    let out = f.fact(68 * SECOND, holding("a", &["x"]));
+    let out = f.flow(16 * SECOND, 68 * SECOND, holding("a", &["x"]));
     assert_eq!(out, vec![f.group("g", &[("x", "a"), ("y", "a")])]);
 }
 
@@ -687,7 +721,7 @@ fn a_group_is_not_moved_off_a_silent_node_whose_claim_never_reached_a_fact() {
     assert_eq!(f.fact(7 * SECOND, fact("b")), vec![]);
     assert_eq!(f.s.groups()["g"]["x"], "a");
     // Once a is forgotten its leases are long gone, and the group moves whole.
-    let out = f.fact(61 * SECOND, fact("b"));
+    let out = f.flow(9 * SECOND, 61 * SECOND, fact("b"));
     assert_eq!(out, vec![f.group("g", &[("x", "b"), ("y", "b")])]);
 }
 
@@ -740,7 +774,7 @@ fn a_split_group_is_left_alone_until_no_member_runs() {
     // x stops running, but silent b may still hold y.
     assert_eq!(f.fact(7 * SECOND + 1, fact("c")), vec![]);
     // b is forgotten: no member runs, and the group is placed whole again.
-    let out = f.fact(61 * SECOND, fact("c"));
+    let out = f.flow(9 * SECOND, 61 * SECOND, fact("c"));
     assert_eq!(out.len(), 1);
     assert!(matches!(&out[0].change, Change::Group { members, .. } if members.len() == 2));
 }

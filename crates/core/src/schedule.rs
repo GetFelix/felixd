@@ -283,6 +283,7 @@ impl Scheduler {
                     });
                 }
                 tick = self.ticks(timestamp_micros);
+                self.pause_over_gap(timestamp_micros);
                 self.facts_seen = true;
                 self.facts_micros = self.facts_micros.max(timestamp_micros);
                 let heard = Heard {
@@ -361,6 +362,23 @@ impl Scheduler {
         self.nodes.retain(|_, h| {
             now.saturating_sub(h.at_micros) <= Self::after(h.every_ms, FORGET_INTERVALS)
         });
+    }
+
+    /// After a gap in which no fact landed for longer than any node's silent
+    /// window, such as while no scheduler was wanted, every node counts as
+    /// silent but the gap does not count toward forgetting it. Agents fence
+    /// themselves on time with no fact of their own landing while others'
+    /// do, so only that may forget a node that is alive (#251).
+    fn pause_over_gap(&mut self, at_micros: u64) {
+        let window = |h: &Heard| Self::after(h.every_ms, SILENT_INTERVALS);
+        let longest = self.nodes.values().map(window).max().unwrap_or(0);
+        if !self.facts_seen || at_micros.saturating_sub(self.facts_micros) <= longest {
+            return;
+        }
+        for h in self.nodes.values_mut() {
+            let edge = at_micros.saturating_sub(window(h)).saturating_sub(1);
+            h.at_micros = h.at_micros.max(edge);
+        }
     }
 
     /// Whether `heard` is past [`SILENT_INTERVALS`] of its interval, by

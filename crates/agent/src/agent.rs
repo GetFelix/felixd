@@ -24,7 +24,7 @@ use felixd_core::placement::{
     Assigned, AssignedTo, Assignee, Authority, FirstClaimWins, GroupHold, GroupPlaced, Placement,
     PlacementRecord, Scheduled, Turn,
 };
-use felixd_core::schedule::NodeFact;
+use felixd_core::schedule::{FORGET_INTERVALS, NodeFact};
 use felixd_core::spec::{Group, WorkloadSpec, WorkloadState};
 use felixd_core::{names, output, snapshot, status};
 use felixd_runtime::Runtime;
@@ -92,6 +92,16 @@ const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
 /// How many claims a node makes at once. When many leases lapse together,
 /// the rest queue instead of all hitting Felix at once while it is slow.
 const CLAIMS_AT_ONCE: usize = 8;
+
+/// How many of its fact intervals a node keeps its group members with none
+/// of its facts landing while a scheduler is wanted. The scheduler forgets a
+/// node after [`FORGET_INTERVALS`] of that and may then move its groups, so
+/// a live node stops them well before (#251).
+const FENCE_INTERVALS: u32 = 10;
+const _: () = assert!(2 * FENCE_INTERVALS as u64 <= FORGET_INTERVALS);
+
+/// How often a node checks whether to fence itself.
+const CHECK_FENCE_EVERY: Duration = Duration::from_secs(1);
 
 /// Who this node is and how it holds and claims leases.
 #[derive(Clone, Debug)]
@@ -187,9 +197,16 @@ struct Standing {
     /// The next nonce. It starts from the clock so a restarted agent does
     /// not reuse one an earlier run left on `wl.scheduler.out`.
     next_relist: AtomicU64,
-    /// Bumped on every change of `draining`, so a claim decided before a
-    /// drain and lift is not made on that decision.
+    /// Bumped on every change of `draining` or `fenced`, so a claim decided
+    /// before a drain and lift, or a fence and its end, is not made on that
+    /// decision.
     drain_changes: AtomicU64,
+    /// No fact of this node has landed for [`FENCE_INTERVALS`] while a
+    /// scheduler is wanted: it runs and claims no group member.
+    fenced: watch::Sender<bool>,
+    /// When a fact of this node last landed, or it last saw no scheduler
+    /// wanted, when no fact is due.
+    facts_from: std::sync::Mutex<tokio::time::Instant>,
 }
 
 impl Standing {
@@ -208,7 +225,39 @@ impl Standing {
             relist: AtomicU64::new(seed),
             next_relist: AtomicU64::new(seed.wrapping_add(1).max(1)),
             drain_changes: AtomicU64::new(0),
+            fenced: watch::channel(false).0,
+            facts_from: std::sync::Mutex::new(tokio::time::Instant::now()),
         }
+    }
+
+    /// Notes that no fact is overdue as of `at`: one landed, or no
+    /// scheduler is wanted.
+    fn facts_due_from(&self, at: tokio::time::Instant) {
+        let mut from = self.facts_from.lock().unwrap_or_else(|e| e.into_inner());
+        *from = (*from).max(at);
+    }
+
+    /// Fences this node once no fact has been due-and-landed for `bound`
+    /// as of `now`, and ends the fence once one has. A fence takes a new
+    /// relist nonce: the scheduler may forget this node meanwhile and move
+    /// its groups, so a record that places a member here is trusted again
+    /// only once the scheduler has answered a fact sent after it. Returns
+    /// whether it changed.
+    fn check_fence(&self, now: tokio::time::Instant, bound: Duration) -> bool {
+        let from = *self.facts_from.lock().unwrap_or_else(|e| e.into_inner());
+        let fence = now.saturating_duration_since(from) > bound;
+        self.fenced.send_if_modified(|now| {
+            if *now == fence {
+                return false;
+            }
+            if fence {
+                let next = self.next_relist.fetch_add(1, Ordering::SeqCst).max(1);
+                self.relist.store(next, Ordering::SeqCst);
+            }
+            self.drain_changes.fetch_add(1, Ordering::SeqCst);
+            *now = fence;
+            true
+        })
     }
 
     /// Sets `draining`. Lifting a drain takes a new relist nonce before
@@ -417,6 +466,7 @@ pub async fn run(
                 follow_drain(node.clone()),
                 assignments::follow(&node.felix, &node.assignments),
                 write_facts(node.clone()),
+                fence_self(node.clone()),
             );
         }
     });
@@ -657,7 +707,44 @@ async fn write_facts(node: Arc<Node>) {
             &node.held,
         )
     };
-    assignments::write_facts(&node.felix, &node.assignments, node.facts_every, fact).await;
+    let landed = || node.standing.facts_due_from(tokio::time::Instant::now());
+    assignments::write_facts(
+        &node.felix,
+        &node.assignments,
+        node.facts_every,
+        fact,
+        landed,
+    )
+    .await;
+}
+
+/// Fences this node while none of its facts land and a scheduler is wanted
+/// (see [`FENCE_INTERVALS`]): the tasks of its group members stop and
+/// release their leases, and it claims no group member until a fact lands.
+/// With no scheduler wanted no fact is due, and the scheduler does not count
+/// that gap toward forgetting a node either.
+async fn fence_self(node: Arc<Node>) {
+    let bound = node.facts_every.saturating_mul(FENCE_INTERVALS);
+    let mut scheduler = node.assignments.scheduler_changes();
+    loop {
+        let now = tokio::time::Instant::now();
+        if !*scheduler.borrow_and_update() {
+            node.standing.facts_due_from(now);
+        }
+        if node.standing.check_fence(now, bound) {
+            match *node.standing.fenced.borrow() {
+                true => tracing::warn!(
+                    ?bound,
+                    "no fact of this node has landed: releasing its group members"
+                ),
+                false => tracing::info!("a fact of this node landed again"),
+            }
+        }
+        tokio::select! {
+            () = tokio::time::sleep(CHECK_FENCE_EVERY) => {}
+            _ = scheduler.changed() => {}
+        }
+    }
 }
 
 const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \
@@ -913,6 +1000,9 @@ async fn own(
             Ok(false) if node.standing.drained_since(decided) => {
                 continue;
             }
+            Ok(false) if spec.group.is_some() && *node.standing.fenced.borrow() => {
+                continue;
+            }
             Ok(false) => {}
             Ok(true) => {
                 note_drain(&node, true);
@@ -991,6 +1081,11 @@ async fn own(
                         metrics::handoff(Handoff::Drained);
                         lease::release(&node.felix, &held).await;
                         tracing::info!(workload = %id, "released for the drain");
+                    }
+                    Ended::Fenced => {
+                        metrics::handoff(Handoff::Lost);
+                        lease::release(&node.felix, &held).await;
+                        tracing::warn!(workload = %id, "released: this node's facts are not landing");
                     }
                     Ended::Degraded { class } => {
                         metrics::degraded(class);
@@ -1194,6 +1289,7 @@ impl Node {
         stop: &mut watch::Receiver<bool>,
     ) -> Option<(Authority, u64)> {
         let mut draining = self.standing.draining.subscribe();
+        let mut fenced = self.standing.fenced.subscribe();
         let mut assignments = self.assignments.changes();
         // When this node first saw the workload free, whatever its
         // assignment, so assignments that keep changing cannot defer it for
@@ -1205,6 +1301,12 @@ impl Node {
             if *draining.borrow_and_update() {
                 tokio::select! {
                     _ = draining.wait_for(|draining| !*draining) => continue,
+                    _ = stop.wait_for(|stop| *stop) => return None,
+                }
+            }
+            if group.is_some() && *fenced.borrow_and_update() {
+                tokio::select! {
+                    _ = fenced.wait_for(|fenced| !*fenced) => continue,
                     _ = stop.wait_for(|stop| *stop) => return None,
                 }
             }
@@ -1483,6 +1585,9 @@ enum Ended {
     /// This node is draining. The workload stopped and the lease is to be
     /// released.
     Drained,
+    /// This node is fenced and the workload is a group member. It stopped
+    /// and the lease is to be released.
+    Fenced,
     Lost,
     NeedsOperator(NeedsOperator),
     /// The workload stayed stuck on an error of this class. The lease is to
@@ -1526,6 +1631,7 @@ async fn run_held(
     }));
     let epoch = held.epoch;
     let mut draining = node.standing.draining.subscribe();
+    let mut fenced = node.standing.fenced.subscribe();
     let workload_metrics = metrics::workload(id);
     let _sampler = workload_metrics.as_ref().map(|(w, shared)| {
         w.set_inputs(&spec.inputs, *shared);
@@ -1666,6 +1772,7 @@ async fn run_held(
         never = placing => match never {},
         _ = stop.wait_for(|stop| *stop) => Ended::Stopped,
         _ = draining.wait_for(|draining| *draining) => Ended::Drained,
+        _ = fenced.wait_for(|fenced| *fenced), if spec.group.is_some() => Ended::Fenced,
     };
     let _ = end_renewals.send(());
     if let Ok((renewed, _)) = (&mut renewals.0).await {

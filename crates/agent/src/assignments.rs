@@ -491,6 +491,7 @@ pub(crate) async fn write_facts(
     assignments: &Assignments,
     every: Duration,
     fact: impl Fn() -> NodeFact,
+    landed: impl Fn(),
 ) {
     let mut scheduler = assignments.scheduler_changes();
     let mut failing = false;
@@ -506,6 +507,7 @@ pub(crate) async fn write_facts(
                 let record = now.encode();
                 match tokio::time::timeout(WITHIN, felix.publish(names::FACTS, record)).await {
                     Ok(Ok(())) => {
+                        landed();
                         failing = false;
                         last = Some((now, Instant::now()));
                     }
