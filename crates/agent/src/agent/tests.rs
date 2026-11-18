@@ -211,7 +211,7 @@ fn a_won_claim_is_held_by_the_time_the_claim_ends() {
     let under_way = ClaimUnderWay::start(&standing);
     // The claim won: it is named before it stops counting as under way.
     check();
-    let holds = Holds::start(&standing, "w", false);
+    let holds = Holds::start(&standing, "w");
     check();
     drop(under_way);
     check();
@@ -223,10 +223,7 @@ fn a_won_claim_is_held_by_the_time_the_claim_ends() {
 fn a_fact_names_every_held_workload_even_past_max_workloads() {
     let standing = Standing::new();
     let names = ["a", "b", "c"];
-    let _holds: Vec<_> = names
-        .iter()
-        .map(|n| Holds::start(&standing, n, false))
-        .collect();
+    let _holds: Vec<_> = names.iter().map(|n| Holds::start(&standing, n)).collect();
     let fact = standing.fact("n", Duration::from_secs(1), 2, &AtomicUsize::new(3));
     assert_eq!(
         fact.holding,
@@ -379,11 +376,11 @@ fn a_node_whose_facts_stop_landing_fences_itself_and_must_be_relisted() {
 }
 
 #[test]
-fn a_group_member_held_keeps_the_node_writing_facts() {
+fn a_group_member_keeps_the_node_writing_facts_whether_held_or_waiting() {
     let standing = Standing::new();
-    let other = Holds::start(&standing, "w", false);
+    let other = Holds::start(&standing, "w");
     assert_eq!(*standing.group_members.borrow(), 0);
-    let member = Holds::start(&standing, "m", true);
+    let member = GroupMember::start(&standing);
     assert_eq!(*standing.group_members.borrow(), 1);
     drop(other);
     assert_eq!(*standing.group_members.borrow(), 1);

@@ -1,5 +1,6 @@
 //! The scheduler's assignments, as a node follows them, and the node facts it
-//! appends to `sys.facts` while a scheduler runs. Neither touches the lease
+//! appends to `sys.facts` while a scheduler runs or it has a group member
+//! to hold or claim. Neither touches the lease
 //! or the fence: an assignment only says which node should try a claim.
 
 use std::collections::{BTreeMap, HashMap};
@@ -484,14 +485,16 @@ pub(crate) async fn follow(felix: &Felix, assignments: &Assignments) {
 }
 
 /// Appends `fact()` to `sys.facts` while the scheduler runs or `members`
-/// (group members held) is not 0: when that starts, within [`READ_EVERY`]
-/// of the fact changing, and every `every` otherwise.
+/// (group members held or waiting to be claimed) is not 0: when that
+/// starts, within [`READ_EVERY`] of the fact changing, and every `every`
+/// otherwise.
 ///
-/// A node holding a member writes through a scheduler stop because the
+/// A node with a member writes through a scheduler stop because the
 /// `scheduler` watch can be stale: a node that still sees it wanted keeps
 /// appending, so on restart the scheduler finds no gap to pause over, and a
 /// holder that went quiet would be forgotten while it runs its members
-/// (#271). Its own facts are the only evidence that it is alive.
+/// (#271). Its own facts are the only evidence that it is alive, and the
+/// only thing that lifts its fence.
 pub(crate) async fn write_facts(
     felix: &Felix,
     assignments: &Assignments,
@@ -541,7 +544,7 @@ pub(crate) async fn write_facts(
 }
 
 /// Whether a node appends facts: while a scheduler is wanted, or while it
-/// holds a group member, whatever it thinks of the scheduler.
+/// has a group member to hold or claim, whatever it thinks of the scheduler.
 fn writes_facts(scheduler: bool, members: usize) -> bool {
     scheduler || members > 0
 }

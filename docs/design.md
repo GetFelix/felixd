@@ -1468,7 +1468,8 @@ call.
 ### The scheduler's facts
 
 Every node appends a fact to `sys.facts` every `--facts-every-ms` while a
-scheduler runs, and a node holding a group member also while it is stopped,
+scheduler runs, and a node with a group member to hold or claim also while
+it is stopped or was never started,
 so the stream grows with the number of nodes. Only the
 scheduler reads it: `felixd run` and admission refuse a system stream as the
 input of any other workload. The scheduler's trim record names a floor for it like
@@ -2260,12 +2261,13 @@ that comes back and goes silent again is held again. Moving the group sooner wou
 the old one keeps or lands its own, running the group split before the bound.
 
 Forgetting is the one release that rests on time alone, so the agent closes
-it (#251). While a scheduler is wanted, an agent none of whose facts has
+it (#251). An agent none of whose facts has
 landed for ten of its intervals (at least one slow append plus a
 second, and never more than fifteen) fences itself: its group members stop and
 release their leases, and it claims no group member until a fact lands
-again. An agent that holds a group member appends facts whether or not a
-scheduler is wanted, so a stop of the scheduler never fences it. Ten is a third of the thirty the scheduler waits before it forgets a
+again. An agent with a group member to hold or claim appends facts whether
+or not a scheduler is wanted, so a stop of the scheduler never fences it.
+Ten is a third of the thirty the scheduler waits before it forgets a
 node, so a node that is alive has stopped its members well before they can
 be moved, with room left for a slow append and a broker clock that runs
 ahead. A fence also takes a new relist nonce, so once facts land again the
@@ -2286,11 +2288,13 @@ scheduler. A pause would have to match the scheduler's, and the scheduler
 cannot see a stop when one agent's watch has fallen behind: that agent
 still sees the scheduler wanted and keeps appending facts, so on restart
 there is no gap and every node that went quiet counts as silent (#271).
-Instead a node holding a group member keeps appending through the stop, so
-its own facts say it is alive. A node holding none goes quiet, may be
-forgotten, and fences itself after ten intervals; it has nothing to stop,
-and claims a member again only once its facts land and the scheduler
-answers them.
+Instead a node with a group member to hold or claim keeps appending through
+the stop, so its own facts say it is alive, and a fence it took lifts as
+soon as one lands. A node with no group member at all goes quiet, may be
+forgotten, and fences itself after ten intervals; it has nothing to stop.
+When a member appears it appends again, and claims a member the record
+places on it once the scheduler answers. With no scheduler deployed nothing
+trims `sys.facts`, so these facts accumulate (felixd #274).
 
 The cost is on a node death. A member on a dead node is not placed again
 until the node is forgotten (15 min at the default `--facts-every-ms`), which

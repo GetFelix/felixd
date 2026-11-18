@@ -94,7 +94,7 @@ const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
 const CLAIMS_AT_ONCE: usize = 8;
 
 /// How many of its fact intervals a node keeps its group members with none
-/// of its facts landing while a scheduler is wanted. The scheduler forgets a
+/// of its facts landing. The scheduler forgets a
 /// node after [`FORGET_INTERVALS`] of that and may then move its groups, so
 /// a live node stops them well before (#251).
 const FENCE_INTERVALS: u32 = 10;
@@ -185,8 +185,9 @@ struct Standing {
     claiming: AtomicUsize,
     /// The workloads this node holds.
     holding: std::sync::Mutex<BTreeSet<String>>,
-    /// How many of them are group members. While any is, this node appends
-    /// facts whether or not a scheduler is wanted (#271).
+    /// How many group members this node holds or waits to claim. While any
+    /// is, it appends facts whether or not a scheduler is wanted (#271), so
+    /// a fence lifts only on a fact that landed.
     group_members: watch::Sender<usize>,
     /// It cannot read its drain mark, so it claims nothing.
     blocked: AtomicBool,
@@ -204,8 +205,8 @@ struct Standing {
     /// before a drain and lift, or a fence and its end, is not made on that
     /// decision.
     drain_changes: AtomicU64,
-    /// No fact of this node has landed for [`FENCE_INTERVALS`] while a
-    /// scheduler is wanted: it runs and claims no group member.
+    /// No fact of this node has landed for [`FENCE_INTERVALS`]: it runs and
+    /// claims no group member.
     fenced: watch::Sender<bool>,
     /// When a fact of this node last landed.
     facts_from: std::sync::Mutex<tokio::time::Instant>,
@@ -352,19 +353,14 @@ struct Entry {
     read: tokio::time::Instant,
 }
 
-/// A workload this node holds, named in its facts while this lives, and
-/// whether it is a group member.
-struct Holds<'a>(&'a Standing, String, bool);
+/// A workload this node holds, named in its facts while this lives.
+struct Holds<'a>(&'a Standing, String);
 
 impl<'a> Holds<'a> {
-    fn start(standing: &'a Standing, id: &str, member: bool) -> Holds<'a> {
+    fn start(standing: &'a Standing, id: &str) -> Holds<'a> {
         let mut holding = standing.holding.lock().unwrap_or_else(|e| e.into_inner());
         holding.insert(id.to_owned());
-        drop(holding);
-        if member {
-            standing.group_members.send_modify(|n| *n += 1);
-        }
-        Holds(standing, id.to_owned(), member)
+        Holds(standing, id.to_owned())
     }
 }
 
@@ -372,10 +368,23 @@ impl Drop for Holds<'_> {
     fn drop(&mut self) {
         let mut holding = self.0.holding.lock().unwrap_or_else(|e| e.into_inner());
         holding.remove(&self.1);
-        drop(holding);
-        if self.2 {
-            self.0.group_members.send_modify(|n| *n -= 1);
-        }
+    }
+}
+
+/// A group member's task, counted in [`Standing::group_members`] from before
+/// its first claim until it ends, holding or not.
+struct GroupMember<'a>(&'a Standing);
+
+impl<'a> GroupMember<'a> {
+    fn start(standing: &'a Standing) -> GroupMember<'a> {
+        standing.group_members.send_modify(|n| *n += 1);
+        GroupMember(standing)
+    }
+}
+
+impl Drop for GroupMember<'_> {
+    fn drop(&mut self) {
+        self.0.group_members.send_modify(|n| *n -= 1);
     }
 }
 
@@ -708,7 +717,7 @@ async fn follow_drain(node: Arc<Node>) {
 }
 
 /// Appends this node's facts for the scheduler while one runs or this node
-/// holds a group member: every `facts_every`, and soon after what it holds
+/// has a group member to hold or claim: every `facts_every`, and soon after what it holds
 /// or whether it can take work changes.
 async fn write_facts(node: Arc<Node>) {
     let fact = || {
@@ -736,7 +745,7 @@ async fn write_facts(node: Arc<Node>) {
 /// Fences this node while none of its facts land (see [`FENCE_INTERVALS`]):
 /// the tasks of its group members stop and release their leases, and it
 /// claims no group member until a fact lands. The clock never pauses, not
-/// even for a scheduler stop: a node holding a member appends facts through
+/// even for a scheduler stop: a node with a member appends facts through
 /// a stop, so only a node whose facts do not land can be forgotten while it
 /// runs one, and that node has fenced first (#271).
 async fn fence_self(node: Arc<Node>) {
@@ -922,6 +931,12 @@ async fn own(
     mut lease: watch::Receiver<Seen>,
     mut stop: watch::Receiver<bool>,
 ) {
+    // Before anything that can claim: a member waiting on a fence needs a
+    // fact to land to lift it, and its node writes facts only while counted.
+    let _member = spec
+        .group
+        .is_some()
+        .then(|| GroupMember::start(&node.standing));
     // What is found before the lease claim. It is recorded under a claim, so
     // that the record is fenced like a failure and the other nodes skip the
     // workload instead of finding the same thing.
@@ -1045,8 +1060,7 @@ async fn own(
         let claimed = lease::claim(&node.felix, &node.node_id, &id, node.timing, floor).await;
         // A lease it won is in the cache, and named in its facts, before the
         // node can say it is draining.
-        let named = matches!(claimed, Ok(Some(_)))
-            .then(|| Holds::start(&node.standing, &id, spec.group.is_some()));
+        let named = matches!(claimed, Ok(Some(_))).then(|| Holds::start(&node.standing, &id));
         drop(under_way);
         drop(permit);
         match claimed {
