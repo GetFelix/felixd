@@ -1468,7 +1468,8 @@ call.
 ### The scheduler's facts
 
 Every node appends a fact to `sys.facts` every `--facts-every-ms` while a
-scheduler runs, so the stream grows with the number of nodes. Only the
+scheduler runs, and a node holding a group member also while it is stopped,
+so the stream grows with the number of nodes. Only the
 scheduler reads it: `felixd run` and admission refuse a system stream as the
 input of any other workload. The scheduler's trim record names a floor for it like
 for any input, and its holder deletes `sys.facts` below that floor, in the
@@ -2263,7 +2264,8 @@ it (#251). While a scheduler is wanted, an agent none of whose facts has
 landed for ten of its intervals (at least one slow append plus a
 second, and never more than fifteen) fences itself: its group members stop and
 release their leases, and it claims no group member until a fact lands
-again. Ten is a third of the thirty the scheduler waits before it forgets a
+again. An agent that holds a group member appends facts whether or not a
+scheduler is wanted, so a stop of the scheduler never fences it. Ten is a third of the thirty the scheduler waits before it forgets a
 node, so a node that is alive has stopped its members well before they can
 be moved, with room left for a slow append and a broker clock that runs
 ahead. A fence also takes a new relist nonce, so once facts land again the
@@ -2277,16 +2279,18 @@ silent window, as while no scheduler was wanted and agents sent none, the
 next fact finds every node silent but not nearer to being forgotten. So a
 node is forgotten only after its own facts stop while others' land, which
 is exactly when it fences itself. Each node goes by its own silent window,
-so one with a long interval does not turn the pause off for the rest. An
-agent pauses its fence clock for a stop of the scheduler only once the stop
-has lasted longer than its silent window, as the scheduler pauses only such
-a gap, and only when a fresh read of the scheduler's spec confirms it, since
-a watch that has fallen behind is no evidence.
+so one with a long interval does not turn the pause off for the rest.
 
-One case is left: an agent whose watch has fallen behind and still sees the
-scheduler wanted keeps appending facts while it is stopped, so the
-scheduler finds no gap and may forget the nodes that stopped appending
-(#271).
+The agent's fence clock never pauses, not even for a stop of the
+scheduler. A pause would have to match the scheduler's, and the scheduler
+cannot see a stop when one agent's watch has fallen behind: that agent
+still sees the scheduler wanted and keeps appending facts, so on restart
+there is no gap and every node that went quiet counts as silent (#271).
+Instead a node holding a group member keeps appending through the stop, so
+its own facts say it is alive. A node holding none goes quiet, may be
+forgotten, and fences itself after ten intervals; it has nothing to stop,
+and claims a member again only once its facts land and the scheduler
+answers them.
 
 The cost is on a node death. A member on a dead node is not placed again
 until the node is forgotten (15 min at the default `--facts-every-ms`), which

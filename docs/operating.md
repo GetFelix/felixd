@@ -365,10 +365,12 @@ answered a fact of it that does not say draining. A scheduler module older than 
 answers, so those members wait for `--group-bound-ms`. Upgrade the scheduler with
 `felixd run --id scheduler --upgrade-at <offset> scheduler.wasm` along with the agents.
 
-A node that cannot append to `sys.facts` for ten `--facts-every-ms` while the scheduler runs
-releases its group members and logs `no fact of this node has landed`. It takes them back once a
+A node that cannot append to `sys.facts` for ten `--facts-every-ms` releases its group members and logs `no fact of this node has landed`. It takes them back once a
 fact lands and the scheduler answers it. Look at the node's connection to the broker that leads
 `sys.facts`.
+A node holding a group member keeps appending facts while the scheduler is stopped, so a stop
+releases nothing; a node holding none sends no facts then and claims a group member again only
+once the scheduler is back and has answered one.
 
 Builds after 0.1.0-preview.1 leave a workload alone when they meet a record from a newer build,
 instead of failing it. Upgrade every node before you rely on a feature of the new build.

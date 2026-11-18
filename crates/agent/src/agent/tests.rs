@@ -211,7 +211,7 @@ fn a_won_claim_is_held_by_the_time_the_claim_ends() {
     let under_way = ClaimUnderWay::start(&standing);
     // The claim won: it is named before it stops counting as under way.
     check();
-    let holds = Holds::start(&standing, "w");
+    let holds = Holds::start(&standing, "w", false);
     check();
     drop(under_way);
     check();
@@ -223,7 +223,7 @@ fn a_won_claim_is_held_by_the_time_the_claim_ends() {
 fn a_fact_names_every_held_workload_even_past_max_workloads() {
     let standing = Standing::new();
     let names = ["a", "b", "c"];
-    let _holds: Vec<_> = names.iter().map(|n| Holds::start(&standing, n)).collect();
+    let _holds: Vec<_> = names.iter().map(|n| Holds::start(&standing, n, false)).collect();
     let fact = standing.fact("n", Duration::from_secs(1), 2, &AtomicUsize::new(3));
     assert_eq!(
         fact.holding,
@@ -376,17 +376,16 @@ fn a_node_whose_facts_stop_landing_fences_itself_and_must_be_relisted() {
 }
 
 #[test]
-fn no_fact_is_overdue_while_no_scheduler_is_wanted() {
+fn a_group_member_held_keeps_the_node_writing_facts() {
     let standing = Standing::new();
-    let bound = Duration::from_secs(300);
-    let start = tokio::time::Instant::now();
-    // fence_self notes every check with no scheduler wanted as a due point.
-    for step in 1..=10u32 {
-        let now = start + bound * step;
-        standing.facts_due_from(now);
-        assert!(!standing.check_fence(now + bound, bound));
-    }
-    assert!(!*standing.fenced.borrow());
+    let other = Holds::start(&standing, "w", false);
+    assert_eq!(*standing.group_members.borrow(), 0);
+    let member = Holds::start(&standing, "m", true);
+    assert_eq!(*standing.group_members.borrow(), 1);
+    drop(other);
+    assert_eq!(*standing.group_members.borrow(), 1);
+    drop(member);
+    assert_eq!(*standing.group_members.borrow(), 0);
 }
 
 #[test]
