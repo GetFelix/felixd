@@ -1073,13 +1073,24 @@ async fn a_stale_node_s_facts_during_a_scheduler_stop_do_not_forget_a_group_s_ho
         tokio::time::sleep(FACTS_EVERY).await;
     }
 
-    let outputs = scheduler_outputs(&t).await;
     t.felix
         .cache_put(names::WORKLOADS, names::SCHEDULER, running)
         .await
         .unwrap();
+    // Every node kept appending, so the scheduler may have nothing to
+    // output. A relist answer to a fact appended after the stop's facts
+    // says it has stepped all of them.
+    let marker = NodeFact {
+        relist: 1,
+        ..stale.clone()
+    };
+    t.felix
+        .publish(names::FACTS, marker.encode())
+        .await
+        .unwrap();
     eventually("the scheduler to step the stop", SOON, || async {
-        (scheduler_outputs(&t).await > outputs).then_some(())
+        let followed = assignments::read(&t.felix).await.ok()?;
+        (followed.relisted.get(&stale.node) == Some(&1)).then_some(())
     })
     .await;
     let watch_until = Instant::now() + 10 * FACTS_EVERY;
