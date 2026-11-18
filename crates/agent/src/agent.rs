@@ -741,20 +741,40 @@ async fn write_facts(node: Arc<Node>) {
 /// runs one, and that node has fenced first (#271).
 async fn fence_self(node: Arc<Node>) {
     let bound = fence_bound(node.facts_every);
+    let quiet = node
+        .facts_every
+        .saturating_mul(felixd_core::schedule::SILENT_INTERVALS as u32);
+    let mut scheduler = node.assignments.scheduler_changes();
+    let mut stopped_since = None;
+    let mut last_read = None;
     loop {
         let now = tokio::time::Instant::now();
+        if *scheduler.borrow_and_update() {
+            stopped_since = None;
+        } else {
+            let since = *stopped_since.get_or_insert(now);
+            let read_due =
+                last_read.is_none_or(|at| now.saturating_duration_since(at) >= node.facts_every);
+            if now.saturating_duration_since(since) > quiet && read_due {
+                last_read = Some(now);
+                if scheduler_stopped(&node.felix).await {
+                    node.standing.facts_due_from(now);
+                }
+            }
+        }
         if node.standing.check_fence(now, bound) {
-            let members = *node.standing.group_members.borrow();
             match *node.standing.fenced.borrow() {
-                true if members > 0 => tracing::warn!(
+                true => tracing::warn!(
                     ?bound,
                     "no fact of this node has landed: releasing its group members"
                 ),
-                true => tracing::debug!(?bound, "no fact of this node has landed: fenced"),
                 false => tracing::info!("a fact of this node landed again"),
             }
         }
-        tokio::time::sleep(CHECK_FENCE_EVERY).await;
+        tokio::select! {
+            () = tokio::time::sleep(CHECK_FENCE_EVERY) => {}
+            _ = scheduler.changed() => {}
+        }
     }
 }
 
@@ -765,6 +785,15 @@ fn fence_bound(every: Duration) -> Duration {
     let floor = assignments::WITHIN + CHECK_FENCE_EVERY;
     let most = every.saturating_mul((FORGET_INTERVALS / 2) as u32);
     floor.clamp(every.saturating_mul(FENCE_INTERVALS), most)
+}
+
+/// Whether a read of the scheduler's spec finds it not running.
+async fn scheduler_stopped(felix: &Felix) -> bool {
+    match felix.cache_get(names::WORKLOADS, names::SCHEDULER).await {
+        Ok(None) => true,
+        Ok(Some(v)) => WorkloadSpec::decode(&v).is_ok_and(|s| s.state != WorkloadState::Running),
+        Err(_) => false,
+    }
 }
 
 const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \

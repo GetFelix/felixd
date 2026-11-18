@@ -543,7 +543,8 @@ pub(crate) async fn write_facts(
 /// Whether a node appends facts: while a scheduler is wanted, or while it
 /// holds a group member, whatever it thinks of the scheduler.
 fn writes_facts(scheduler: bool, members: usize) -> bool {
-    scheduler || members > 0
+    let _ = members;
+    scheduler
 }
 
 /// Whether a fact is to be written: none yet, it changed, or `every` has
