@@ -1011,3 +1011,94 @@ async fn a_node_whose_facts_stop_landing_releases_its_group_members_before_it_is
         .await
         .unwrap();
 }
+
+/// While the scheduler is stopped, a node whose watch still shows it wanted
+/// keeps appending facts, here faked for a node that sorts first and has
+/// room. On restart the scheduler finds no gap in `sys.facts`, so it counts
+/// every quiet node silent. The group's holders kept appending through the
+/// stop, so they are not forgotten and the group never runs split (#271).
+#[tokio::test]
+async fn a_stale_node_s_facts_during_a_scheduler_stop_do_not_forget_a_group_s_holders() {
+    let Some(t) = test_felix().await else {
+        return;
+    };
+    let nodes = ["g11-a", "g11-b", "g11-c"];
+    let more = group_args("300000");
+    let _agents: Vec<Agent> = nodes
+        .iter()
+        .map(|n| start_with(&t, n, Duration::from_secs(300), "", &more))
+        .collect();
+    scheduler_on(&t, &nodes).await;
+    let ids = ["sx", "sy"];
+    run_in_group(&t, ids[0], "spair=sx,sy").await;
+    run_in_group(&t, ids[1], "spair=sx,sy").await;
+    let held = group_held(&t, "spair", ids).await;
+    eprintln!("spair is held by {held:?}");
+
+    let running = t
+        .felix
+        .cache_get(names::WORKLOADS, names::SCHEDULER)
+        .await
+        .unwrap()
+        .expect("the scheduler's spec");
+    let mut stopped = t.spec_of(names::SCHEDULER).await;
+    stopped.state = WorkloadState::Stopped;
+    t.felix
+        .cache_put(
+            names::WORKLOADS,
+            names::SCHEDULER,
+            Bytes::from(stopped.encode()),
+        )
+        .await
+        .unwrap();
+    eventually("the scheduler to stop", SOON, || async {
+        holder(&t, names::SCHEDULER).await.is_none().then_some(())
+    })
+    .await;
+    // Past the forget window, with the stale node's facts landing all along.
+    let stale = NodeFact {
+        node: "g11-0stale".into(),
+        every_ms: u64::try_from(FACTS_EVERY.as_millis()).unwrap(),
+        max_workloads: 64,
+        held: 0,
+        holding: Default::default(),
+        draining: false,
+        blocked: false,
+        relist: 0,
+    };
+    let forget = FACTS_EVERY * schedule::FORGET_INTERVALS as u32;
+    let until = Instant::now() + forget + 5 * FACTS_EVERY;
+    while Instant::now() < until {
+        t.felix.publish(names::FACTS, stale.encode()).await.unwrap();
+        tokio::time::sleep(FACTS_EVERY).await;
+    }
+
+    let outputs = scheduler_outputs(&t).await;
+    t.felix
+        .cache_put(names::WORKLOADS, names::SCHEDULER, running)
+        .await
+        .unwrap();
+    eventually("the scheduler to step the stop", SOON, || async {
+        (scheduler_outputs(&t).await > outputs).then_some(())
+    })
+    .await;
+    let watch_until = Instant::now() + 10 * FACTS_EVERY;
+    while Instant::now() < watch_until {
+        t.felix.publish(names::FACTS, stale.encode()).await.unwrap();
+        let record = group_record(&t, "spair").await.unwrap_or_default();
+        for id in ids {
+            let holds = holder(&t, id).await;
+            let placed = record.iter().find(|(m, _)| m == id).map(|(_, n)| n.clone());
+            assert!(
+                holds.is_none() || placed.is_none() || holds == placed,
+                "{id} runs on {holds:?} while the record places it on {placed:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let record = group_record(&t, "spair").await.unwrap_or_default();
+    assert!(
+        record.iter().all(|(_, n)| held.contains(n)),
+        "the scheduler moved spair to {record:?} off its live holders {held:?}"
+    );
+}

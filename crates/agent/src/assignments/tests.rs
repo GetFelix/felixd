@@ -501,3 +501,10 @@ fn a_node_sees_a_group_complete_only_when_every_member_declares_it() {
     a.set_declared("y", None);
     assert!(!a.complete(&group));
 }
+
+#[test]
+fn a_node_holding_a_group_member_writes_facts_through_a_scheduler_stop() {
+    assert!(writes_facts(true, 0));
+    assert!(writes_facts(false, 1));
+    assert!(!writes_facts(false, 0));
+}

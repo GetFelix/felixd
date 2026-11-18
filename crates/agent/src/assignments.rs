@@ -483,12 +483,19 @@ pub(crate) async fn follow(felix: &Felix, assignments: &Assignments) {
     }
 }
 
-/// Appends `fact()` to `sys.facts` while the scheduler runs: when it starts
-/// to run, within [`READ_EVERY`] of the fact changing, and every `every`
-/// otherwise.
+/// Appends `fact()` to `sys.facts` while the scheduler runs or `members`
+/// (group members held) is not 0: when that starts, within [`READ_EVERY`]
+/// of the fact changing, and every `every` otherwise.
+///
+/// A node holding a member writes through a scheduler stop because the
+/// `scheduler` watch can be stale: a node that still sees it wanted keeps
+/// appending, so on restart the scheduler finds no gap to pause over, and a
+/// holder that went quiet would be forgotten while it runs its members
+/// (#271). Its own facts are the only evidence that it is alive.
 pub(crate) async fn write_facts(
     felix: &Felix,
     assignments: &Assignments,
+    mut members: watch::Receiver<usize>,
     every: Duration,
     fact: impl Fn() -> NodeFact,
     landed: impl Fn(),
@@ -496,11 +503,12 @@ pub(crate) async fn write_facts(
     let mut scheduler = assignments.scheduler_changes();
     let mut failing = false;
     loop {
-        if scheduler.wait_for(|runs| *runs).await.is_err() {
-            return;
+        tokio::select! {
+            r = scheduler.wait_for(|runs| *runs) => if r.is_err() { return },
+            r = members.wait_for(|n| *n > 0) => if r.is_err() { return },
         }
         let mut last: Option<(NodeFact, Instant)> = None;
-        while *scheduler.borrow_and_update() {
+        while writes_facts(*scheduler.borrow_and_update(), *members.borrow_and_update()) {
             let now = fact();
             // A node the scheduler cannot see, for the tests.
             if due(last.as_ref(), &now, every) && !crate::faults::no_facts() {
@@ -526,9 +534,16 @@ pub(crate) async fn write_facts(
             tokio::select! {
                 () = tokio::time::sleep(READ_EVERY) => {}
                 _ = scheduler.changed() => {}
+                _ = members.changed() => {}
             }
         }
     }
+}
+
+/// Whether a node appends facts: while a scheduler is wanted, or while it
+/// holds a group member, whatever it thinks of the scheduler.
+fn writes_facts(scheduler: bool, members: usize) -> bool {
+    scheduler || members > 0
 }
 
 /// Whether a fact is to be written: none yet, it changed, or `every` has
