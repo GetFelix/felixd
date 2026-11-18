@@ -1,0 +1,1 @@
+- Sonar reliability findings (#262): the replay candidate module is read with `tokio::fs`, and the changelog heading split no longer backtracks super-linearly.
