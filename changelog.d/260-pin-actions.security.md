@@ -1,0 +1,1 @@
+- GitHub Actions pinned to commit SHAs with Dependabot updates, and the TLA+ tools download is HTTPS-only with a pinned checksum (#260).

@@ -182,7 +182,7 @@ esac
 if [ ! -f "$JAR" ]; then
   mkdir -p "$(dirname "$JAR")"
   echo "fetching TLA+ tools ${TLA_VERSION}"
-  curl -sSL -o "$JAR.tmp" "$TLA_URL"
+  curl --proto '=https' --tlsv1.2 -fsSL -o "$JAR.tmp" "$TLA_URL"
   actual="$(shasum -a 256 "$JAR.tmp" | awk '{print $1}')"
   if [ "$actual" != "$TLA_SHA256" ]; then
     echo "tla2tools.jar checksum mismatch: $actual" >&2
