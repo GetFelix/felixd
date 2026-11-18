@@ -90,6 +90,14 @@ class Assemble(unittest.TestCase):
         self.assertIn("## Unreleased\n\n## 0.2.0 - 2026-02-02\n\n### Added\n- new\n\n## 0.1.0\n", text)
         self.assertEqual(ca.assemble("0.2.0", "2026-02-02"), 1)
 
+    def test_heading_split_trims_trailing_space_and_is_fast(self):
+        import time
+        body = "### Added  \n- a\n### Fixed" + " " * 20000 + "\n- b\n" + "### " + " " * 20000 + "x"
+        start = time.monotonic()
+        parts = re.split(ca.HEADING, body, flags=re.MULTILINE)
+        self.assertEqual(parts[1::2], ["Added", "Fixed"])
+        self.assertLess(time.monotonic() - start, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

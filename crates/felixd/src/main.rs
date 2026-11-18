@@ -569,6 +569,7 @@ async fn main() -> Result<()> {
             upgrade_at,
             module,
         } => {
+            // Runs once at startup, before any serving task exists.
             let bytes =
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
             let settings = connection.settings()?;
@@ -635,6 +636,7 @@ async fn main() -> Result<()> {
             grant_trim,
             module,
         } => {
+            // Runs once at startup, before any serving task exists.
             let bytes =
                 std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
             let settings = connection.settings()?;

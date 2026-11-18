@@ -88,10 +88,13 @@ def split_unreleased(text: str) -> tuple[str, str, str]:
     end = nxt.start() if nxt else len(rest)
     return text[: found.end()], rest[:end], rest[end:]
 
+# Linear: the title runs to its last non-blank character.
+HEADING = r"^### ([^\n]*[^ \t\n])[ \t]*\n"
+
 
 def merge(unreleased: str, fragments: dict[str, list[str]]) -> str:
     """Merge fragments into an Unreleased body; return the new body."""
-    parts = re.split(r"^### (.+?)[ \t]*\n", unreleased, flags=re.MULTILINE)
+    parts = re.split(HEADING, unreleased, flags=re.MULTILINE)
     preamble = parts[0].strip()
     existing: dict[str, str] = {}
     order: list[str] = []

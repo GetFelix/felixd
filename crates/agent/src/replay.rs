@@ -377,7 +377,7 @@ async fn candidate(felix: &Felix, which: &str) -> Result<(String, Vec<u8>)> {
     if is_hash(which) {
         return Ok((which.to_owned(), module_bytes(felix, which).await?));
     }
-    let bytes = std::fs::read(which).with_context(|| {
+    let bytes = tokio::fs::read(which).await.with_context(|| {
         format!(
             "read {which}; --module takes the sha256 of a module in the modules cache or the path of a component"
         )

@@ -54,6 +54,7 @@ async fn a_blocking_call_leaves_the_runtime_free() {
     let permits = Semaphore::new(1);
     let mut slot = Some(0u32);
     let out = blocking(&permits, &mut slot, |n| {
+        // Deliberately blocking: the closure runs on the blocking pool, and the test checks the ticker still ran.
         std::thread::sleep(Duration::from_millis(300));
         *n += 1;
         *n
