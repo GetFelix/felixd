@@ -2258,6 +2258,26 @@ blocked fails at its own read of the mark, so no new one begins. A node
 that comes back and goes silent again is held again. Moving the group sooner would let the new node claim the free members while
 the old one keeps or lands its own, running the group split before the bound.
 
+Forgetting is the one release that rests on time alone, so the agent closes
+it (#251). While a scheduler is wanted, an agent none of whose facts has
+landed for ten of its intervals fences itself: its group members stop and
+release their leases, and it claims no group member until a fact lands
+again. Ten is a third of the thirty the scheduler waits before it forgets a
+node, so a node that is alive has stopped its members well before they can
+be moved, with room left for a slow append and a broker clock that runs
+ahead. A fence also takes a new relist nonce, so once facts land again the
+node claims a member the record places on it only after the scheduler has
+answered a fact sent after the fence. Other workloads keep running: their
+output is fenced by epoch, and only a group can run split.
+
+The scheduler's half is that a gap with no facts from any node does not
+count toward forgetting. When no fact has landed for longer than any node's
+silent window, as while no scheduler was wanted and agents sent none, the
+next fact finds every node silent but not nearer to being forgotten. So a
+node is forgotten only after its own facts stop while others' land, which
+is exactly when it fences itself. Agents also stop the fence clock while
+they see no scheduler wanted, since no fact is due then.
+
 The cost is on a node death. A member on a dead node is not placed again
 until the node is forgotten (15 min at the default `--facts-every-ms`), which
 is longer than `--group-bound-ms`. So the member waits up to the bound and is

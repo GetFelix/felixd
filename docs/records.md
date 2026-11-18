@@ -416,7 +416,10 @@ drain, while not draining, until it has read the scheduler's answer (left out wh
 empty and false.
 An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
 a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
-is more than three of the node's `every_ms` past its last fact, and forgets it after thirty.
+is more than three of the node's `every_ms` past its last fact, and forgets it after thirty. A gap
+in which no node's fact lands for longer than three intervals counts as silence, not toward
+forgetting. An agent none of whose facts has landed for ten intervals releases its group members
+(see [design](design.md#placement)).
 
 The scheduler's outputs on `wl.scheduler.out` are ordinary output records under the name `out`.
 Each payload is `{"format": 1, "value": ...}` with `specs`, the next `sys.specs` offset it has not

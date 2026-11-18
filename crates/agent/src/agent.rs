@@ -531,7 +531,10 @@ pub async fn run(
                     Some(gap) => gap,
                     None => {
                         let (id, offset) = (change.key.clone(), change.offset);
-                        apply(&node, &mut tasks, &mut seen, change.key, change.value);
+                        let switch = change.value.as_deref();
+                        if !faults::facts_switch(&node.node_id, &change.key, switch) {
+                            apply(&node, &mut tasks, &mut seen, change.key, change.value);
+                        }
                         if let Some(r) = redelivery.as_mut()
                             && r.note(&id, offset)
                         {

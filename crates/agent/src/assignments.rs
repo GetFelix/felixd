@@ -505,7 +505,13 @@ pub(crate) async fn write_facts(
             // A node the scheduler cannot see, for the tests.
             if due(last.as_ref(), &now, every) && !crate::faults::no_facts() {
                 let record = now.encode();
-                match tokio::time::timeout(WITHIN, felix.publish(names::FACTS, record)).await {
+                let sent = async {
+                    if crate::faults::facts_stopped() {
+                        anyhow::bail!("injected: facts stopped");
+                    }
+                    felix.publish(names::FACTS, record).await
+                };
+                match tokio::time::timeout(WITHIN, sent).await {
                     Ok(Ok(())) => {
                         landed();
                         failing = false;
