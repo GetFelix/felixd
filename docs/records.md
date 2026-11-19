@@ -414,7 +414,7 @@ nothing changes, `max_workloads`, `held`, how many workloads it holds, `holding`
 its drain mark), and `relist`, a nonce the node sends after it starts and after each lift of its
 drain, while not draining, until it has read the scheduler's answer (left out when 0). Those after `max_workloads` default to 0,
 empty and false.
-An agent appends one every `--facts-every-ms` while the `scheduler` workload runs, and within half
+An agent appends one every `--facts-every-ms` while the `scheduler` workload runs (or while it has a group member to hold or claim), and within half
 a second of a change. The scheduler counts a node as gone once the latest `sys.facts` append time
 is more than three of the node's `every_ms` past its last fact, and forgets it after thirty. A gap
 in which no node's fact lands for longer than three intervals counts as silence, not toward

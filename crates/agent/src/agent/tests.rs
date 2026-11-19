@@ -376,17 +376,16 @@ fn a_node_whose_facts_stop_landing_fences_itself_and_must_be_relisted() {
 }
 
 #[test]
-fn no_fact_is_overdue_while_no_scheduler_is_wanted() {
+fn a_group_member_keeps_the_node_writing_facts_whether_held_or_waiting() {
     let standing = Standing::new();
-    let bound = Duration::from_secs(300);
-    let start = tokio::time::Instant::now();
-    // fence_self notes every check with no scheduler wanted as a due point.
-    for step in 1..=10u32 {
-        let now = start + bound * step;
-        standing.facts_due_from(now);
-        assert!(!standing.check_fence(now + bound, bound));
-    }
-    assert!(!*standing.fenced.borrow());
+    let other = Holds::start(&standing, "w");
+    assert_eq!(*standing.group_members.borrow(), 0);
+    let member = GroupMember::start(&standing);
+    assert_eq!(*standing.group_members.borrow(), 1);
+    drop(other);
+    assert_eq!(*standing.group_members.borrow(), 1);
+    drop(member);
+    assert_eq!(*standing.group_members.borrow(), 0);
 }
 
 #[test]

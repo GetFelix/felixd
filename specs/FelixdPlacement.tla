@@ -49,6 +49,10 @@
 (* SelfFence: such a node first fences itself, releasing what it holds    *)
 (* and claiming nothing until one of its facts lands; FelixdPlacement-    *)
 (* ForgetLiveNoFence is its twin.                                         *)
+(* StopPause lets a node that saw the scheduler stopped hold its fence    *)
+(* clock and its facts, as felixd did before #271, while a node with a    *)
+(* stale watch keeps appending: FelixdPlacementForgetStopPause. Without   *)
+(* it, a node holding a member appends through the stop.                  *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -79,6 +83,7 @@ CONSTANTS
     StartRelist,  \* whether a restarted node waits for the answer to a fact after its restart
     ForgetLive,   \* whether a live node may be forgotten
     SelfFence,    \* whether a node fences itself before it may be forgotten alive
+    StopPause,    \* whether a node holds its fence clock and its facts over a scheduler stop
     Barrier, SplitGuard, OneRecord, Fence, FactTakers, RecordHold, TailGate
 
 Nodes == 1..N
@@ -96,15 +101,16 @@ VARIABLES
     marked, drains,                       \* drain marks
     nodeCrashes, expires,
     applied,                              \* history: records agents claimed on
-    relistFrom, fenced                    \* relist nonce (input count when taken), self-fence
+    relistFrom, fenced,                   \* relist nonce (input count when taken), self-fence
+    paused                                \* fence clock held over a scheduler stop (StopPause)
 
 vars == <<inputs, admitted, st, pos, written, hist, epoch, up, stale, out,
           lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
-          nodeCrashes, expires, applied, relistFrom, fenced>>
+          nodeCrashes, expires, applied, relistFrom, fenced, paused>>
 
 \* What only agents change.
 agentVars == <<lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
-               nodeCrashes, expires, applied, relistFrom, fenced>>
+               nodeCrashes, expires, applied, relistFrom, fenced, paused>>
 
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
@@ -287,12 +293,14 @@ Fact(n) ==
     /\ nup[n] /\ Len(inputs) < MaxIn
     /\ \E b \in IF Blocking THEN BOOLEAN ELSE {FALSE},
           g \in {None} \cup (IF ForgetDown THEN {o \in Nodes \ {n} : ~nup[o]} ELSE {})
-                      \cup (IF ForgetLive THEN {o \in Nodes \ {n} : nup[o] /\ (~SelfFence \/ fenced[o])}
+                      \cup (IF ForgetLive THEN {o \in Nodes \ {n} :
+                                              nup[o] /\ (~SelfFence \/ fenced[o] \/ paused[o])}
                                           ELSE {}),
           t \in IF Stamps = {} \/ Holding(n) = {} THEN {0} ELSE Stamps :
         inputs' = Append(inputs, [k |-> "fact", n |-> n, hold |-> Holding(n), ts |-> t,
                                   blocked |-> b, draining |-> marked[n], gone |-> g])
     /\ fenced' = [fenced EXCEPT ![n] = FALSE]
+    /\ paused' = [paused EXCEPT ![n] = FALSE]
     /\ UNCHANGED <<admitted, st, pos, written, hist, epoch, up, stale, out,
                    lease, early, nup, since, gsince, view, rd, tgt, marked, drains,
                    nodeCrashes, expires, applied, relistFrom>>
@@ -337,7 +345,7 @@ Read(n) ==
           /\ tgt' = [tgt EXCEPT ![n] = IF done THEN 0 ELSE t]
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, since, gsince, marked, drains, nodeCrashes, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* One of the node's own steps for an admitted member. A clock starts only
 \* while the member is free, then runs until the node sees it held.
@@ -350,7 +358,7 @@ Tick(n, m) ==
     /\ gsince' = [gsince EXCEPT ![n][m] = IF admitted = Members /\ @ < Bound THEN @ + 1 ELSE @]
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* The node's lease watch shows the member held with time left, and
 \* wait_for_chance starts its clocks over. A watch may skip from one free
@@ -362,7 +370,7 @@ SeeHeld(n, m) ==
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* A fact of n at l that is not draining has been folded, and without
 \* UndrainRace n's view holds every record the scheduler wrote up to it.
@@ -403,7 +411,7 @@ Claim(n, m) ==
     /\ since' = [since EXCEPT ![n][m] = 0]
     /\ gsince' = [gsince EXCEPT ![n][m] = 0]
     /\ AgentUnchanged
-    /\ UNCHANGED <<nup, view, rd, tgt, marked, drains, nodeCrashes, expires, relistFrom, fenced>>
+    /\ UNCHANGED <<nup, view, rd, tgt, marked, drains, nodeCrashes, expires, relistFrom, fenced, paused>>
 
 \* A lease lapses: its holder is down, or lost it while alive and stops.
 Expire(m) ==
@@ -413,7 +421,7 @@ Expire(m) ==
     /\ lease' = [lease EXCEPT ![m] = None]
     /\ AgentUnchanged
     /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* The operator marks a node in `drains`. DrainNodes and DrainPlaced only split a
 \* run's drain space into configs whose union is the unsplit one.
@@ -425,7 +433,7 @@ Drain(n) ==
     /\ drains' = drains + 1
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, since, gsince, view, rd, tgt, nodeCrashes, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* The operator lifts the mark (drain::lift) and wait_for_chance goes on
 \* with the view it has. Without UndrainRace the node reads `out` afresh
@@ -439,7 +447,7 @@ Lift(n) ==
             /\ tgt' = [tgt EXCEPT ![n] = 0]
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, nup, since, gsince, drains, nodeCrashes, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* A drained node's task stops and releases its lease.
 Release(m) ==
@@ -447,17 +455,29 @@ Release(m) ==
     /\ lease' = [lease EXCEPT ![m] = None]
     /\ AgentUnchanged
     /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 \* A live node whose own facts have not landed for a while stops its
 \* workloads, releases every member it holds and takes a new relist nonce.
 FenceSelf(n) ==
-    /\ SelfFence /\ ForgetLive /\ nup[n] /\ ~fenced[n]
+    /\ SelfFence /\ ForgetLive /\ nup[n] /\ ~fenced[n] /\ ~paused[n]
     /\ fenced' = [fenced EXCEPT ![n] = TRUE]
     /\ lease' = [m \in Members |-> IF lease[m] = n THEN None ELSE lease[m]]
     /\ relistFrom' = [relistFrom EXCEPT ![n] = Len(inputs)]
     /\ AgentUnchanged
-    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied>>
+    /\ UNCHANGED <<early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires, applied,
+                   paused>>
+
+\* With StopPause, a node reads the scheduler stopped and holds its fence
+\* clock and its facts until a fact of its own ends the pause. Another
+\* node's facts may still land meanwhile (a stale watch), so the scheduler
+\* may forget it while it runs a member.
+Pause(n) ==
+    /\ StopPause /\ nup[n] /\ ~fenced[n] /\ ~paused[n]
+    /\ paused' = [paused EXCEPT ![n] = TRUE]
+    /\ AgentUnchanged
+    /\ UNCHANGED <<lease, early, nup, since, gsince, view, rd, tgt, marked, drains, nodeCrashes, expires,
+                   applied, relistFrom, fenced>>
 
 \* CrashNodes, CrashEpochs and CrashPlaced only split a run's crash space
 \* into configs whose union is the unsplit one.
@@ -469,7 +489,7 @@ NodeCrash(n) ==
     /\ nodeCrashes' = nodeCrashes + 1
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, view, rd, tgt, since, gsince, marked, drains, expires, applied,
-                   relistFrom, fenced>>
+                   relistFrom, fenced, paused>>
 
 Forgets(j, n) == inputs[j].k = "fact" /\ inputs[j].gone = n
 
@@ -509,6 +529,7 @@ NodeRestart(n) ==
     /\ gsince' = [gsince EXCEPT ![n] = [m \in Members |-> 0]]
     /\ relistFrom' = [relistFrom EXCEPT ![n] = IF StartRelist THEN Len(inputs) ELSE 0]
     /\ fenced' = [fenced EXCEPT ![n] = FALSE]
+    /\ paused' = [paused EXCEPT ![n] = FALSE]
     /\ AgentUnchanged
     /\ UNCHANGED <<lease, early, marked, drains, nodeCrashes, expires, applied>>
 
@@ -531,12 +552,14 @@ Init ==
     /\ applied = {}
     /\ relistFrom = [n \in Nodes |-> 0]
     /\ fenced = [n \in Nodes |-> FALSE]
+    /\ paused = [n \in Nodes |-> FALSE]
 
 Next ==
     \/ SchedStep \/ SchedCrash \/ SchedTakeover \/ StaleWrite
     \/ \E m \in Members : Admit(m) \/ Expire(m) \/ Release(m)
     \/ \E n \in Nodes : Fact(n) \/ Lapse(n) \/ Read(n) \/ Drain(n) \/ Lift(n)
                         \/ NodeCrash(n) \/ NodeRestart(n) \/ FenceSelf(n)
+                        \/ Pause(n)
     \/ \E n \in Nodes, m \in Members : Tick(n, m) \/ SeeHeld(n, m) \/ Claim(n, m)
 
 Spec == Init /\ [][Next]_vars
@@ -609,5 +632,6 @@ TypeOK ==
     /\ pos <= Len(inputs) /\ written <= Len(inputs)
     /\ relistFrom \in [Nodes -> 0..MaxIn]
     /\ fenced \in [Nodes -> BOOLEAN]
+    /\ paused \in [Nodes -> BOOLEAN]
     /\ \A n \in Nodes : (SelfFence /\ fenced[n]) => Holding(n) = {}
 =============================================================================

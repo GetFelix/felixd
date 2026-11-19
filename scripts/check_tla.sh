@@ -158,6 +158,9 @@ felixd_placement_expectations=(
   # Without the self-fence (felixd #251): a live node is forgotten while it
   # runs a member and the scheduler moves the group.
   "FelixdPlacementForgetLiveNoFence violates GroupTogether"
+  # With the fence clock and facts held over a scheduler stop (felixd #271):
+  # a stale node's facts forget a holder that went quiet.
+  "FelixdPlacementForgetStopPause violates GroupTogether"
   # A known gap, felixd #256: an undrained node claims on its view from
   # before the drain while the group moved.
   "FelixdPlacementUndrainStale violates GroupTogether"

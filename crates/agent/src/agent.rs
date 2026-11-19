@@ -94,7 +94,7 @@ const CHECK_ASSIGNEE_EVERY: Duration = Duration::from_secs(1);
 const CLAIMS_AT_ONCE: usize = 8;
 
 /// How many of its fact intervals a node keeps its group members with none
-/// of its facts landing while a scheduler is wanted. The scheduler forgets a
+/// of its facts landing. The scheduler forgets a
 /// node after [`FORGET_INTERVALS`] of that and may then move its groups, so
 /// a live node stops them well before (#251).
 const FENCE_INTERVALS: u32 = 10;
@@ -185,6 +185,10 @@ struct Standing {
     claiming: AtomicUsize,
     /// The workloads this node holds.
     holding: std::sync::Mutex<BTreeSet<String>>,
+    /// How many group members this node holds or waits to claim. While any
+    /// is, it appends facts whether or not a scheduler is wanted (#271), so
+    /// a fence lifts only on a fact that landed.
+    group_members: watch::Sender<usize>,
     /// It cannot read its drain mark, so it claims nothing.
     blocked: AtomicBool,
     /// Notified when what this node writes to `nodes` should change now.
@@ -201,11 +205,10 @@ struct Standing {
     /// before a drain and lift, or a fence and its end, is not made on that
     /// decision.
     drain_changes: AtomicU64,
-    /// No fact of this node has landed for [`FENCE_INTERVALS`] while a
-    /// scheduler is wanted: it runs and claims no group member.
+    /// No fact of this node has landed for [`FENCE_INTERVALS`]: it runs and
+    /// claims no group member.
     fenced: watch::Sender<bool>,
-    /// When a fact of this node last landed, or it last saw no scheduler
-    /// wanted, when no fact is due.
+    /// When a fact of this node last landed.
     facts_from: std::sync::Mutex<tokio::time::Instant>,
 }
 
@@ -220,6 +223,7 @@ impl Standing {
             draining: watch::channel(false).0,
             claiming: AtomicUsize::new(0),
             holding: std::sync::Mutex::new(BTreeSet::new()),
+            group_members: watch::channel(0).0,
             blocked: AtomicBool::new(false),
             announce_now: Notify::new(),
             relist: AtomicU64::new(seed),
@@ -230,14 +234,13 @@ impl Standing {
         }
     }
 
-    /// Notes that no fact is overdue as of `at`: one landed, or no
-    /// scheduler is wanted.
+    /// Notes that a fact of this node landed at `at`.
     fn facts_due_from(&self, at: tokio::time::Instant) {
         let mut from = self.facts_from.lock().unwrap_or_else(|e| e.into_inner());
         *from = (*from).max(at);
     }
 
-    /// Fences this node once no fact has been due-and-landed for `bound`
+    /// Fences this node once no fact of it has landed for `bound`
     /// as of `now`, and ends the fence once one has. A fence takes a new
     /// relist nonce: the scheduler may forget this node meanwhile and move
     /// its groups, so a record that places a member here is trusted again
@@ -365,6 +368,23 @@ impl Drop for Holds<'_> {
     fn drop(&mut self) {
         let mut holding = self.0.holding.lock().unwrap_or_else(|e| e.into_inner());
         holding.remove(&self.1);
+    }
+}
+
+/// A group member's task, counted in [`Standing::group_members`] from before
+/// its first claim until it ends, holding or not.
+struct GroupMember<'a>(&'a Standing);
+
+impl<'a> GroupMember<'a> {
+    fn start(standing: &'a Standing) -> GroupMember<'a> {
+        standing.group_members.send_modify(|n| *n += 1);
+        GroupMember(standing)
+    }
+}
+
+impl Drop for GroupMember<'_> {
+    fn drop(&mut self) {
+        self.0.group_members.send_modify(|n| *n -= 1);
     }
 }
 
@@ -696,9 +716,9 @@ async fn follow_drain(node: Arc<Node>) {
     }
 }
 
-/// Appends this node's facts for the scheduler while one runs: every
-/// `facts_every`, and soon after what it holds or whether it can take work
-/// changes.
+/// Appends this node's facts for the scheduler while one runs or this node
+/// has a group member to hold or claim: every `facts_every`, and soon after what it holds
+/// or whether it can take work changes.
 async fn write_facts(node: Arc<Node>) {
     let fact = || {
         // So a node relisted with no group member to claim stops asking.
@@ -714,6 +734,7 @@ async fn write_facts(node: Arc<Node>) {
     assignments::write_facts(
         &node.felix,
         &node.assignments,
+        node.standing.group_members.subscribe(),
         node.facts_every,
         fact,
         landed,
@@ -721,48 +742,28 @@ async fn write_facts(node: Arc<Node>) {
     .await;
 }
 
-/// Fences this node while none of its facts land and a scheduler is wanted
-/// (see [`FENCE_INTERVALS`]): the tasks of its group members stop and
-/// release their leases, and it claims no group member until a fact lands.
-/// A stop of the scheduler pauses the clock only once it has lasted longer
-/// than a silent window, as the scheduler pauses only such a gap, and only
-/// on a fresh read, since a stale watch is no evidence.
+/// Fences this node while none of its facts land (see [`FENCE_INTERVALS`]):
+/// the tasks of its group members stop and release their leases, and it
+/// claims no group member until a fact lands. The clock never pauses, not
+/// even for a scheduler stop: a node with a member appends facts through
+/// a stop, so only a node whose facts do not land can be forgotten while it
+/// runs one, and that node has fenced first (#271).
 async fn fence_self(node: Arc<Node>) {
     let bound = fence_bound(node.facts_every);
-    let quiet = node
-        .facts_every
-        .saturating_mul(felixd_core::schedule::SILENT_INTERVALS as u32);
-    let mut scheduler = node.assignments.scheduler_changes();
-    let mut stopped_since = None;
-    let mut last_read = None;
     loop {
         let now = tokio::time::Instant::now();
-        if *scheduler.borrow_and_update() {
-            stopped_since = None;
-        } else {
-            let since = *stopped_since.get_or_insert(now);
-            let read_due =
-                last_read.is_none_or(|at| now.saturating_duration_since(at) >= node.facts_every);
-            if now.saturating_duration_since(since) > quiet && read_due {
-                last_read = Some(now);
-                if scheduler_stopped(&node.felix).await {
-                    node.standing.facts_due_from(now);
-                }
-            }
-        }
         if node.standing.check_fence(now, bound) {
+            let members = *node.standing.group_members.borrow();
             match *node.standing.fenced.borrow() {
-                true => tracing::warn!(
+                true if members > 0 => tracing::warn!(
                     ?bound,
                     "no fact of this node has landed: releasing its group members"
                 ),
+                true => tracing::debug!(?bound, "no fact of this node has landed: fenced"),
                 false => tracing::info!("a fact of this node landed again"),
             }
         }
-        tokio::select! {
-            () = tokio::time::sleep(CHECK_FENCE_EVERY) => {}
-            _ = scheduler.changed() => {}
-        }
+        tokio::time::sleep(CHECK_FENCE_EVERY).await;
     }
 }
 
@@ -773,15 +774,6 @@ fn fence_bound(every: Duration) -> Duration {
     let floor = assignments::WITHIN + CHECK_FENCE_EVERY;
     let most = every.saturating_mul((FORGET_INTERVALS / 2) as u32);
     floor.clamp(every.saturating_mul(FENCE_INTERVALS), most)
-}
-
-/// Whether a read of the scheduler's spec finds it not running.
-async fn scheduler_stopped(felix: &Felix) -> bool {
-    match felix.cache_get(names::WORKLOADS, names::SCHEDULER).await {
-        Ok(None) => true,
-        Ok(Some(v)) => WorkloadSpec::decode(&v).is_ok_and(|s| s.state != WorkloadState::Running),
-        Err(_) => false,
-    }
 }
 
 const CANNOT_READ_MARK: &str = "could not read this node's drain mark, claiming nothing \
@@ -939,6 +931,12 @@ async fn own(
     mut lease: watch::Receiver<Seen>,
     mut stop: watch::Receiver<bool>,
 ) {
+    // Before anything that can claim: a member waiting on a fence needs a
+    // fact to land to lift it, and its node writes facts only while counted.
+    let _member = spec
+        .group
+        .is_some()
+        .then(|| GroupMember::start(&node.standing));
     // What is found before the lease claim. It is recorded under a claim, so
     // that the record is fenced like a failure and the other nodes skip the
     // workload instead of finding the same thing.

@@ -119,7 +119,7 @@ The agent's own flags, all optional:
 | `--claim-delay-ms` | 1000 | The longest random wait before claiming a free workload, so the first node to see it does not take everything |
 | `--stuck-after-ms` | 60000, or the TTL if longer | How long a held workload may keep failing on a transient error, with no progress, before the node records it as degraded and releases it. At least the TTL; 0 turns it off |
 | `--degraded-backoff-ms` | 120000 | How long a node leaves a workload alone after releasing it as degraded, so another node gets a turn |
-| `--assignment-bound-ms`, `--assignment-grace-ms`, `--facts-every-ms` | 15000, 2000, three TTLs | Only matter while a [scheduler](design.md#placement) runs |
+| `--assignment-bound-ms`, `--assignment-grace-ms`, `--facts-every-ms` | 15000, 2000, three TTLs | Only matter while a [scheduler](design.md#placement) runs, except that a node with a group member appends facts every `--facts-every-ms` and fences after ten of them without one landing |
 | `--group-bound-ms` | 180000 | How long a member of a [group](design.md#incremental-by-default-a-group-all-or-nothing) waits for its group's placement before it is claimed anywhere and the group runs split. Keep it above three fact intervals plus a placement round, or a node death splits the group |
 | `--metrics-bind` (`FELIXD_METRICS_BIND`) | off | Serve Prometheus metrics, such as `127.0.0.1:9464` |
 | `--metrics-max-workloads` | 100 | Workloads that get their own metric series |
@@ -365,10 +365,13 @@ answered a fact of it that does not say draining. A scheduler module older than 
 answers, so those members wait for `--group-bound-ms`. Upgrade the scheduler with
 `felixd run --id scheduler --upgrade-at <offset> scheduler.wasm` along with the agents.
 
-A node that cannot append to `sys.facts` for ten `--facts-every-ms` while the scheduler runs
-releases its group members and logs `no fact of this node has landed`. It takes them back once a
+A node that cannot append to `sys.facts` for ten `--facts-every-ms` releases its group members and logs `no fact of this node has landed`. It takes them back once a
 fact lands and the scheduler answers it. Look at the node's connection to the broker that leads
 `sys.facts`.
+A node with a group member to hold or claim keeps appending facts while the scheduler is
+stopped, so a stop by itself releases nothing; a node with no group member sends no facts
+then. A member the record places on a node that fenced is claimed there again only once the
+scheduler is back and has answered one of its facts.
 
 Builds after 0.1.0-preview.1 leave a workload alone when they meet a record from a newer build,
 instead of failing it. Upgrade every node before you rely on a feature of the new build.
